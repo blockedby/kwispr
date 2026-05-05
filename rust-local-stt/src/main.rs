@@ -209,7 +209,7 @@ impl VadConfig {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.enabled && self.frame_ms == 0 { return Err(anyhow!("VAD frame ms must be greater than 0")); }
+        if self.frame_ms == 0 { return Err(anyhow!("VAD frame ms must be greater than 0")); }
         if self.enabled && !self.threshold.is_finite() { return Err(anyhow!("VAD threshold must be finite")); }
         if self.enabled && self.threshold < 0.0 { return Err(anyhow!("VAD threshold must be non-negative")); }
         if self.enabled && self.provider == VadProvider::Silero && self.model_path.is_none() { return Err(anyhow!("Silero VAD requires KWISPR_VAD_MODEL=/path/to/silero_vad_v4.onnx or --vad-model")); }
@@ -259,6 +259,9 @@ impl IntoResponse for ApiError { fn into_response(self) -> Response { (self.0, J
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_vad() -> VadConfig { VadConfig { enabled: true, provider: VadProvider::Energy, model_path: None, threshold: 0.01, frame_ms: 10, min_speech_ms: 30, padding_ms: 10 } }
 
@@ -316,6 +319,39 @@ mod tests {
         let audio = DecodedAudio { samples: vec![0.0; 1600], sample_rate: 16_000 };
         let err = preprocess_audio(audio, &VadConfig { frame_ms: 0, ..test_vad() }).unwrap_err();
         assert!(err.to_string().contains("VAD frame ms must be greater than 0"));
+    }
+
+    #[test]
+    fn vad_rejects_zero_frame_ms_even_when_disabled() {
+        let err = VadConfig { enabled: false, frame_ms: 0, ..test_vad() }.validate().unwrap_err();
+        assert!(err.to_string().contains("VAD frame ms must be greater than 0"));
+    }
+
+    #[test]
+    fn vad_rejects_zero_frame_ms_from_env_at_startup_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let vars = [
+            "KWISPR_VAD_ENABLED",
+            "KWISPR_VAD_PROVIDER",
+            "KWISPR_VAD_MODEL",
+            "KWISPR_VAD_THRESHOLD",
+            "KWISPR_VAD_FRAME_MS",
+            "KWISPR_VAD_MIN_SPEECH_MS",
+            "KWISPR_VAD_PADDING_MS",
+        ];
+        let saved: Vec<_> = vars.iter().map(|name| (*name, env::var(name).ok())).collect();
+        for name in vars { env::remove_var(name); }
+        env::set_var("KWISPR_VAD_FRAME_MS", "0");
+
+        let err = VadConfig::from_env_and_args().unwrap_err();
+        assert!(err.to_string().contains("VAD frame ms must be greater than 0"));
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
     }
 
     #[test]
