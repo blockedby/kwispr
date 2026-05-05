@@ -83,32 +83,39 @@ void SettingsDialog::buildUi()
     m_backendCombo = new QComboBox(backendGroup);
     m_backendCombo->setObjectName(QStringLiteral("backendCombo"));
     m_backendCombo->addItems({QStringLiteral("Local STT"), QStringLiteral("OpenAI"), QStringLiteral("OpenRouter")});
+    m_backendCombo->setToolTip(QStringLiteral("Choose Local STT for downloaded on-device models, OpenAI for Whisper API, or OpenRouter for chat-based transcription."));
     backendForm->addRow(QStringLiteral("Backend"), m_backendCombo);
 
     m_apiUrlEdit = new QLineEdit(backendGroup);
     m_apiUrlEdit->setObjectName(QStringLiteral("apiUrlEdit"));
+    m_apiUrlEdit->setToolTip(QStringLiteral("Endpoint used for transcription. Presets fill this automatically; edit only for a compatible custom service."));
     backendForm->addRow(QStringLiteral("API URL"), m_apiUrlEdit);
 
     m_apiKeyEdit = new QLineEdit(backendGroup);
     m_apiKeyEdit->setObjectName(QStringLiteral("apiKeyEdit"));
     m_apiKeyEdit->setEchoMode(QLineEdit::Password);
+    m_apiKeyEdit->setToolTip(QStringLiteral("Required for hosted OpenAI/OpenRouter backends. Leave empty for Local STT."));
     backendForm->addRow(QStringLiteral("API key"), m_apiKeyEdit);
 
     m_modelEdit = new QLineEdit(backendGroup);
     m_modelEdit->setObjectName(QStringLiteral("modelEdit"));
+    m_modelEdit->setToolTip(QStringLiteral("Model identifier sent to the selected backend. For Local STT, use an installed model from the list below."));
     backendForm->addRow(QStringLiteral("Model"), m_modelEdit);
 
     m_localModelCombo = new QComboBox(backendGroup);
     m_localModelCombo->setObjectName(QStringLiteral("localModelCombo"));
+    m_localModelCombo->setToolTip(QStringLiteral("Local models from the catalog. Installed status is detected from your model directory."));
     backendForm->addRow(QStringLiteral("Local model"), m_localModelCombo);
 
     m_languageEdit = new QLineEdit(backendGroup);
     m_languageEdit->setObjectName(QStringLiteral("languageEdit"));
+    m_languageEdit->setToolTip(QStringLiteral("Optional language hint such as en or ru. Leave blank to auto-detect when supported."));
     backendForm->addRow(QStringLiteral("Language"), m_languageEdit);
 
     m_promptEdit = new QPlainTextEdit(backendGroup);
     m_promptEdit->setObjectName(QStringLiteral("promptEdit"));
     m_promptEdit->setMinimumHeight(80);
+    m_promptEdit->setToolTip(QStringLiteral("Optional transcription guidance, especially useful for OpenRouter/chat backends."));
     backendForm->addRow(QStringLiteral("Prompt"), m_promptEdit);
     root->addWidget(backendGroup);
 
@@ -122,6 +129,7 @@ void SettingsDialog::buildUi()
     m_pasteHotkeyCombo->setObjectName(QStringLiteral("pasteHotkeyCombo"));
     m_pasteHotkeyCombo->setEditable(true);
     m_pasteHotkeyCombo->addItems({QStringLiteral("shift-insert"), QStringLiteral("ctrl-v"), QStringLiteral("ctrl-shift-v")});
+    m_pasteHotkeyCombo->setToolTip(QStringLiteral("Keyboard shortcut Kwispr sends when auto-pasting into the active window."));
     pasteForm->addRow(QStringLiteral("Paste hotkey"), m_pasteHotkeyCombo);
 
     m_autopasteDelaySpin = new QDoubleSpinBox(pasteGroup);
@@ -129,6 +137,7 @@ void SettingsDialog::buildUi()
     m_autopasteDelaySpin->setRange(0.0, 10.0);
     m_autopasteDelaySpin->setDecimals(2);
     m_autopasteDelaySpin->setSingleStep(0.05);
+    m_autopasteDelaySpin->setToolTip(QStringLiteral("Seconds to wait after transcription before sending the paste hotkey."));
     pasteForm->addRow(QStringLiteral("Paste delay"), m_autopasteDelaySpin);
     root->addWidget(pasteGroup);
 
@@ -141,10 +150,12 @@ void SettingsDialog::buildUi()
     m_vadProviderCombo = new QComboBox(vadGroup);
     m_vadProviderCombo->setObjectName(QStringLiteral("vadProviderCombo"));
     m_vadProviderCombo->addItems({QStringLiteral("energy"), QStringLiteral("silero")});
+    m_vadProviderCombo->setToolTip(QStringLiteral("Energy is lightweight; Silero requires a local ONNX model path."));
     vadForm->addRow(QStringLiteral("Provider"), m_vadProviderCombo);
 
     m_vadModelPathEdit = new QLineEdit(vadGroup);
     m_vadModelPathEdit->setObjectName(QStringLiteral("vadModelPathEdit"));
+    m_vadModelPathEdit->setToolTip(QStringLiteral("Path to the Silero VAD ONNX model, required only when provider is silero."));
     vadForm->addRow(QStringLiteral("Silero model"), m_vadModelPathEdit);
 
     m_vadThresholdSpin = new QDoubleSpinBox(vadGroup);
@@ -152,10 +163,12 @@ void SettingsDialog::buildUi()
     m_vadThresholdSpin->setRange(0.0, 100.0);
     m_vadThresholdSpin->setDecimals(4);
     m_vadThresholdSpin->setSingleStep(0.05);
+    m_vadThresholdSpin->setToolTip(QStringLiteral("Voice activity threshold. Higher values are stricter about what counts as speech."));
     vadForm->addRow(QStringLiteral("Threshold"), m_vadThresholdSpin);
 
     m_vadFrameMsEdit = new QLineEdit(vadGroup);
     m_vadFrameMsEdit->setObjectName(QStringLiteral("vadFrameMsEdit"));
+    m_vadFrameMsEdit->setToolTip(QStringLiteral("Frame duration in milliseconds for VAD analysis; keep positive."));
     vadForm->addRow(QStringLiteral("Frame ms"), m_vadFrameMsEdit);
     root->addWidget(vadGroup);
 
@@ -164,6 +177,11 @@ void SettingsDialog::buildUi()
     root->addWidget(m_buttons);
 
     connect(m_backendCombo, &QComboBox::currentTextChanged, this, &SettingsDialog::applyBackendPreset);
+    connect(m_localModelCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (index >= 0 && m_backendCombo->currentText() == QLatin1String("Local STT")) {
+            m_modelEdit->setText(m_localModelCombo->itemData(index).toString());
+        }
+    });
     connect(m_buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, this, &SettingsDialog::save);
     connect(m_buttons, &QDialogButtonBox::accepted, this, [this]() {
         if (save()) {

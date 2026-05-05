@@ -12,6 +12,7 @@ private slots:
     void openRouterPresetWritesChatBackendKeys();
     void pasteHotkeyValidationAllowsOnlySupportedValues();
     void vadValidationMatchesRuntimeRequirements();
+    void readsSettingsFromEnvWithDefaults();
 };
 
 void SettingsModelTest::localPresetWritesLocalSttKeys()
@@ -82,6 +83,27 @@ void SettingsModelTest::pasteHotkeyValidationAllowsOnlySupportedValues()
     QStringList errors;
     QVERIFY(!settings.validate(&errors));
     QVERIFY(errors.join('\n').contains("paste hotkey"));
+}
+
+void SettingsModelTest::readsSettingsFromEnvWithDefaults()
+{
+    EnvFile env;
+    env.setValue("KWISPR_API_URL", "http://127.0.0.1:9000/v1/audio/transcriptions");
+    env.setValue("KWISPR_MODEL", "whisper-large-v3-turbo");
+    env.setValue("KWISPR_MODEL_DIR", "/tmp/kwispr-models");
+    env.setValue("KWISPR_AUTOPASTE", "0");
+    env.setValue("KWISPR_VAD", "1");
+    env.setValue("KWISPR_VAD_THRESHOLD", "0.42");
+
+    const KwisprSettings settings = KwisprSettings::fromEnv(env);
+
+    QCOMPARE(settings.apiUrl, QString("http://127.0.0.1:9000/v1/audio/transcriptions"));
+    QCOMPARE(settings.model, QString("whisper-large-v3-turbo"));
+    QCOMPARE(settings.modelDir, QString("/tmp/kwispr-models"));
+    QVERIFY(!settings.autopaste);
+    QVERIFY(settings.vadEnabled);
+    QCOMPARE(settings.vadThreshold, 0.42);
+    QCOMPARE(settings.pasteHotkey, QString("shift-insert"));
 }
 
 void SettingsModelTest::vadValidationMatchesRuntimeRequirements()

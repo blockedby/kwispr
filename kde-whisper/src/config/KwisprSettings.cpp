@@ -4,6 +4,8 @@
 
 #include <cmath>
 
+#include <QMap>
+
 namespace {
 constexpr const char *LocalTranscriptionsUrl = "http://127.0.0.1:9000/v1/audio/transcriptions";
 constexpr const char *OpenAiTranscriptionsUrl = "https://api.openai.com/v1/audio/transcriptions";
@@ -46,6 +48,57 @@ void KwisprSettings::applyOpenRouterPreset(const QString &key, const QString &op
     audioFormat = format;
     openRouterReferer = "https://github.com/blockedby/kwispr";
     openRouterAppTitle = "KDE Whisper";
+}
+
+KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
+{
+    KwisprSettings settings;
+    const QMap<QString, QString> defaults = EnvFile::defaults();
+    auto value = [&env, &defaults](const QString &key, const QString &fallback = QString()) {
+        return env.value(key, defaults.value(key, fallback));
+    };
+    auto boolValue = [&value](const QString &key, bool fallback) {
+        const QString raw = value(key, fallback ? QStringLiteral("1") : QStringLiteral("0")).trimmed().toLower();
+        if (raw == QLatin1String("1") || raw == QLatin1String("true") || raw == QLatin1String("yes")) {
+            return true;
+        }
+        if (raw == QLatin1String("0") || raw == QLatin1String("false") || raw == QLatin1String("no")) {
+            return false;
+        }
+        return fallback;
+    };
+
+    settings.backend = value(QStringLiteral("KWISPR_BACKEND"), settings.backend);
+    settings.apiUrl = value(QStringLiteral("KWISPR_API_URL"), settings.apiUrl);
+    settings.apiKey = value(QStringLiteral("KWISPR_API_KEY"), settings.apiKey);
+    settings.model = value(QStringLiteral("KWISPR_MODEL"), settings.model);
+    settings.language = value(QStringLiteral("KWISPR_LANGUAGE"), settings.language);
+    settings.modelDir = value(QStringLiteral("KWISPR_MODEL_DIR"), settings.modelDir);
+    settings.audioFormat = value(QStringLiteral("KWISPR_AUDIO_FORMAT"), settings.audioFormat);
+    settings.transcriptionPrompt = value(QStringLiteral("KWISPR_TRANSCRIPTION_PROMPT"), settings.transcriptionPrompt);
+    settings.openRouterReferer = value(QStringLiteral("KWISPR_OPENROUTER_HTTP_REFERER"), settings.openRouterReferer);
+    settings.openRouterAppTitle = value(QStringLiteral("KWISPR_OPENROUTER_APP_TITLE"), settings.openRouterAppTitle);
+    settings.autopaste = boolValue(QStringLiteral("KWISPR_AUTOPASTE"), settings.autopaste);
+    settings.pasteHotkey = value(QStringLiteral("KWISPR_PASTE_HOTKEY"), settings.pasteHotkey);
+    bool ok = false;
+    const double delay = value(QStringLiteral("KWISPR_AUTOPASTE_DELAY"), QString::number(settings.autopasteDelay)).toDouble(&ok);
+    if (ok) {
+        settings.autopasteDelay = delay;
+    }
+    settings.sounds = boolValue(QStringLiteral("KWISPR_SOUNDS"), settings.sounds);
+    settings.pulseSource = value(QStringLiteral("KWISPR_PULSE_SOURCE"), settings.pulseSource);
+    settings.vadEnabled = boolValue(QStringLiteral("KWISPR_VAD"), settings.vadEnabled);
+    settings.vadProvider = value(QStringLiteral("KWISPR_VAD_PROVIDER"), settings.vadProvider);
+    settings.vadModelPath = value(QStringLiteral("KWISPR_VAD_MODEL"), settings.vadModelPath);
+    const double threshold = value(QStringLiteral("KWISPR_VAD_THRESHOLD"), QString::number(settings.vadThreshold)).toDouble(&ok);
+    if (ok) {
+        settings.vadThreshold = threshold;
+    }
+    const int frameMs = value(QStringLiteral("KWISPR_VAD_FRAME_MS"), QString::number(settings.vadFrameMs)).toInt(&ok);
+    if (ok) {
+        settings.vadFrameMs = frameMs;
+    }
+    return settings;
 }
 
 void KwisprSettings::writeTo(EnvFile &env) const

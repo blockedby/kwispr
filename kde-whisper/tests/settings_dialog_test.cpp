@@ -18,6 +18,8 @@ private slots:
     void apiKeyIsPasswordAndValidationDoesNotLeakSecret();
     void saveWritesThroughEnvFileWhenValid();
     void modelComboShowsNotInstalledModels();
+    void localModelComboSelectsActiveModelAndUpdatesModelField();
+    void importantFieldsHaveHelpTooltips();
 };
 
 static ModelCatalog sampleCatalog()
@@ -104,6 +106,37 @@ void SettingsDialogTest::saveWritesThroughEnvFileWhenValid()
     QCOMPARE(env.value("KWISPR_LANGUAGE"), QStringLiteral("ru"));
     QCOMPARE(env.value("KWISPR_TRANSCRIPTION_PROMPT"), QStringLiteral("Keep slang"));
     QCOMPARE(env.value("KWISPR_AUTOPASTE"), QStringLiteral("1"));
+}
+
+void SettingsDialogTest::localModelComboSelectsActiveModelAndUpdatesModelField()
+{
+    KwisprSettings settings;
+    settings.applyLocalPreset(QStringLiteral("parakeet-tdt"), QString(), QString());
+    SettingsDialog dialog(settings, sampleCatalog(), {QStringLiteral("parakeet-tdt")});
+
+    auto *models = dialog.findChild<QComboBox *>("localModelCombo");
+    auto *modelEdit = dialog.findChild<QLineEdit *>("modelEdit");
+    QCOMPARE(models->currentData().toString(), QStringLiteral("parakeet-tdt"));
+    QCOMPARE(modelEdit->text(), QStringLiteral("parakeet-tdt"));
+
+    dialog.findChild<QComboBox *>("backendCombo")->setCurrentText(QStringLiteral("Local STT"));
+    models->setCurrentIndex(0);
+    QCOMPARE(modelEdit->text(), QStringLiteral("whisper-large-v3-turbo"));
+}
+
+void SettingsDialogTest::importantFieldsHaveHelpTooltips()
+{
+    KwisprSettings settings;
+    SettingsDialog dialog(settings, sampleCatalog(), {});
+
+    QVERIFY(!dialog.findChild<QComboBox *>("backendCombo")->toolTip().isEmpty());
+    QVERIFY(!dialog.findChild<QLineEdit *>("apiUrlEdit")->toolTip().isEmpty());
+    QVERIFY(!dialog.findChild<QLineEdit *>("modelEdit")->toolTip().isEmpty());
+    QVERIFY(!dialog.findChild<QComboBox *>("localModelCombo")->toolTip().isEmpty());
+    QVERIFY(!dialog.findChild<QLineEdit *>("languageEdit")->toolTip().isEmpty());
+    QVERIFY(!dialog.findChild<QPlainTextEdit *>("promptEdit")->toolTip().isEmpty());
+    QVERIFY(!dialog.findChild<QDoubleSpinBox *>("autopasteDelaySpin")->toolTip().isEmpty());
+    QVERIFY(!dialog.findChild<QDoubleSpinBox *>("vadThresholdSpin")->toolTip().isEmpty());
 }
 
 void SettingsDialogTest::modelComboShowsNotInstalledModels()

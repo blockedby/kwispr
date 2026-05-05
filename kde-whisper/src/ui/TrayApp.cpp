@@ -1,7 +1,9 @@
 #include "ui/TrayApp.h"
 
+#include "config/EnvFile.h"
 #include "config/KwisprSettings.h"
 #include "models/ModelCatalog.h"
+#include "models/ModelManager.h"
 #include "runtime/KwisprController.h"
 #include "runtime/LocalSttClient.h"
 #include "runtime/LocalSttProcess.h"
@@ -15,6 +17,19 @@
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QUrl>
+
+namespace {
+QString expandHome(QString path)
+{
+    if (path == QLatin1String("~")) {
+        return QDir::homePath();
+    }
+    if (path.startsWith(QStringLiteral("~/"))) {
+        return QDir::homePath() + path.mid(1);
+    }
+    return path;
+}
+}
 
 TrayApp::TrayApp(QString repoRoot, QString cacheDir, QObject *parent)
     : QObject(parent)
@@ -44,9 +59,31 @@ void TrayApp::toggleRecording()
 
 void TrayApp::openSettings()
 {
-    KwisprSettings settings;
-    const ModelCatalog catalog = ModelCatalog::load(m_repoRoot + QStringLiteral("/models/local-stt-catalog.json"));
-    SettingsDialog dialog(settings, catalog, {}, nullptr);
+    const QString envPath = QDir(m_repoRoot).filePath(QStringLiteral(".env"));
+    EnvFile env;
+    env.load(envPath);
+    KwisprSettings settings = KwisprSettings::fromEnv(env);
+    if (settings.modelDir.isEmpty()) {
+        settings.modelDir = QDir::homePath() + QStringLiteral("/.local/share/kwispr/models");
+    } else {
+        settings.modelDir = expandHome(settings.modelDir);
+    }
+
+    const QString catalogPath = QDir(m_repoRoot).filePath(QStringLiteral("models/local-stt-catalog.json"));
+    const ModelCatalog catalog = ModelCatalog::load(catalogPath);
+    ModelManager modelManager(m_repoRoot, catalogPath, settings.modelDir);
+    const QMap<QString, bool> installedStatus = modelManager.listInstalledStatus();
+    QStringList installedModelIds;
+    for (auto it = installedStatus.cbegin(); it != installedStatus.cend(); ++it) {
+        if (it.value()) {
+            installedModelIds.append(it.key());
+        }
+    }
+
+    SettingsDialog dialog(settings, catalog, installedModelIds, &env, nullptr);
+    connect(&dialog, &SettingsDialog::settingsSaved, this, [&env, envPath]() {
+        env.save(envPath);
+    });
     dialog.exec();
 }
 
