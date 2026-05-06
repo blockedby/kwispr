@@ -6,7 +6,15 @@ use std::{collections::HashMap, env, io::Cursor, net::SocketAddr, path::{Path, P
 use transcribe_rs::{onnx::{gigaam::GigaAMModel, parakeet::{ParakeetModel, ParakeetParams, TimestampGranularity}, Quantization}, vad::{SileroVad, SmoothedVad, Vad}, whisper_cpp::{WhisperEngine, WhisperInferenceParams}, SpeechModel, TranscribeOptions};
 
 static ENGINE_CACHE: Lazy<Mutex<HashMap<String, LoadedEngine>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
+
+fn max_upload_bytes() -> usize {
+    env::var("KWISPR_MAX_UPLOAD_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_UPLOAD_BYTES)
+}
 
 #[derive(Clone)] struct AppState { catalog: Catalog, model_dir: PathBuf, vad: VadConfig }
 #[derive(Clone, Deserialize)] struct Catalog { models: Vec<ModelInfo> }
@@ -55,7 +63,7 @@ async fn main() -> Result<()> {
     let app_state = AppState { catalog, model_dir, vad: vad.clone() };
     let app = Router::new().route("/health", get(health))
         .route("/v1/audio/transcriptions", post(transcribe))
-        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
+        .layer(DefaultBodyLimit::max(max_upload_bytes()))
         .with_state(app_state);
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     println!("kwispr local STT runtime listening on http://{addr} (vad_enabled={})", vad.enabled);
