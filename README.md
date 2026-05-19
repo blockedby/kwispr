@@ -126,6 +126,8 @@ KWISPR_MODEL_DIR=~/.local/share/kwispr/models \
   --catalog ../models/local-stt-catalog.json
 ```
 
+A successful start prints `kwispr local STT runtime listening on http://127.0.0.1:9000`; at that point the server is ready to receive OpenAI-compatible STT requests at `/v1/audio/transcriptions`.
+
 `.env`:
 
 ```bash
