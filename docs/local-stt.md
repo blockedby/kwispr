@@ -82,7 +82,7 @@ whisper_backend_init_gpu: using Vulkan0 backend
 
 Validation status: GigaAM v3, Whisper Large v3 Turbo, and Parakeet V3 have been validated with real local artifacts. Whisper Turbo was validated on an NVIDIA RTX 3080 Ti through Vulkan.
 
-The endpoint is OpenAI-compatible:
+The endpoint is OpenAI-compatible. It accepts WAV and OGG/Opus audio only; Telegram voice messages are OGG/Opus. OGG/Opus decoding requires `ffmpeg` in `PATH` at runtime (`sudo pacman -S ffmpeg` on Arch/CachyOS):
 
 ```bash
 curl -sS http://127.0.0.1:9000/v1/audio/transcriptions \
@@ -90,6 +90,12 @@ curl -sS http://127.0.0.1:9000/v1/audio/transcriptions \
   -F response_format=json \
   -F language=ru \
   -F file=@sample.wav
+
+curl -sS http://127.0.0.1:9000/v1/audio/transcriptions \
+  -F model=gigaam-v3-e2e-ctc \
+  -F response_format=json \
+  -F language=ru \
+  -F file=@voice.ogg
 ```
 
 Expected success response:
@@ -100,7 +106,7 @@ Expected success response:
 
 Clear HTTP errors are returned as `{"error":"..."}`:
 
-- `400` for malformed multipart, missing fields, unsupported response format, or invalid WAV input
+- `400` for malformed multipart, missing fields, unsupported response format, unsupported audio formats, invalid WAV input, or failed OGG/Opus decode
 - `404` for unknown catalog model ids
 - `422` for model resolution, load, or runtime transcription failures
 - `500` for unexpected server failures
@@ -159,6 +165,9 @@ No cloud key is required for local mode. Keep `KWISPR_API_KEY=` empty when `KWIS
 | `[stub transcript]` | You are using `kwispr-local-stt-server.py` | Use the Rust runtime for actual model inference. |
 | `unknown model` | `KWISPR_MODEL` is not an id in `models/local-stt-catalog.json` | Run `./kwispr-models.py list` and copy an exact model id. |
 | `model ... is not installed` | The catalog artifact has not been downloaded or `KWISPR_MODEL_DIR` points elsewhere | Run `./kwispr-models.py download <model-id>` and verify the same model dir is used by the runtime. |
+| `unsupported audio format: expected WAV or OGG/Opus` | The upload is not WAV or OGG/Opus | Convert the input to WAV or OGG/Opus before POSTing. MP3, M4A, and WebM are not supported by the local endpoint. |
+| `OGG/Opus input requires ffmpeg in PATH` | An OGG/Opus upload was received, but `ffmpeg` is not installed or not visible to the runtime | Install ffmpeg, for example `sudo pacman -S ffmpeg` on Arch/CachyOS, and restart the runtime. |
+| `failed to decode OGG/Opus` / `ffmpeg timed out while decoding OGG/Opus` | The OGG/Opus input is malformed, unsupported by ffmpeg, or decoding exceeded `KWISPR_FFMPEG_TIMEOUT_SECONDS` (default 30) | Recreate the voice file or raise the timeout for unusually large inputs. |
 | `unsupported engine_type` / model load failure | Native transcribe-rs dependency or engine support is unavailable for that model on this machine | Rebuild `rust-local-stt`, try another catalog model, or fall back to cloud mode. |
 | Unsupported or incorrect language | Selected model does not support that language, or does not honor `language` selection | Use GigaAM for Russian; use Parakeet/Whisper Turbo for mixed ru/en; leave language empty for autodetect where supported. |
 | Whisper is slow or logs `no GPU found` | The runtime did not get a usable Vulkan device | Build with the default `whisper-vulkan` feature, verify host `vulkaninfo` sees the GPU, and restart the local runtime. If Vulkan is unavailable, use GigaAM for Russian or a cloud backend. |

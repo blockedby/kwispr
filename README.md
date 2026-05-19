@@ -48,7 +48,7 @@ Runtime packages:
 
 | Package | Purpose |
 |---|---|
-| `ffmpeg` | microphone recording |
+| `ffmpeg` | microphone recording; OGG/Opus decode for local STT uploads |
 | `curl` | STT HTTP request |
 | `jq` | JSON parsing |
 | `wl-clipboard` | clipboard integration on Wayland |
@@ -113,6 +113,8 @@ Download a model:
 ```
 
 Build and run the Rust server:
+
+The local Rust endpoint accepts WAV and OGG/Opus uploads only; Telegram voice messages are OGG/Opus. OGG/Opus uploads require `ffmpeg` in `PATH` at runtime (Arch/CachyOS: `sudo pacman -S ffmpeg`). MP3, M4A, and WebM are not supported by the local endpoint.
 
 ```bash
 cd rust-local-stt
