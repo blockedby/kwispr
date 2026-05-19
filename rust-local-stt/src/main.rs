@@ -351,7 +351,9 @@ async fn decode_ogg_via_ffmpeg(bytes: &[u8]) -> Result<DecodedAudio> {
             "-i",
             "pipe:0",
             "-f",
-            "wav",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
             "-ac",
             "1",
             "-ar",
@@ -374,9 +376,27 @@ async fn decode_ogg_via_ffmpeg(bytes: &[u8]) -> Result<DecodedAudio> {
     let _ = writer.await;
 
     if !output.status.success() {
-        return Err(anyhow!("failed to decode OGG/Opus"));
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err(anyhow!("failed to decode OGG/Opus"));
+        }
+        return Err(anyhow!("failed to decode OGG/Opus: {stderr}"));
     }
-    decode_wav(&output.stdout).map_err(|_| anyhow!("failed to decode OGG/Opus"))
+    decode_s16le_mono(&output.stdout, 16_000).context("failed to decode OGG/Opus")
+}
+
+fn decode_s16le_mono(bytes: &[u8], sample_rate: u32) -> Result<DecodedAudio> {
+    if bytes.len() % 2 != 0 {
+        return Err(anyhow!("PCM byte length is not a multiple of sample size"));
+    }
+    let samples = bytes
+        .chunks_exact(2)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / i16::MAX as f32)
+        .collect();
+    Ok(DecodedAudio {
+        samples,
+        sample_rate,
+    })
 }
 
 fn decode_wav(bytes: &[u8]) -> Result<DecodedAudio> {
@@ -660,6 +680,62 @@ mod tests {
         bytes
     }
 
+    fn tone_wav(sample_count: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::new(Cursor::new(&mut bytes), spec).unwrap();
+            for i in 0..sample_count {
+                let sample = if i % 2 == 0 { 0 } else { 16384 };
+                writer.write_sample::<i16>(sample).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        bytes
+    }
+
+    async fn encode_ogg_opus_with_ffmpeg(wav: &[u8]) -> Vec<u8> {
+        let mut child = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                "pipe:0",
+                "-c:a",
+                "libopus",
+                "-f",
+                "ogg",
+                "pipe:1",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("test requires ffmpeg in PATH");
+
+        let mut stdin = child.stdin.take().unwrap();
+        let input = wav.to_vec();
+        let writer = tokio::spawn(async move { stdin.write_all(&input).await });
+        let output = timeout(Duration::from_secs(10), child.wait_with_output())
+            .await
+            .expect("ffmpeg encode timed out")
+            .expect("failed to encode OGG/Opus fixture");
+        writer.await.unwrap().unwrap();
+        assert!(
+            output.status.success(),
+            "ffmpeg encode failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(looks_like_ogg(&output.stdout));
+        output.stdout
+    }
+
     #[test]
     fn looks_like_wav_detects_riff_wave() {
         let wav = tiny_wav();
@@ -691,6 +767,14 @@ mod tests {
         assert_eq!(audio.samples.len(), 2);
         assert_eq!(audio.samples[0], 0.0);
         assert!(audio.samples[1] > 0.49 && audio.samples[1] < 0.51);
+    }
+
+    #[tokio::test]
+    async fn decode_audio_decodes_ogg_opus_via_ffmpeg() {
+        let ogg = encode_ogg_opus_with_ffmpeg(&tone_wav(16_000)).await;
+        let audio = decode_audio(&ogg).await.unwrap();
+        assert_eq!(audio.sample_rate, 16_000);
+        assert!(!audio.samples.is_empty());
     }
 
     #[test]
