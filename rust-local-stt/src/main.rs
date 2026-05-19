@@ -351,9 +351,7 @@ async fn decode_ogg_via_ffmpeg(bytes: &[u8]) -> Result<DecodedAudio> {
             "-i",
             "pipe:0",
             "-f",
-            "s16le",
-            "-acodec",
-            "pcm_s16le",
+            "wav",
             "-ac",
             "1",
             "-ar",
@@ -382,21 +380,54 @@ async fn decode_ogg_via_ffmpeg(bytes: &[u8]) -> Result<DecodedAudio> {
         }
         return Err(anyhow!("failed to decode OGG/Opus: {stderr}"));
     }
-    decode_s16le_mono(&output.stdout, 16_000).context("failed to decode OGG/Opus")
+    let wav = normalize_streamed_wav_lengths(output.stdout);
+    decode_wav(&wav).context("failed to decode OGG/Opus")
 }
 
-fn decode_s16le_mono(bytes: &[u8], sample_rate: u32) -> Result<DecodedAudio> {
-    if bytes.len() % 2 != 0 {
-        return Err(anyhow!("PCM byte length is not a multiple of sample size"));
+fn normalize_streamed_wav_lengths(mut bytes: Vec<u8>) -> Vec<u8> {
+    if !looks_like_wav(&bytes) {
+        return bytes;
     }
-    let samples = bytes
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / i16::MAX as f32)
-        .collect();
-    Ok(DecodedAudio {
-        samples,
-        sample_rate,
-    })
+
+    let riff_size = bytes.len().saturating_sub(8).min(u32::MAX as usize) as u32;
+    bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+
+    let mut offset = 12;
+    while offset + 8 <= bytes.len() {
+        let chunk_id = &bytes[offset..offset + 4];
+        let chunk_size = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize;
+
+        if chunk_id == b"data" {
+            let data_size = bytes
+                .len()
+                .saturating_sub(offset + 8)
+                .min(u32::MAX as usize) as u32;
+            bytes[offset + 4..offset + 8].copy_from_slice(&data_size.to_le_bytes());
+            break;
+        }
+
+        if chunk_size == u32::MAX as usize {
+            break;
+        }
+        let padded_size = chunk_size + (chunk_size % 2);
+        let Some(next_offset) = offset
+            .checked_add(8)
+            .and_then(|value| value.checked_add(padded_size))
+        else {
+            break;
+        };
+        if next_offset <= offset || next_offset > bytes.len() {
+            break;
+        }
+        offset = next_offset;
+    }
+
+    bytes
 }
 
 fn decode_wav(bytes: &[u8]) -> Result<DecodedAudio> {
@@ -699,6 +730,16 @@ mod tests {
         bytes
     }
 
+    fn ffmpeg_available() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
     async fn encode_ogg_opus_with_ffmpeg(wav: &[u8]) -> Vec<u8> {
         let mut child = Command::new("ffmpeg")
             .args([
@@ -770,11 +811,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decode_audio_decodes_ogg_opus_via_ffmpeg() {
+    async fn decode_ogg_via_ffmpeg_converts_sample_ogg() {
+        if !ffmpeg_available() {
+            eprintln!("skipping ffmpeg-gated OGG/Opus decode test: ffmpeg not in PATH");
+            return;
+        }
         let ogg = encode_ogg_opus_with_ffmpeg(&tone_wav(16_000)).await;
-        let audio = decode_audio(&ogg).await.unwrap();
+        let audio = decode_ogg_via_ffmpeg(&ogg).await.unwrap();
         assert_eq!(audio.sample_rate, 16_000);
         assert!(!audio.samples.is_empty());
+    }
+
+    #[test]
+    fn normalize_streamed_wav_lengths_makes_ffmpeg_pipe_wav_decodable() {
+        let mut wav = tiny_wav();
+        wav[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        let data_offset = wav
+            .windows(4)
+            .position(|window| window == b"data")
+            .expect("tiny WAV has data chunk");
+        wav[data_offset + 4..data_offset + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let normalized = normalize_streamed_wav_lengths(wav);
+        let audio = decode_wav(&normalized).unwrap();
+        assert_eq!(audio.sample_rate, 16_000);
+        assert_eq!(audio.samples.len(), 2);
     }
 
     #[test]
