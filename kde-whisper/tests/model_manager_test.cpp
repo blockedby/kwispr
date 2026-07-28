@@ -118,19 +118,55 @@ private slots:
         QVERIFY(!statuses.value(QStringLiteral("whisper-large-v3-turbo")));
     }
 
-    void downloadDelegatesToPythonHelper()
+    void asynchronousDownloadAndDeleteUseArgvAndEnforceSingleOperation()
     {
-        FakeRunner runner;
-        ModelManager manager(QStringLiteral("/repo"), QStringLiteral("/repo/models/local-stt-catalog.json"), QStringLiteral("/models"), &runner);
+        const QString dangerousSlug = QStringLiteral("model; touch /tmp/never-run");
+        ModelManager manager(QStringLiteral("/repo root"),
+                             QStringLiteral("/catalog with spaces.json"),
+                             QStringLiteral("/models with spaces"),
+                             nullptr,
+                             nullptr,
+                             QStringLiteral("/bin/echo"));
+        QSignalSpy startedSpy(&manager, &ModelManager::operationStarted);
+        QSignalSpy finishedSpy(&manager, &ModelManager::operationFinished);
 
-        const auto result = manager.download(QStringLiteral("whisper-large-v3-turbo"));
+        QVERIFY(manager.startDownload(dangerousSlug));
+        QVERIFY(manager.isBusy());
+        QVERIFY(!manager.startDelete(QStringLiteral("another-model")));
+        QCOMPARE(startedSpy.count(), 1);
+        QCOMPARE(startedSpy.constFirst().at(0).toString(), QStringLiteral("download"));
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 3000);
+        QVERIFY(!manager.isBusy());
+        QVERIFY2(finishedSpy.constFirst().at(2).toBool(),
+                 qPrintable(finishedSpy.constFirst().at(4).toString()));
 
-        QCOMPARE(result.exitCode, 0);
-        QCOMPARE(runner.program, QStringLiteral("python3"));
-        QCOMPARE(runner.arguments, QStringList({QStringLiteral("/repo/kwispr-models.py"),
-                                                QStringLiteral("--catalog"), QStringLiteral("/repo/models/local-stt-catalog.json"),
-                                                QStringLiteral("--model-dir"), QStringLiteral("/models"),
-                                                QStringLiteral("download"), QStringLiteral("whisper-large-v3-turbo")}));
+        const QStringList downloadArgs = manager.helperArguments({QStringLiteral("download"), dangerousSlug});
+        QCOMPARE(downloadArgs, QStringList({QStringLiteral("/repo root/kwispr-models.py"),
+                                            QStringLiteral("--catalog"), QStringLiteral("/catalog with spaces.json"),
+                                            QStringLiteral("--model-dir"), QStringLiteral("/models with spaces"),
+                                            QStringLiteral("download"), dangerousSlug}));
+        QCOMPARE(finishedSpy.constFirst().at(3).toString(), downloadArgs.join(QLatin1Char(' ')) + QLatin1Char('\n'));
+
+        QVERIFY(manager.startDelete(QStringLiteral("whisper-large-v3-turbo")));
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 2, 3000);
+        const QStringList deleteArgs = manager.helperArguments({QStringLiteral("delete"), QStringLiteral("whisper-large-v3-turbo")});
+        QCOMPARE(finishedSpy.at(1).at(3).toString(), deleteArgs.join(QLatin1Char(' ')) + QLatin1Char('\n'));
+    }
+
+    void asynchronousFailureCapturesStderr()
+    {
+        ModelManager manager(QStringLiteral("/repo"),
+                             QStringLiteral("/catalog.json"),
+                             QStringLiteral("/models"),
+                             nullptr,
+                             nullptr,
+                             QStringLiteral("/definitely/missing/program"));
+        QSignalSpy finishedSpy(&manager, &ModelManager::operationFinished);
+
+        QVERIFY(manager.startDownload(QStringLiteral("test-model")));
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 3000);
+        QVERIFY(!finishedSpy.constFirst().at(2).toBool());
+        QVERIFY(!finishedSpy.constFirst().at(4).toString().isEmpty());
     }
 
     void verifyUsesHelperExitCodeAsAuthority()

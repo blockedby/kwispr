@@ -74,13 +74,14 @@ The tray action also delegates to `kwispr.sh toggle`, so both paths exercise the
 
 ## Local STT models
 
-Use the existing helper to download models:
+The **Local model** row in KDE Whisper settings shows catalog install state and provides asynchronous **Download** and confirmed **Delete** actions. The same operations are available through the authoritative helper:
 
 ```bash
 ./kwispr-models.py download whisper-large-v3-turbo
+./kwispr-models.py delete whisper-large-v3-turbo
 ```
 
-Then select the model in the KDE Whisper settings dialog or set:
+Deletion removes only the slug's catalog-selected default GGUF from `KWISPR_MODEL_DIR`. Select the model in the KDE Whisper settings dialog or set:
 
 ```env
 KWISPR_MODEL=whisper-large-v3-turbo
@@ -90,5 +91,5 @@ KWISPR_MODEL=whisper-large-v3-turbo
 
 - This is an optional experimental KDE control surface.
 - It is not a replacement for the documented shell workflow yet.
-- Model install/verify behavior stays authoritative in `kwispr-models.py`.
+- Model install/delete/verify behavior stays authoritative in `kwispr-models.py`.
 - Local STT still requires a built `rust-local-stt/target/release/kwispr-local-stt` binary.

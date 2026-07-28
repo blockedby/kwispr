@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download and verify Kwispr's revision-pinned GGUF model catalog."""
+"""Manage Kwispr's revision-pinned GGUF model catalog."""
 
 from __future__ import annotations
 
@@ -171,6 +171,23 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_delete(args: argparse.Namespace) -> int:
+    """Delete only the catalog-managed default GGUF for a model slug."""
+    catalog = load_catalog(args.catalog)
+    selected = selected_models(catalog, args.model)
+    if selected is None:
+        print(f"unknown model: {args.model}", file=sys.stderr)
+        return 2
+    model = selected[0]
+    target = model_path(args.model_dir, model)
+    try:
+        target.unlink()
+        print(f"{model['slug']}: deleted {target}")
+    except FileNotFoundError:
+        print(f"{model['slug']}: not installed")
+    return 0
+
+
 def cmd_download(args: argparse.Namespace) -> int:
     catalog = load_catalog(args.catalog)
     selected = selected_models(catalog, args.model)
@@ -222,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     download = sub.add_parser("download", help="download and install a model's default GGUF quant")
     download.add_argument("model", help="catalog model slug")
     download.set_defaults(func=cmd_download)
+    delete = sub.add_parser("delete", help="delete a model's catalog-managed default GGUF")
+    delete.add_argument("model", help="catalog model slug")
+    delete.set_defaults(func=cmd_delete)
     verify = sub.add_parser("verify", help="verify installed model checksums")
     verify.add_argument("model", nargs="?", help="catalog model slug (default: all)")
     verify.set_defaults(func=cmd_verify)

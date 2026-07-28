@@ -5,14 +5,23 @@
 #include "models/ModelCatalog.h"
 
 #include <QDialog>
+#include <QHash>
 #include <QSet>
 
+class ModelManager;
 class QCheckBox;
+class QCloseEvent;
 class QComboBox;
 class QDialogButtonBox;
 class QDoubleSpinBox;
+class QFormLayout;
+class QGroupBox;
+class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
+class QProgressBar;
+class QPushButton;
+class QWidget;
 
 class SettingsDialog : public QDialog {
     Q_OBJECT
@@ -21,38 +30,89 @@ public:
                             const ModelCatalog &catalog,
                             const QStringList &installedModelIds,
                             EnvFile *env = nullptr,
+                            ModelManager *modelManager = nullptr,
                             QWidget *parent = nullptr);
 
     bool save();
     QString lastError() const;
     KwisprSettings currentSettings() const;
 
+public slots:
+    void accept() override;
+    void reject() override;
+
 signals:
     void settingsSaved(const KwisprSettings &settings);
 
 private slots:
     void applyBackendPreset(const QString &backendLabel);
+    void startModelDownload();
+    void confirmAndDeleteModel();
+    void modelOperationStarted(const QString &operation, const QString &modelId);
+    void modelOperationFinished(const QString &operation,
+                                const QString &modelId,
+                                bool success,
+                                const QString &stdoutText,
+                                const QString &stderrText);
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private:
+    struct BackendDraft {
+        QString apiUrl;
+        QString apiKey;
+        QString model;
+        QString language;
+        QString prompt;
+    };
+
     void buildUi();
     void loadFromSettings(const KwisprSettings &settings);
-    void populateModels();
+    void populateModels(const QString &selectedModelId);
+    void updateBackendVisibility();
+    void updateModelControls();
+    void showBusyCloseStatus();
+    bool selectedModelIsCatalogModel() const;
+    void setBackendRowVisible(QWidget *field, QLabel *label, bool visible);
+    void saveActiveBackendDraft();
+    void loadBackendDraft(const QString &backendLabel);
+    QString selectedModelId() const;
+    QString selectedModelName() const;
+    QString operationError(const QString &stdoutText, const QString &stderrText) const;
     KwisprSettings settingsFromWidgets() const;
     QString backendLabelForSettings(const KwisprSettings &settings) const;
 
     ModelCatalog m_catalog;
     QSet<QString> m_installedModelIds;
     EnvFile *m_env = nullptr;
+    ModelManager *m_modelManager = nullptr;
     KwisprSettings m_settings;
     QString m_lastError;
+    QString m_activeBackend;
+    QHash<QString, BackendDraft> m_backendDrafts;
+    bool m_modelOperationBusy = false;
 
+    QFormLayout *m_backendForm = nullptr;
     QComboBox *m_backendCombo = nullptr;
     QLineEdit *m_apiUrlEdit = nullptr;
+    QLabel *m_apiUrlLabel = nullptr;
     QLineEdit *m_apiKeyEdit = nullptr;
+    QLabel *m_apiKeyLabel = nullptr;
     QLineEdit *m_modelEdit = nullptr;
+    QLabel *m_modelLabel = nullptr;
+    QWidget *m_localModelRow = nullptr;
+    QLabel *m_localModelLabel = nullptr;
     QComboBox *m_localModelCombo = nullptr;
+    QPushButton *m_downloadButton = nullptr;
+    QPushButton *m_deleteButton = nullptr;
+    QProgressBar *m_modelBusyIndicator = nullptr;
+    QLabel *m_modelStatusLabel = nullptr;
     QLineEdit *m_languageEdit = nullptr;
+    QLabel *m_languageLabel = nullptr;
     QPlainTextEdit *m_promptEdit = nullptr;
+    QLabel *m_promptLabel = nullptr;
+    QGroupBox *m_vadGroup = nullptr;
     QCheckBox *m_autopasteCheck = nullptr;
     QComboBox *m_pasteHotkeyCombo = nullptr;
     QDoubleSpinBox *m_autopasteDelaySpin = nullptr;

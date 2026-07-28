@@ -19,7 +19,10 @@
 #include <QUrl>
 
 namespace {
-constexpr const char *DefaultModelDir = "/home/kcnc/.local/share/kwispr/models";
+QString defaultModelDir()
+{
+    return QDir::home().filePath(QStringLiteral(".local/share/kwispr/models"));
+}
 
 bool envEnabled(const QString &value, bool fallback)
 {
@@ -38,7 +41,7 @@ KwisprSettings settingsFromEnv(const EnvFile &env)
     settings.apiKey = env.value(QStringLiteral("KWISPR_API_KEY"), settings.apiKey);
     settings.model = env.value(QStringLiteral("KWISPR_MODEL"), settings.model);
     settings.language = env.value(QStringLiteral("KWISPR_LANGUAGE"), settings.language);
-    settings.modelDir = env.value(QStringLiteral("KWISPR_MODEL_DIR"), QString::fromLatin1(DefaultModelDir));
+    settings.modelDir = env.value(QStringLiteral("KWISPR_MODEL_DIR"), defaultModelDir());
     settings.audioFormat = env.value(QStringLiteral("KWISPR_AUDIO_FORMAT"), settings.audioFormat);
     settings.transcriptionPrompt = env.value(QStringLiteral("KWISPR_TRANSCRIPTION_PROMPT"), settings.transcriptionPrompt);
     settings.openRouterReferer = env.value(QStringLiteral("KWISPR_OPENROUTER_HTTP_REFERER"), settings.openRouterReferer);
@@ -100,7 +103,7 @@ void TrayApp::openSettings()
     env.load(envPath);
     KwisprSettings settings = settingsFromEnv(env);
     if (settings.modelDir.trimmed().isEmpty()) {
-        settings.modelDir = QString::fromLatin1(DefaultModelDir);
+        settings.modelDir = defaultModelDir();
     }
     const QString catalogPath = m_repoRoot + QStringLiteral("/models/local-stt-catalog.json");
     const ModelCatalog catalog = ModelCatalog::load(catalogPath);
@@ -115,7 +118,7 @@ void TrayApp::openSettings()
         }
     }
 
-    SettingsDialog dialog(settings, catalog, installedModelIds, &env);
+    SettingsDialog dialog(settings, catalog, installedModelIds, &env, &modelManager);
     connect(&dialog, &SettingsDialog::settingsSaved, this, [&env, envPath]() {
         env.save(envPath);
     });

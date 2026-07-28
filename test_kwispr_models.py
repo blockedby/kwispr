@@ -119,6 +119,61 @@ class KwisprModelsValidationTest(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"test gguf bytes")
             self.assertEqual(self.run_cli(*args, "verify", "tiny-model"), 0)
 
+    def test_delete_removes_only_catalog_default_gguf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_s:
+            tmp = Path(tmp_s)
+            catalog_path, model = self.write_catalog(tmp)
+            model_dir = tmp / "models"
+            model_dir.mkdir()
+            target = kwispr_models.model_path(model_dir, model)
+            target.write_bytes(b"installed artifact")
+            unrelated = model_dir / "keep-me.gguf"
+            unrelated.write_bytes(b"unrelated")
+            non_default = model_dir / "tiny-Q4.gguf"
+            non_default.write_bytes(b"other quant")
+
+            rc = self.run_cli(
+                "--catalog", str(catalog_path), "--model-dir", str(model_dir),
+                "delete", "tiny-model",
+            )
+
+            self.assertEqual(rc, 0)
+            self.assertFalse(target.exists())
+            self.assertEqual(unrelated.read_bytes(), b"unrelated")
+            self.assertEqual(non_default.read_bytes(), b"other quant")
+            self.assertIn("tiny-model: deleted", self.last_stdout)
+
+    def test_delete_missing_model_file_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_s:
+            tmp = Path(tmp_s)
+            catalog_path, _ = self.write_catalog(tmp)
+            model_dir = tmp / "models"
+            common = ("--catalog", str(catalog_path), "--model-dir", str(model_dir), "delete", "tiny-model")
+
+            self.assertEqual(self.run_cli(*common), 0)
+            self.assertIn("tiny-model: not installed", self.last_stdout)
+            self.assertEqual(self.run_cli(*common), 0)
+            self.assertIn("tiny-model: not installed", self.last_stdout)
+            self.assertFalse(model_dir.exists())
+
+    def test_delete_rejects_unknown_slug_without_touching_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_s:
+            tmp = Path(tmp_s)
+            catalog_path, _ = self.write_catalog(tmp)
+            model_dir = tmp / "models"
+            model_dir.mkdir()
+            unrelated = model_dir / "do-not-delete.gguf"
+            unrelated.write_bytes(b"safe")
+
+            rc = self.run_cli(
+                "--catalog", str(catalog_path), "--model-dir", str(model_dir),
+                "delete", "../do-not-delete.gguf",
+            )
+
+            self.assertEqual(rc, 2)
+            self.assertIn("unknown model", self.last_stderr)
+            self.assertEqual(unrelated.read_bytes(), b"safe")
+
     def test_missing_mirror_falls_back_to_revision_pinned_hf_resolve(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_s:
             tmp = Path(tmp_s)
@@ -191,6 +246,8 @@ class KwisprModelsValidationTest(unittest.TestCase):
             self.assertEqual(self.run_cli(*common, "download", "missing"), 2)
             self.assertIn("unknown model: missing", self.last_stderr)
             self.assertEqual(self.run_cli(*common, "verify", "missing"), 2)
+            self.assertIn("unknown model: missing", self.last_stderr)
+            self.assertEqual(self.run_cli(*common, "delete", "missing"), 2)
             self.assertIn("unknown model: missing", self.last_stderr)
 
     def test_catalog_rejects_duplicate_slugs_and_missing_default_quant(self) -> None:

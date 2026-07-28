@@ -111,7 +111,11 @@ Download a model. Model names are Handy `slug` values; the helper selects that m
 # or for Russian-only dictation:
 ./kwispr-models.py download gigaam-v3-e2e-ctc
 ./kwispr-models.py verify gigaam-v3-e2e-ctc
+# remove only the catalog-managed default GGUF for a slug:
+./kwispr-models.py delete gigaam-v3-e2e-ctc
 ```
+
+The KDE settings dialog also provides nonblocking **Download** and **Delete** actions beside the Local model selector. Deletion is confirmed and delegates to the same catalog-authoritative helper.
 
 The full 67-model catalog is synced from Handy commit `ea3c20a3a67c7401d8b19198723760da9d40ac45`; provenance and immutable per-model revisions are recorded in `models/local-stt-catalog.json`.
 
