@@ -13,18 +13,8 @@
 #include <KStatusNotifierItem>
 
 #include <QApplication>
-#include <QDir>
-#include <QFileInfo>
 #include <QMessageBox>
 #include <QUrl>
-
-namespace {
-QString defaultModelDir()
-{
-    return QDir::home().filePath(QStringLiteral(".local/share/kwispr/models"));
-}
-
-}
 
 TrayApp::TrayApp(QString repoRoot, QString cacheDir, QObject *parent)
     : QObject(parent)
@@ -58,14 +48,13 @@ void TrayApp::openSettings()
     EnvFile env;
     env.load(envPath);
     KwisprSettings settings = KwisprSettings::fromEnv(env);
-    if (settings.modelDir.trimmed().isEmpty()) {
-        settings.modelDir = defaultModelDir();
-    }
+    const QString resolvedModelDir = settings.resolvedModelDir();
+    settings.modelDir = resolvedModelDir;
     const QString catalogPath = m_repoRoot + QStringLiteral("/models/local-stt-catalog.json");
     const ModelCatalog catalog = ModelCatalog::load(catalogPath);
 
     ProcessRunner runner;
-    ModelManager modelManager(m_repoRoot, catalogPath, settings.modelDir, &runner);
+    ModelManager modelManager(m_repoRoot, catalogPath, resolvedModelDir, &runner);
     const QMap<QString, bool> statusById = modelManager.listInstalledStatus();
     QStringList installedModelIds;
     for (auto it = statusById.cbegin(); it != statusById.cend(); ++it) {
@@ -83,9 +72,14 @@ void TrayApp::openSettings()
 
 void TrayApp::startLocalStt()
 {
+    EnvFile env;
+    env.load(m_repoRoot + QStringLiteral("/.env"));
+    const KwisprSettings settings = KwisprSettings::fromEnv(env);
+    const QString resolvedModelDir = settings.resolvedModelDir();
+
     ProcessRunner runner;
     LocalSttProcess process(m_repoRoot, &runner);
-    const ProcessResult result = process.start();
+    const ProcessResult result = process.start(resolvedModelDir);
     if (result.exitCode != 0) {
         QMessageBox::warning(nullptr, QStringLiteral("KDE Whisper"), result.stderrText.isEmpty() ? QStringLiteral("Failed to start local STT.") : result.stderrText);
     }
@@ -96,11 +90,6 @@ void TrayApp::stopLocalStt()
 {
     QMessageBox::information(nullptr, QStringLiteral("KDE Whisper"), QStringLiteral("Stopping managed local STT processes will be implemented in a later task."));
     m_controller->refreshState();
-}
-
-void TrayApp::downloadVerifyModels()
-{
-    QMessageBox::information(nullptr, QStringLiteral("KDE Whisper"), QStringLiteral("Model download/verify UI will be implemented in a later task."));
 }
 
 void TrayApp::retryLastFailed()

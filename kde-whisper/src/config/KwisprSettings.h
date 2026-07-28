@@ -36,6 +36,7 @@ public:
     void applyOpenRouterPreset(const QString &key, const QString &openRouterModel, const QString &prompt, const QString &format);
 
     static KwisprSettings fromEnv(const EnvFile &env);
+    QString resolvedModelDir() const;
     void writeTo(EnvFile &env) const;
     bool validate(QStringList *errors = nullptr) const;
 };

@@ -2,6 +2,10 @@
 
 #include "config/EnvFile.h"
 
+#include <QDir>
+#include <QFileInfo>
+#include <QStandardPaths>
+
 #include <cmath>
 
 namespace {
@@ -23,6 +27,17 @@ bool envEnabled(const QString &value, bool fallback)
     }
     const QString normalized = value.trimmed().toLower();
     return normalized != QLatin1String("0") && normalized != QLatin1String("false") && normalized != QLatin1String("no");
+}
+
+QString canonicalOrLegacyValue(const EnvFile &env,
+                               const QString &canonicalKey,
+                               const QString &legacyKey,
+                               const QString &fallback)
+{
+    if (env.contains(canonicalKey)) {
+        return env.value(canonicalKey);
+    }
+    return env.value(legacyKey, fallback);
 }
 }
 
@@ -68,8 +83,14 @@ KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
     settings.modelDir = env.value(QStringLiteral("KWISPR_MODEL_DIR"), settings.modelDir);
     settings.audioFormat = env.value(QStringLiteral("KWISPR_AUDIO_FORMAT"), settings.audioFormat);
     settings.transcriptionPrompt = env.value(QStringLiteral("KWISPR_TRANSCRIPTION_PROMPT"), settings.transcriptionPrompt);
-    settings.openRouterReferer = env.value(QStringLiteral("KWISPR_OPENROUTER_HTTP_REFERER"), settings.openRouterReferer);
-    settings.openRouterAppTitle = env.value(QStringLiteral("KWISPR_OPENROUTER_APP_TITLE"), settings.openRouterAppTitle);
+    settings.openRouterReferer = canonicalOrLegacyValue(env,
+                                                        QStringLiteral("KWISPR_HTTP_REFERER"),
+                                                        QStringLiteral("KWISPR_OPENROUTER_HTTP_REFERER"),
+                                                        settings.openRouterReferer);
+    settings.openRouterAppTitle = canonicalOrLegacyValue(env,
+                                                          QStringLiteral("KWISPR_APP_TITLE"),
+                                                          QStringLiteral("KWISPR_OPENROUTER_APP_TITLE"),
+                                                          settings.openRouterAppTitle);
     settings.autopaste = envEnabled(env.value(QStringLiteral("KWISPR_AUTOPASTE")), settings.autopaste);
     settings.pasteHotkey = env.value(QStringLiteral("KWISPR_PASTE_HOTKEY"), settings.pasteHotkey);
     bool ok = false;
@@ -93,7 +114,23 @@ KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
     if (ok) {
         settings.vadFrameMs = frameMs;
     }
+    settings.modelDir = settings.resolvedModelDir();
     return settings;
+}
+
+QString KwisprSettings::resolvedModelDir() const
+{
+    QString path = modelDir.trimmed();
+    if (path.isEmpty()) {
+        path = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation))
+                   .filePath(QStringLiteral("kwispr/models"));
+    } else if (path == QLatin1String("~")) {
+        path = QDir::homePath();
+    } else if (path.startsWith(QLatin1String("~/"))) {
+        path = QDir::home().filePath(path.mid(2));
+    }
+
+    return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
 }
 
 void KwisprSettings::writeTo(EnvFile &env) const
@@ -110,18 +147,14 @@ void KwisprSettings::writeTo(EnvFile &env) const
     env.setValue("KWISPR_AUTOPASTE_DELAY", QString::number(autopasteDelay, 'f', 2));
     env.setValue("KWISPR_SOUNDS", sounds ? "1" : "0");
 
-    if (!modelDir.isEmpty()) {
-        env.setValue("KWISPR_MODEL_DIR", modelDir);
-    }
+    env.setValue("KWISPR_MODEL_DIR", resolvedModelDir());
     if (!transcriptionPrompt.isEmpty()) {
         env.setValue("KWISPR_TRANSCRIPTION_PROMPT", transcriptionPrompt);
     }
-    if (!openRouterReferer.isEmpty()) {
-        env.setValue("KWISPR_OPENROUTER_HTTP_REFERER", openRouterReferer);
-    }
-    if (!openRouterAppTitle.isEmpty()) {
-        env.setValue("KWISPR_OPENROUTER_APP_TITLE", openRouterAppTitle);
-    }
+    env.setValue("KWISPR_HTTP_REFERER", openRouterReferer);
+    env.setValue("KWISPR_OPENROUTER_HTTP_REFERER", openRouterReferer);
+    env.setValue("KWISPR_APP_TITLE", openRouterAppTitle);
+    env.setValue("KWISPR_OPENROUTER_APP_TITLE", openRouterAppTitle);
 
     const QString vadEnabledValue = vadEnabled ? QStringLiteral("1") : QStringLiteral("0");
     env.setValue("KWISPR_VAD_ENABLED", vadEnabledValue);

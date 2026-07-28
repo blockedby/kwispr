@@ -23,7 +23,6 @@ public:
     void openSettings() override;
     void startLocalStt() override;
     void stopLocalStt() override;
-    void downloadVerifyModels() override;
     void retryLastFailed() override;
     void quitApplication() override;
     LocalSttState localSttState() const override;
