@@ -1,88 +1,79 @@
-# Local STT roadmap
+# Local STT
 
-Kwispr includes two local STT server entry points:
+Kwispr has two local server entry points:
 
-- `kwispr-local-stt-server.py` remains a tiny Python stub for wiring smoke tests.
-- `rust-local-stt/` is the real inference runtime scaffold. It exposes the same OpenAI-compatible endpoint, resolves models from `models/local-stt-catalog.json`, loads Handy-compatible artifacts from `$KWISPR_MODEL_DIR` or `~/.local/share/kwispr/models`, dispatches GigaAM / Parakeet / Whisper by `engine_type`, and caches loaded engines in-process.
+- `kwispr-local-stt-server.py` is a legacy API-wiring stub.
+- `rust-local-stt/` is the real batch inference server. It exposes an OpenAI-compatible transcription endpoint, resolves Handy catalog v2 models by `slug`, and caches unified transcribe-cpp GGUF `Session`s.
 
-Start the legacy stub server:
-
-```bash
-./kwispr-local-stt-server.py --host 127.0.0.1 --port 9000
-```
-
-Health check:
-
-```bash
-curl http://127.0.0.1:9000/health
-```
-
-Stub transcription request:
-
-```bash
-printf 'dummy audio bytes' >/tmp/kwispr-dummy.wav
-curl -sS http://127.0.0.1:9000/v1/audio/transcriptions \
-  -F model=gigaam-v3-e2e-ctc \
-  -F response_format=json \
-  -F language=ru \
-  -F file=@/tmp/kwispr-dummy.wav
-```
-
-Kwispr can talk to the OpenAI-compatible local transcription endpoint through:
+Cloud and OpenRouter behavior is unchanged. Local mode remains opt-in:
 
 ```env
 KWISPR_BACKEND=openai-transcriptions
 KWISPR_API_URL=http://127.0.0.1:9000/v1/audio/transcriptions
 KWISPR_MODEL=gigaam-v3-e2e-ctc
 KWISPR_API_KEY=
+KWISPR_LANGUAGE=ru
+KWISPR_MODEL_DIR=~/.local/share/kwispr/models
 ```
 
-The repository now includes a machine-readable local model catalog at:
+## Handy catalog v2
 
-```text
-models/local-stt-catalog.json
-```
+`models/local-stt-catalog.json` contains all 67 models from Handy's generated catalog at commit `ea3c20a3a67c7401d8b19198723760da9d40ac45` (2026-07-28). The catalog itself records this provenance. Each entry includes:
 
-Use `kwispr-models.py` to list, download, and verify catalog artifacts. The Rust runtime uses these installed artifacts for local inference.
+- a user-facing `slug` (the Kwispr model id);
+- Hugging Face repository and immutable commit `revision`;
+- architecture, languages, and capabilities;
+- available GGUF quantizations with size and SHA256;
+- one `default_quant`.
 
-## Downloading models
+Existing ids remain valid, including `gigaam-v3-e2e-ctc`, `parakeet-tdt-0.6b-v3`, and `whisper-large-v3-turbo`.
+
+## Download and verification
 
 ```bash
-# Show install status for all catalog entries
 ./kwispr-models.py list
-
-# Download the Russian GigaAM model into ~/.local/share/kwispr/models
 ./kwispr-models.py download gigaam-v3-e2e-ctc
-
-# Verify the installed model
 ./kwispr-models.py verify gigaam-v3-e2e-ctc
 ```
 
-Set `KWISPR_MODEL_DIR=/path/to/models` or pass `--model-dir /path/to/models` to override the install directory. The helper verifies artifact SHA256 before installation, extracts `.tar.gz` directory artifacts safely, places single-file artifacts directly, and skips redownloading already-valid models.
+The helper installs exactly the selected model's default-quant GGUF file under `$KWISPR_MODEL_DIR` (default `~/.local/share/kwispr/models`). It URL-quotes repository/file path segments and tries:
 
-## Rust runtime
+1. catalog mirrors at `{mirror}/{repo}/{revision}/{filename}`;
+2. immutable Hugging Face `{repo}/resolve/{revision}/{filename}`.
 
-Build and run when Rust/Cargo and native transcribe-rs dependencies are available:
+Downloaded bytes must match both the catalog size and SHA256 before an atomic install. Each network read has a 60-second timeout, and a source that exceeds the declared size is aborted before its extra bytes are written. A valid file is not downloaded again; a missing or tampered file fails `verify` and is replaced by the next `download`. There is no archive extraction or directory-model layout.
+
+## Build and run
+
+Linux uses transcribe-cpp `0.1.3` with Handy's dynamic-backend posture: loadable CPU variants and Vulkan. `transcribe-rs` is retained only for optional Silero VAD.
+
+Prefer the repository's Podman builder:
+
+```bash
+./rust-local-stt/build-in-podman.sh
+```
+
+Or, with Rust/CMake/Clang/Vulkan/shaderc development packages installed:
 
 ```bash
 cd rust-local-stt
-# Native build dependencies include Rust/Cargo, CMake, Clang, libvulkan headers, and glslc.
 cargo build --release
+```
+
+The build stages `libtranscribe.so*` and `libggml*.so*` runtime/backend files into `rust-local-stt/target/release/` beside the binary. Keep these files together if copying the runtime.
+
+Start the server from the repository root:
+
+```bash
 KWISPR_MODEL_DIR=~/.local/share/kwispr/models \
-  ./target/release/kwispr-local-stt --host 127.0.0.1 --port 9000 \
-  --catalog ../models/local-stt-catalog.json
+  ./rust-local-stt/target/release/kwispr-local-stt \
+  --host 127.0.0.1 --port 9000 \
+  --catalog models/local-stt-catalog.json
 ```
 
-Whisper builds with `whisper-vulkan` enabled. On a working Vulkan host, a successful GPU-backed Whisper load logs:
+The server is batch-only; catalog streaming capability metadata does not enable streaming endpoints. Every model architecture uses `transcribe_cpp::Session`. Sessions are cached by slug for the process lifetime. An optional multipart `language` value is trimmed and checked against the model's catalog languages before it reaches `RunOptions`. Omit it or use `auto` for detection-capable models; models without detection fall back to English when supported, otherwise their first catalog language. Unsupported explicit languages return `400`.
 
-```text
-ggml_vulkan: 0 = NVIDIA GeForce RTX 3080 Ti
-whisper_backend_init_gpu: using Vulkan0 backend
-```
-
-Validation status: GigaAM v3, Whisper Large v3 Turbo, and Parakeet V3 have been validated with real local artifacts. Whisper Turbo was validated on an NVIDIA RTX 3080 Ti through Vulkan.
-
-The endpoint is OpenAI-compatible:
+## API contract
 
 ```bash
 curl -sS http://127.0.0.1:9000/v1/audio/transcriptions \
@@ -92,107 +83,58 @@ curl -sS http://127.0.0.1:9000/v1/audio/transcriptions \
   -F file=@sample.wav
 ```
 
-Expected success response:
+Success is `{"text":"..."}`. Errors retain the existing `{"error":"..."}` contract:
 
-```json
-{"text":"..."}
-```
+- `400`: malformed multipart, missing fields, unsupported response format, or invalid WAV;
+- `404`: unknown model slug;
+- `422`: model path, load, session, or transcription failure;
+- `500`: unexpected server failure.
 
-Clear HTTP errors are returned as `{"error":"..."}`:
+The upload limit defaults to 256 MiB and can be overridden with `KWISPR_MAX_UPLOAD_BYTES`.
 
-- `400` for malformed multipart, missing fields, unsupported response format, or invalid WAV input
-- `404` for unknown catalog model ids
-- `422` for model resolution, load, or runtime transcription failures
-- `500` for unexpected server failures
+## Optional VAD
 
-Loaded engines are cached by model id for the life of the process, so repeated requests to the same model do not reload the model.
-
-## Optional VAD preprocessing
-
-The Rust runtime has optional VAD preprocessing before local inference. It is disabled by default so existing local and cloud/OpenRouter/OpenAI behavior stays unchanged.
-
-Energy/RMS provider, dependency-light and conservative:
+VAD is disabled by default. Energy VAD has no model dependency:
 
 ```bash
-KWISPR_VAD_ENABLED=1 \
-KWISPR_VAD_PROVIDER=energy \
-KWISPR_VAD_THRESHOLD=0.01 \
-KWISPR_MODEL_DIR=~/.local/share/kwispr/models \
-  ./target/release/kwispr-local-stt --host 127.0.0.1 --port 9000 \
-  --catalog ../models/local-stt-catalog.json
+KWISPR_VAD_ENABLED=1
+KWISPR_VAD_PROVIDER=energy
+KWISPR_VAD_THRESHOLD=0.01
+KWISPR_VAD_FRAME_MS=30
+KWISPR_VAD_MIN_SPEECH_MS=150
+KWISPR_VAD_PADDING_MS=120
 ```
 
-Silero ONNX provider, closer to Handy-style neural VAD:
+The existing neural option remains Silero ONNX VAD (not STT inference):
 
 ```bash
-mkdir -p ~/.local/share/kwispr/models
-curl -L -o ~/.local/share/kwispr/models/silero_vad_v4.onnx \
-  https://blob.handy.computer/silero_vad_v4.onnx
-KWISPR_VAD_ENABLED=1 \
-KWISPR_VAD_PROVIDER=silero \
-KWISPR_VAD_MODEL=~/.local/share/kwispr/models/silero_vad_v4.onnx \
-KWISPR_VAD_THRESHOLD=0.3 \
-KWISPR_MODEL_DIR=~/.local/share/kwispr/models \
-  ./target/release/kwispr-local-stt --host 127.0.0.1 --port 9000 \
-  --catalog ../models/local-stt-catalog.json
+KWISPR_VAD_ENABLED=1
+KWISPR_VAD_PROVIDER=silero
+KWISPR_VAD_MODEL=~/.local/share/kwispr/models/silero_vad_v4.onnx
+KWISPR_VAD_THRESHOLD=0.3
 ```
 
-Equivalent CLI flags are available: `--vad-enabled true`, `--vad-provider energy|silero`, `--vad-model`, `--vad-threshold`, `--vad-frame-ms`, `--vad-min-speech-ms`, and `--vad-padding-ms`. `/health` reports the active VAD config. Silero uses 30 ms / 480-sample frames at 16 kHz and defaults to threshold `0.3`; energy VAD defaults to threshold `0.01`.
+Equivalent `--vad-*` flags are supported. `/health` reports active VAD settings. Both providers trim leading/trailing silence and return an empty transcript for no-speech/short-noise audio before model loading; `kwispr.sh` treats this local empty result as a clean `No speech` skip.
 
-Both providers trim leading/trailing non-speech and return an empty transcript for no-speech/short-noise clips before STT model inference. `kwispr.sh` treats empty responses from a local `127.0.0.1` STT endpoint as a clean `No speech` skip rather than an API failure. This reduces junk audio sent to STT, lowers latency for padded recordings, and helps avoid hallucinated transcripts from silence/noise.
+## Suggested slugs
 
-## Model recommendations
+| Need | Slug |
+|---|---|
+| Russian | `gigaam-v3-e2e-ctc` |
+| European multilingual | `parakeet-tdt-0.6b-v3` |
+| Broad multilingual fallback | `whisper-large-v3-turbo` |
+| Low-latency English | `parakeet-unified-en-0.6b` or `moonshine-tiny` |
 
-| Dictation need | Recommended model | Model id | Notes |
-|---|---|---|---|
-| Russian | GigaAM v3 | `gigaam-v3-e2e-ctc` | Best default for Russian-only dictation and the smallest current artifact. |
-| Mixed Russian/English | Parakeet V3 or Whisper Large v3 Turbo | `parakeet-tdt-0.6b-v3` or `whisper-large-v3-turbo` | Parakeet covers ru/en and many European languages; Whisper Turbo is the broad fallback. |
-| English low latency | Parakeet now; Moonshine-class models later | `parakeet-tdt-0.6b-v3` | The catalog does not include Moonshine yet, so mention it only as a future option. |
+Use `./kwispr-models.py list` for the complete current catalog.
 
-No cloud key is required for local mode. Keep `KWISPR_API_KEY=` empty when `KWISPR_API_URL` points at `127.0.0.1`. Cloud backends still require their usual OpenAI/OpenRouter key.
+## Troubleshooting
 
-## Troubleshooting local mode
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `curl: (7) Failed to connect` | Local server is not running or the port does not match `.env` | Start the Python stub or Rust runtime, then check `/health`. |
-| `[stub transcript]` | You are using `kwispr-local-stt-server.py` | Use the Rust runtime for actual model inference. |
-| `unknown model` | `KWISPR_MODEL` is not an id in `models/local-stt-catalog.json` | Run `./kwispr-models.py list` and copy an exact model id. |
-| `model ... is not installed` | The catalog artifact has not been downloaded or `KWISPR_MODEL_DIR` points elsewhere | Run `./kwispr-models.py download <model-id>` and verify the same model dir is used by the runtime. |
-| `unsupported engine_type` / model load failure | Native transcribe-rs dependency or engine support is unavailable for that model on this machine | Rebuild `rust-local-stt`, try another catalog model, or fall back to cloud mode. |
-| Unsupported or incorrect language | Selected model does not support that language, or does not honor `language` selection | Use GigaAM for Russian; use Parakeet/Whisper Turbo for mixed ru/en; leave language empty for autodetect where supported. |
-| Whisper is slow or logs `no GPU found` | The runtime did not get a usable Vulkan device | Build with the default `whisper-vulkan` feature, verify host `vulkaninfo` sees the GPU, and restart the local runtime. If Vulkan is unavailable, use GigaAM for Russian or a cloud backend. |
-
-## Initial catalog slice
-
-| Model | Engine | Best for | Artifact |
-|---|---|---|---|
-| GigaAM v3 | `gigaam` | Russian dictation | directory archive |
-| Parakeet V3 | `parakeet` | mixed ru/en/uk and European languages | directory archive |
-| Whisper Large v3 Turbo | `whisper` | general fallback | single GGML file |
-
-The catalog records:
-
-- stable model id
-- display name and description
-- engine type
-- artifact URL
-- SHA256 checksum
-- approximate size
-- archive/file layout
-- supported languages
-- intended use cases
-
-## Why Handy-compatible metadata?
-
-Handy already demonstrates a working local STT architecture with downloadable models, `transcribe-rs`, Whisper/ONNX engines, and VAD. Kwispr should stay small and script-first, but future local backends can reuse the same model metadata shape.
-
-## Future slices
-
-1. local OpenAI-compatible server skeleton
-2. real `transcribe-rs` inference runtime
-3. docs and integration polish
-4. optional VAD preprocessing
-5. future catalog expansion, such as Moonshine-class English low-latency models when suitable artifacts are selected
-
-VAD now has an optional local-runtime preprocessing hook. The first implementation is a conservative energy/RMS gate; full Silero ONNX integration remains tracked in https://github.com/blockedby/kwispr/issues/8.
+| Symptom | Fix |
+|---|---|
+| `curl: (7) Failed to connect` | Start the Rust runtime and check `curl http://127.0.0.1:9000/health`. |
+| `[stub transcript]` | Stop the legacy Python stub and run the Rust runtime. |
+| `unknown model` | Use an exact slug from `./kwispr-models.py list`. |
+| `model ... is not installed` | Download the slug and ensure helper/server use the same `KWISPR_MODEL_DIR`. |
+| checksum failure | Do not use the bytes; retry so another catalog source can be attempted. |
+| backend initialization/load failure | Keep staged shared libraries beside the binary and verify the host Vulkan loader/driver; CPU remains available through dynamic CPU modules. |
+| incorrect language | Supply an ISO language code supported by the selected model, or omit `KWISPR_LANGUAGE` for model-default behavior. |

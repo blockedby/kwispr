@@ -42,15 +42,68 @@ private slots:
         const auto parakeet = catalog.modelById(QStringLiteral("parakeet-tdt-0.6b-v3"));
         QVERIFY(parakeet.has_value());
         QCOMPARE(parakeet->id, QStringLiteral("parakeet-tdt-0.6b-v3"));
-        QCOMPARE(parakeet->name, QStringLiteral("Parakeet V3"));
-        QCOMPARE(parakeet->engineType, QStringLiteral("parakeet"));
-        QVERIFY(parakeet->artifactIsDirectory);
+        QCOMPARE(parakeet->name, QStringLiteral("Parakeet TDT 0.6B v3"));
+        QCOMPARE(parakeet->engineType, QStringLiteral("transcribe-cpp"));
+        QVERIFY(!parakeet->artifactIsDirectory);
         QVERIFY(parakeet->languages.contains(QStringLiteral("en")));
+        QVERIFY(parakeet->supportsLanguageSelection);
+
+        const auto gigaam = catalog.modelById(QStringLiteral("gigaam-v3-e2e-ctc"));
+        QVERIFY(gigaam.has_value());
+        QVERIFY(!gigaam->supportsLanguageSelection);
 
         const auto whisper = catalog.modelById(QStringLiteral("whisper-large-v3-turbo"));
         QVERIFY(whisper.has_value());
         QVERIFY(!whisper->artifactIsDirectory);
         QVERIFY(whisper->supportsLanguageSelection);
+    }
+
+    void supportsLegacyCatalogAndRejectsUnknownOrEmptyVersions()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path = directory.filePath(QStringLiteral("catalog.json"));
+        auto writeCatalog = [&path](const QJsonObject &root) {
+            QFile file(path);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                return false;
+            }
+            return file.write(QJsonDocument(root).toJson()) > 0;
+        };
+
+        const QJsonObject legacyModel{
+            {QStringLiteral("id"), QStringLiteral("legacy-model")},
+            {QStringLiteral("name"), QStringLiteral("Legacy Model")},
+            {QStringLiteral("engine_type"), QStringLiteral("whisper")},
+            {QStringLiteral("artifact"), QJsonObject{{QStringLiteral("is_directory"), false}}},
+            {QStringLiteral("supports_language_selection"), true},
+            {QStringLiteral("languages"), QJsonArray{QStringLiteral("en"), QStringLiteral("fr")}},
+        };
+        QVERIFY(writeCatalog(QJsonObject{
+            {QStringLiteral("schema_version"), 1},
+            {QStringLiteral("models"), QJsonArray{legacyModel}},
+        }));
+        const auto legacy = ModelCatalog::load(path);
+        QVERIFY2(legacy.isValid, qPrintable(legacy.error));
+        QCOMPARE(legacy.models.size(), 1);
+        QCOMPARE(legacy.models.constFirst().id, QStringLiteral("legacy-model"));
+        QVERIFY(legacy.models.constFirst().supportsLanguageSelection);
+
+        QVERIFY(writeCatalog(QJsonObject{
+            {QStringLiteral("catalog_version"), 3},
+            {QStringLiteral("models"), QJsonArray{legacyModel}},
+        }));
+        const auto future = ModelCatalog::load(path);
+        QVERIFY(!future.isValid);
+        QVERIFY(future.error.contains(QStringLiteral("unsupported")));
+
+        QVERIFY(writeCatalog(QJsonObject{
+            {QStringLiteral("catalog_version"), 2},
+            {QStringLiteral("models"), QJsonArray{}},
+        }));
+        const auto empty = ModelCatalog::load(path);
+        QVERIFY(!empty.isValid);
+        QVERIFY(empty.error.contains(QStringLiteral("no models")));
     }
 
     void parsesHelperListOutput()

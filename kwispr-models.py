@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage Kwispr local STT catalog models."""
+"""Download and verify Kwispr's revision-pinned GGUF model catalog."""
 
 from __future__ import annotations
 
@@ -7,200 +7,210 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import sys
-import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
-
-
-class DirectoryVerificationError(Exception):
-    """Directory model contents do not match the installed manifest."""
-
+from urllib.parse import quote
 
 DEFAULT_CATALOG = Path(__file__).resolve().parent / "models" / "local-stt-catalog.json"
 DEFAULT_MODEL_DIR = Path(os.environ.get("KWISPR_MODEL_DIR", "~/.local/share/kwispr/models")).expanduser()
-MANIFEST = ".kwispr-model.json"
+HF_BASE_URL = "https://huggingface.co"
+DOWNLOAD_TIMEOUT_SECONDS = 60
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+class CatalogError(ValueError):
+    """The catalog is not usable by the Kwispr downloader."""
+
+
+class DownloadError(OSError):
+    """Downloaded bytes do not match the catalog's declared size."""
 
 
 def load_catalog(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        catalog = json.load(f)
+    validate_catalog(catalog)
+    return catalog
+
+
+def validate_catalog(catalog: dict[str, Any]) -> None:
+    if catalog.get("catalog_version") != 2:
+        raise CatalogError("catalog_version must be 2")
+    models = catalog.get("models")
+    if not isinstance(models, list) or not models:
+        raise CatalogError("catalog models must be a non-empty list")
+
+    slugs: set[str] = set()
+    repo_ids: set[str] = set()
+    filenames: set[str] = set()
+    for model in models:
+        slug = model.get("slug")
+        repo_id = model.get("id")
+        revision = model.get("revision")
+        files = model.get("files")
+        default_quant = model.get("default_quant")
+        if not isinstance(slug, str) or not slug or slug in slugs:
+            raise CatalogError(f"invalid or duplicate model slug: {slug!r}")
+        repo_parts = repo_id.split("/") if isinstance(repo_id, str) else []
+        if len(repo_parts) != 2 or any(part in {"", ".", ".."} for part in repo_parts) or repo_id in repo_ids:
+            raise CatalogError(f"invalid or duplicate Hugging Face repo id: {repo_id!r}")
+        if not isinstance(revision, str) or len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
+            raise CatalogError(f"model {slug}: revision must be a 40-character lowercase commit SHA")
+        if not isinstance(files, list) or not files:
+            raise CatalogError(f"model {slug}: files must be non-empty")
+        quant_files = [f for f in files if f.get("quant") == default_quant]
+        if len(quant_files) != 1:
+            raise CatalogError(f"model {slug}: default_quant must select exactly one file")
+        for file in files:
+            filename = file.get("filename")
+            sha256 = file.get("sha256")
+            if not isinstance(filename, str) or Path(filename).name != filename or not filename.endswith(".gguf"):
+                raise CatalogError(f"model {slug}: invalid GGUF filename {filename!r}")
+            if not isinstance(sha256, str) or len(sha256) != 64 or any(c not in "0123456789abcdef" for c in sha256):
+                raise CatalogError(f"model {slug}: invalid SHA256 for {filename}")
+            if not isinstance(file.get("size_bytes"), int) or file["size_bytes"] <= 0:
+                raise CatalogError(f"model {slug}: invalid size for {filename}")
+        selected_name = quant_files[0]["filename"]
+        if selected_name in filenames:
+            raise CatalogError(f"duplicate default filename: {selected_name}")
+        slugs.add(slug)
+        repo_ids.add(repo_id)
+        filenames.add(selected_name)
 
 
 def model_map(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {m["id"]: m for m in catalog.get("models", [])}
+    """Map user-facing Handy slugs to catalog models."""
+    return {model["slug"]: model for model in catalog["models"]}
+
+
+def default_file(model: dict[str, Any]) -> dict[str, Any]:
+    quant = model["default_quant"]
+    return next(file for file in model["files"] if file["quant"] == quant)
 
 
 def model_path(root: Path, model: dict[str, Any]) -> Path:
-    artifact = model["artifact"]
-    return root / model["id"] if artifact.get("is_directory") else root / artifact["filename"]
+    return root / default_file(model)["filename"]
 
 
-def manifest_path(root: Path, model: dict[str, Any]) -> Path:
-    target = model_path(root, model)
-    return target / MANIFEST if model["artifact"].get("is_directory") else target.with_suffix(target.suffix + ".kwispr-model.json")
+def quote_path(value: str) -> str:
+    return "/".join(quote(segment, safe="") for segment in value.split("/"))
+
+
+def download_urls(catalog: dict[str, Any], model: dict[str, Any], file: dict[str, Any]) -> list[str]:
+    repo = quote_path(model["id"])
+    revision = quote(model["revision"], safe="")
+    filename = quote(file["filename"], safe="")
+    suffix = f"{repo}/{revision}/{filename}"
+    mirrors = [f"{base.rstrip('/')}/{suffix}" for base in catalog.get("mirrors", [])]
+    return mirrors + [f"{HF_BASE_URL}/{repo}/resolve/{revision}/{filename}"]
 
 
 def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
+    digest = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def read_manifest(root: Path, model: dict[str, Any]) -> dict[str, Any] | None:
-    path = manifest_path(root, model)
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-
-
-def directory_tree_manifest(target: Path) -> dict[str, Any]:
-    """Return a stable manifest for a directory install, excluding Kwispr metadata."""
-    files: dict[str, str] = {}
-    dirs: list[str] = []
-    for path in sorted(target.rglob("*")):
-        rel = path.relative_to(target).as_posix()
-        if rel == MANIFEST:
-            continue
-        if path.is_symlink():
-            raise DirectoryVerificationError(f"unsupported symlink in model directory: {rel}")
-        if path.is_file():
-            files[rel] = sha256_file(path)
-        elif path.is_dir():
-            dirs.append(rel)
-        else:
-            raise DirectoryVerificationError(f"unsupported file type in model directory: {rel}")
-    return {"dirs": dirs, "files": files}
-
-
-def verify_directory_install(root: Path, model: dict[str, Any]) -> bool:
-    artifact = model["artifact"]
-    target = model_path(root, model)
-    manifest = read_manifest(root, model)
-    if not target.is_dir() or not manifest or manifest.get("artifact_sha256") != artifact["sha256"]:
-        return False
-    expected_tree = manifest.get("tree")
-    if not isinstance(expected_tree, dict):
-        return False
-    try:
-        actual_tree = directory_tree_manifest(target)
-    except DirectoryVerificationError:
-        return False
-    return actual_tree == expected_tree
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def is_installed(root: Path, model: dict[str, Any]) -> bool:
-    artifact = model["artifact"]
     target = model_path(root, model)
-    expected = artifact["sha256"]
-    if artifact.get("is_directory"):
-        return verify_directory_install(root, model)
-    return target.is_file() and sha256_file(target) == expected
+    return target.is_file() and sha256_file(target) == default_file(model)["sha256"]
 
 
-def write_manifest(root: Path, model: dict[str, Any]) -> None:
-    path = manifest_path(root, model)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "model_id": model["id"],
-        "artifact_filename": model["artifact"]["filename"],
-        "artifact_sha256": model["artifact"]["sha256"],
-        "source_url": model["artifact"]["url"],
-    }
-    if model["artifact"].get("is_directory"):
-        data["tree"] = directory_tree_manifest(model_path(root, model))
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def safe_extract_tar_gz(archive: Path, dest: Path) -> None:
-    dest_resolved = dest.resolve()
-    with tarfile.open(archive, "r:gz") as tf:
-        for member in tf.getmembers():
-            target = (dest / member.name).resolve()
-            if not str(target).startswith(str(dest_resolved) + os.sep) and target != dest_resolved:
-                raise RuntimeError(f"unsafe archive member path: {member.name}")
-        tf.extractall(dest)
-
-
-def download_url(url: str, dest: Path) -> None:
-    # Some model CDNs reject Python's default urllib User-Agent with 403.
-    # Use a normal downloader UA while keeping the helper dependency-free.
-    request = urllib.request.Request(url, headers={"User-Agent": "kwispr-models/1.0"})
-    with urllib.request.urlopen(request) as response, dest.open("wb") as out:
-        shutil.copyfileobj(response, out)
+def download_url(url: str, dest: Path, expected_size: int) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": "kwispr-models/2.0"})
+    downloaded = 0
+    with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response, dest.open("wb") as out:
+        while chunk := response.read(DOWNLOAD_CHUNK_BYTES):
+            downloaded += len(chunk)
+            if downloaded > expected_size:
+                raise DownloadError(
+                    f"download exceeds catalog size (expected {expected_size} bytes)"
+                )
+            out.write(chunk)
+    if downloaded != expected_size:
+        raise DownloadError(
+            f"download size mismatch (expected {expected_size} bytes, got {downloaded})"
+        )
 
 
 def cmd_list(args: argparse.Namespace) -> int:
     catalog = load_catalog(args.catalog)
-    root = args.model_dir
-    for m in catalog.get("models", []):
-        artifact = m["artifact"]
-        status = "installed" if is_installed(root, m) else "not-installed"
-        print(f"{m['id']}\t{status}\t{artifact.get('size_mb', '?')} MB\t{m['name']}")
+    for model in catalog["models"]:
+        file = default_file(model)
+        status = "installed" if is_installed(args.model_dir, model) else "not-installed"
+        size_mb = file["size_bytes"] / (1024 * 1024)
+        print(f"{model['slug']}\t{status}\t{size_mb:.0f} MB\t{model['name']} ({file['quant']})")
     return 0
+
+
+def selected_models(catalog: dict[str, Any], slug: str | None) -> list[dict[str, Any]] | None:
+    models = model_map(catalog)
+    if slug is None:
+        return list(models.values())
+    model = models.get(slug)
+    return [model] if model is not None else None
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
     catalog = load_catalog(args.catalog)
-    models = model_map(catalog)
-    selected = [models[args.model]] if args.model else list(models.values())
+    selected = selected_models(catalog, args.model)
+    if selected is None:
+        print(f"unknown model: {args.model}", file=sys.stderr)
+        return 2
     ok = True
-    for m in selected:
-        installed = is_installed(args.model_dir, m)
-        print(f"{m['id']}: {'ok' if installed else 'missing-or-invalid'}")
+    for model in selected:
+        installed = is_installed(args.model_dir, model)
+        print(f"{model['slug']}: {'ok' if installed else 'missing-or-invalid'}")
         ok = ok and installed
     return 0 if ok else 1
 
 
 def cmd_download(args: argparse.Namespace) -> int:
     catalog = load_catalog(args.catalog)
-    models = model_map(catalog)
-    if args.model not in models:
+    selected = selected_models(catalog, args.model)
+    if selected is None:
         print(f"unknown model: {args.model}", file=sys.stderr)
         return 2
-    model = models[args.model]
-    artifact = model["artifact"]
+    model = selected[0]
+    file = default_file(model)
     root = args.model_dir
     root.mkdir(parents=True, exist_ok=True)
+    target = model_path(root, model)
     if is_installed(root, model):
-        print(f"{model['id']}: already installed at {model_path(root, model)}")
+        print(f"{model['slug']}: already installed at {target}")
         return 0
 
-    with tempfile.TemporaryDirectory(prefix="kwispr-model-", dir=str(root)) as tmp_s:
-        tmp = Path(tmp_s)
-        archive = tmp / artifact["filename"]
-        print(f"downloading {artifact['url']}")
-        download_url(artifact["url"], archive)
-        actual = sha256_file(archive)
-        if actual != artifact["sha256"]:
-            print(f"checksum mismatch for {model['id']}: expected {artifact['sha256']}, got {actual}", file=sys.stderr)
-            return 1
-
-        target = model_path(root, model)
-        if artifact.get("archive_format") == "tar.gz":
-            staging = tmp / "extract"
-            staging.mkdir()
-            safe_extract_tar_gz(archive, staging)
-            if target.exists():
-                shutil.rmtree(target) if target.is_dir() else target.unlink()
-            target.mkdir(parents=True)
-            for child in staging.iterdir():
-                shutil.move(str(child), target / child.name)
-            write_manifest(root, model)
-        else:
+    urls = download_urls(catalog, model, file)
+    with tempfile.TemporaryDirectory(prefix="kwispr-model-", dir=str(root)) as tmp_dir:
+        temporary = Path(tmp_dir) / file["filename"]
+        errors: list[str] = []
+        for url in urls:
+            print(f"downloading {url}")
+            try:
+                download_url(url, temporary, file["size_bytes"])
+            except (OSError, urllib.error.URLError) as error:
+                errors.append(f"{url}: {error}")
+                continue
+            actual = sha256_file(temporary)
+            if actual != file["sha256"]:
+                errors.append(f"{url}: checksum mismatch (expected {file['sha256']}, got {actual})")
+                temporary.unlink(missing_ok=True)
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(archive), target)
-            write_manifest(root, model)
-    print(f"{model['id']}: installed at {model_path(root, model)}")
-    return 0
+            os.replace(temporary, target)
+            print(f"{model['slug']}: installed at {target}")
+            return 0
+
+    print(f"failed to download a verified copy of {model['slug']}", file=sys.stderr)
+    for error in errors:
+        print(f"  {error}", file=sys.stderr)
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -209,15 +219,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR, help="model install directory (default: $KWISPR_MODEL_DIR or ~/.local/share/kwispr/models)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="list catalog models and install status").set_defaults(func=cmd_list)
-    p_download = sub.add_parser("download", help="download and install one model")
-    p_download.add_argument("model", help="catalog model id")
-    p_download.set_defaults(func=cmd_download)
-    p_verify = sub.add_parser("verify", help="verify installed model checksums/manifests")
-    p_verify.add_argument("model", nargs="?", help="catalog model id (default: all)")
-    p_verify.set_defaults(func=cmd_verify)
+    download = sub.add_parser("download", help="download and install a model's default GGUF quant")
+    download.add_argument("model", help="catalog model slug")
+    download.set_defaults(func=cmd_download)
+    verify = sub.add_parser("verify", help="verify installed model checksums")
+    verify.add_argument("model", nargs="?", help="catalog model slug (default: all)")
+    verify.set_defaults(func=cmd_verify)
     args = parser.parse_args(argv)
     args.model_dir = args.model_dir.expanduser()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (CatalogError, json.JSONDecodeError, OSError) as error:
+        print(f"catalog error: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
