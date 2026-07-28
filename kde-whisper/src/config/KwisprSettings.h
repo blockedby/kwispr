@@ -35,6 +35,7 @@ public:
     void applyOpenAiPreset(const QString &key, const QString &openAiModel, const QString &lang);
     void applyOpenRouterPreset(const QString &key, const QString &openRouterModel, const QString &prompt, const QString &format);
 
+    static KwisprSettings fromEnv(const EnvFile &env);
     void writeTo(EnvFile &env) const;
     bool validate(QStringList *errors = nullptr) const;
 };

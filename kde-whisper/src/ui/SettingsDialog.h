@@ -72,6 +72,7 @@ private:
     void populateModels(const QString &selectedModelId);
     void updateBackendVisibility();
     void updateModelControls();
+    void updateVadControls();
     void showBusyCloseStatus();
     bool selectedModelIsCatalogModel() const;
     void setBackendRowVisible(QWidget *field, QLabel *label, bool visible);
@@ -119,6 +120,7 @@ private:
     QCheckBox *m_vadEnabledCheck = nullptr;
     QComboBox *m_vadProviderCombo = nullptr;
     QLineEdit *m_vadModelPathEdit = nullptr;
+    QLabel *m_vadModelPathLabel = nullptr;
     QDoubleSpinBox *m_vadThresholdSpin = nullptr;
     QLineEdit *m_vadFrameMsEdit = nullptr;
     QDialogButtonBox *m_buttons = nullptr;

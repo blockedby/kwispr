@@ -11,6 +11,7 @@ private slots:
     void openAiPresetValidatesApiKeyForOfficialEndpoint();
     void openRouterPresetWritesChatBackendKeys();
     void pasteHotkeyValidationAllowsOnlySupportedValues();
+    void vadEnvUsesCanonicalKeyWithLegacyCompatibility();
     void vadValidationMatchesRuntimeRequirements();
 };
 
@@ -82,6 +83,27 @@ void SettingsModelTest::pasteHotkeyValidationAllowsOnlySupportedValues()
     QStringList errors;
     QVERIFY(!settings.validate(&errors));
     QVERIFY(errors.join('\n').contains("paste hotkey"));
+}
+
+void SettingsModelTest::vadEnvUsesCanonicalKeyWithLegacyCompatibility()
+{
+    KwisprSettings settings;
+    settings.vadEnabled = true;
+
+    EnvFile env;
+    env.setValue(QStringLiteral("KWISPR_VAD"), QStringLiteral("0"));
+    settings.writeTo(env);
+    QCOMPARE(env.value(QStringLiteral("KWISPR_VAD_ENABLED")), QStringLiteral("1"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_VAD")), QStringLiteral("1"));
+
+    EnvFile conflicting;
+    conflicting.setValue(QStringLiteral("KWISPR_VAD_ENABLED"), QStringLiteral("0"));
+    conflicting.setValue(QStringLiteral("KWISPR_VAD"), QStringLiteral("1"));
+    QVERIFY(!KwisprSettings::fromEnv(conflicting).vadEnabled);
+
+    EnvFile legacyOnly;
+    legacyOnly.setValue(QStringLiteral("KWISPR_VAD"), QStringLiteral("1"));
+    QVERIFY(KwisprSettings::fromEnv(legacyOnly).vadEnabled);
 }
 
 void SettingsModelTest::vadValidationMatchesRuntimeRequirements()

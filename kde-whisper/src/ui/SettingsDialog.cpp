@@ -261,7 +261,8 @@ void SettingsDialog::buildUi()
 
     m_vadModelPathEdit = new QLineEdit(m_vadGroup);
     m_vadModelPathEdit->setObjectName(QStringLiteral("vadModelPathEdit"));
-    vadForm->addRow(QStringLiteral("Silero model"), m_vadModelPathEdit);
+    m_vadModelPathLabel = formLabel(QStringLiteral("Silero model"), QStringLiteral("vadModelPathLabel"), m_vadGroup);
+    vadForm->addRow(m_vadModelPathLabel, m_vadModelPathEdit);
 
     m_vadThresholdSpin = new QDoubleSpinBox(m_vadGroup);
     m_vadThresholdSpin->setObjectName(QStringLiteral("vadThresholdSpin"));
@@ -281,7 +282,13 @@ void SettingsDialog::buildUi()
 
     connect(m_backendCombo, &QComboBox::currentTextChanged, this, &SettingsDialog::applyBackendPreset);
     connect(m_localModelCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() {
-        updateModelControls();
+        updateBackendVisibility();
+    });
+    connect(m_vadEnabledCheck, &QCheckBox::toggled, this, [this]() {
+        updateVadControls();
+    });
+    connect(m_vadProviderCombo, &QComboBox::currentTextChanged, this, [this]() {
+        updateVadControls();
     });
     connect(m_downloadButton, &QPushButton::clicked, this, &SettingsDialog::startModelDownload);
     connect(m_deleteButton, &QPushButton::clicked, this, &SettingsDialog::confirmAndDeleteModel);
@@ -367,14 +374,18 @@ void SettingsDialog::updateBackendVisibility()
     const bool local = backend == QLatin1String("Local STT");
     const bool openAi = backend == QLatin1String("OpenAI");
     const bool openRouter = backend == QLatin1String("OpenRouter");
+    const auto localModel = m_catalog.modelById(selectedModelId());
+    const bool localLanguageVisible = !localModel || localModel->supportsLanguageSelection;
 
     setBackendRowVisible(m_apiUrlEdit, m_apiUrlLabel, true);
+    m_apiUrlEdit->setReadOnly(local);
     setBackendRowVisible(m_apiKeyEdit, m_apiKeyLabel, !local);
     setBackendRowVisible(m_modelEdit, m_modelLabel, !local);
     setBackendRowVisible(m_localModelRow, m_localModelLabel, local);
-    setBackendRowVisible(m_languageEdit, m_languageLabel, local || openAi);
+    setBackendRowVisible(m_languageEdit, m_languageLabel, openAi || (local && localLanguageVisible));
     setBackendRowVisible(m_promptEdit, m_promptLabel, openRouter);
     m_vadGroup->setVisible(local);
+    updateVadControls();
     updateModelControls();
 }
 
@@ -391,6 +402,20 @@ void SettingsDialog::updateModelControls()
     m_deleteButton->setEnabled(manageable && installed);
     m_modelBusyIndicator->setVisible(local && m_modelOperationBusy);
     m_buttons->setEnabled(!m_modelOperationBusy);
+}
+
+void SettingsDialog::updateVadControls()
+{
+    const bool local = m_backendCombo->currentText() == QLatin1String("Local STT");
+    const bool enabled = local && m_vadEnabledCheck->isChecked();
+    const bool silero = enabled && m_vadProviderCombo->currentText().compare(QStringLiteral("silero"), Qt::CaseInsensitive) == 0;
+
+    m_vadProviderCombo->setEnabled(enabled);
+    m_vadThresholdSpin->setEnabled(enabled);
+    m_vadFrameMsEdit->setEnabled(enabled);
+    m_vadModelPathEdit->setVisible(silero);
+    m_vadModelPathLabel->setVisible(silero);
+    m_vadModelPathEdit->setEnabled(silero);
 }
 
 void SettingsDialog::showBusyCloseStatus()
@@ -474,14 +499,21 @@ void SettingsDialog::confirmAndDeleteModel()
     if (!m_modelManager || m_modelOperationBusy) {
         return;
     }
+    const QString modelId = selectedModelId();
     const QString name = selectedModelName();
+    QString message = QStringLiteral("Delete the downloaded model “%1”?\n\nOnly its catalog-managed default GGUF will be removed.").arg(name);
+    const bool deletingConfiguredLocalModel = backendLabelForSettings(m_settings) == QLatin1String("Local STT")
+        && m_settings.model == modelId;
+    if (deletingConfiguredLocalModel) {
+        message += QStringLiteral("\n\nThis is the currently configured Local STT model. You must select and apply another installed model before future server starts.");
+    }
     const auto answer = QMessageBox::question(
         this,
         QStringLiteral("Delete local model"),
-        QStringLiteral("Delete the downloaded model “%1”?\n\nOnly its catalog-managed default GGUF will be removed.").arg(name),
+        message,
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
-    if (answer == QMessageBox::Yes && !m_modelManager->startDelete(selectedModelId())) {
+    if (answer == QMessageBox::Yes && !m_modelManager->startDelete(modelId)) {
         m_modelStatusLabel->setText(QStringLiteral("Could not start model deletion."));
     }
 }

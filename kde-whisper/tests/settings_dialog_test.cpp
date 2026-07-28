@@ -84,6 +84,8 @@ private slots:
     void localSavePreservesHiddenApiKeyAcrossBackendDrafts();
     void localSaveRejectsInvalidEmptyOrUnselectedCatalog();
     void modelComboAndActionsReflectInstallState();
+    void vadControlsFollowEnabledStateAndProvider();
+    void deletingConfiguredLocalModelShowsAdditionalWarning();
     void asynchronousModelOperationsUpdateState();
     void busyModelOperationBlocksSaveAndClosingUntilCompletion();
 };
@@ -163,7 +165,14 @@ void SettingsDialogTest::backendRowsAreContextSensitiveAndPreserveDrafts()
     verifyRow("promptEdit", "promptLabel", false);
     QVERIFY(visible("vadGroup"));
     QVERIFY(visible("pasteGroup"));
-    QCOMPARE(dialog.findChild<QLineEdit *>("apiUrlEdit")->text(), QStringLiteral("http://127.0.0.1:9000/v1/audio/transcriptions"));
+    auto *apiUrl = dialog.findChild<QLineEdit *>("apiUrlEdit");
+    QCOMPARE(apiUrl->text(), QStringLiteral("http://127.0.0.1:9000/v1/audio/transcriptions"));
+    QVERIFY(apiUrl->isReadOnly());
+
+    localModels->setCurrentIndex(localModels->findData(QStringLiteral("parakeet-tdt")));
+    verifyRow("languageEdit", "languageLabel", false);
+    localModels->setCurrentIndex(localModels->findData(QStringLiteral("whisper-large-v3-turbo")));
+    verifyRow("languageEdit", "languageLabel", true);
 
     backend->setCurrentText(QStringLiteral("OpenAI"));
     verifyRow("apiUrlEdit", "apiUrlLabel", true);
@@ -175,6 +184,7 @@ void SettingsDialogTest::backendRowsAreContextSensitiveAndPreserveDrafts()
     QVERIFY(!visible("vadGroup"));
     QVERIFY(visible("pasteGroup"));
     QCOMPARE(dialog.findChild<QLineEdit *>("apiKeyEdit")->text(), QStringLiteral("remember-this-key"));
+    QVERIFY(!apiUrl->isReadOnly());
     dialog.findChild<QLineEdit *>("modelEdit")->setText(QStringLiteral("custom-openai-model"));
 
     backend->setCurrentText(QStringLiteral("OpenRouter"));
@@ -187,6 +197,7 @@ void SettingsDialogTest::backendRowsAreContextSensitiveAndPreserveDrafts()
     QVERIFY(!visible("vadGroup"));
     QVERIFY(visible("pasteGroup"));
     QCOMPARE(dialog.findChild<QLineEdit *>("apiUrlEdit")->text(), QStringLiteral("https://openrouter.ai/api/v1/chat/completions"));
+    QVERIFY(!apiUrl->isReadOnly());
     QCOMPARE(localModels->findData(QStringLiteral("openai/gpt-4o-mini-transcribe")), -1);
 
     backend->setCurrentText(QStringLiteral("OpenAI"));
@@ -229,6 +240,8 @@ void SettingsDialogTest::unmatchedLocalModelRoundTripsButCannotBeManaged()
     EnvFile env;
     FakeModelManager manager;
     SettingsDialog dialog(settings, sampleCatalog(), {}, &env, &manager);
+    dialog.show();
+    QTest::qWait(1);
 
     auto *models = dialog.findChild<QComboBox *>("localModelCombo");
     auto *download = dialog.findChild<QPushButton *>("localModelDownloadButton");
@@ -238,6 +251,8 @@ void SettingsDialogTest::unmatchedLocalModelRoundTripsButCannotBeManaged()
     QCOMPARE(models->currentText(), QStringLiteral("legacy/custom-local-model (not in catalog)"));
     QVERIFY(!download->isEnabled());
     QVERIFY(!remove->isEnabled());
+    QVERIFY(dialog.findChild<QLineEdit *>("languageEdit")->isVisible());
+    QVERIFY(dialog.findChild<QLabel *>("languageLabel")->isVisible());
 
     QVERIFY(dialog.save());
     QCOMPARE(dialog.currentSettings().model, settings.model);
@@ -310,6 +325,75 @@ void SettingsDialogTest::modelComboAndActionsReflectInstallState()
     models->setCurrentIndex(1);
     QVERIFY(download->isEnabled());
     QVERIFY(!remove->isEnabled());
+}
+
+void SettingsDialogTest::vadControlsFollowEnabledStateAndProvider()
+{
+    KwisprSettings settings = localSettings();
+    settings.vadEnabled = false;
+    settings.vadProvider = QStringLiteral("energy");
+    settings.vadModelPath = QStringLiteral("/models/preserved-silero.onnx");
+    SettingsDialog dialog(settings, sampleCatalog(), {});
+    dialog.show();
+    QTest::qWait(1);
+
+    auto *enabled = dialog.findChild<QCheckBox *>("vadEnabledCheck");
+    auto *provider = dialog.findChild<QComboBox *>("vadProviderCombo");
+    auto *modelPath = dialog.findChild<QLineEdit *>("vadModelPathEdit");
+    auto *modelPathLabel = dialog.findChild<QLabel *>("vadModelPathLabel");
+    auto *threshold = dialog.findChild<QDoubleSpinBox *>("vadThresholdSpin");
+    auto *frame = dialog.findChild<QLineEdit *>("vadFrameMsEdit");
+
+    QVERIFY(!provider->isEnabled());
+    QVERIFY(!threshold->isEnabled());
+    QVERIFY(!frame->isEnabled());
+    QVERIFY(!modelPath->isVisible());
+    QVERIFY(!modelPathLabel->isVisible());
+    QVERIFY(!modelPath->isEnabled());
+
+    enabled->setChecked(true);
+    QVERIFY(provider->isEnabled());
+    QVERIFY(threshold->isEnabled());
+    QVERIFY(frame->isEnabled());
+    QVERIFY(!modelPath->isVisible());
+
+    provider->setCurrentText(QStringLiteral("silero"));
+    QVERIFY(modelPath->isVisible());
+    QVERIFY(modelPathLabel->isVisible());
+    QVERIFY(modelPath->isEnabled());
+    QCOMPARE(modelPath->text(), QStringLiteral("/models/preserved-silero.onnx"));
+
+    enabled->setChecked(false);
+    QVERIFY(!provider->isEnabled());
+    QVERIFY(!threshold->isEnabled());
+    QVERIFY(!frame->isEnabled());
+    QVERIFY(!modelPath->isVisible());
+    QVERIFY(!modelPath->isEnabled());
+    QCOMPARE(modelPath->text(), QStringLiteral("/models/preserved-silero.onnx"));
+}
+
+void SettingsDialogTest::deletingConfiguredLocalModelShowsAdditionalWarning()
+{
+    FakeModelManager manager;
+    SettingsDialog dialog(localSettings(), sampleCatalog(), {QStringLiteral("whisper-large-v3-turbo")}, nullptr, &manager);
+    dialog.show();
+
+    QString confirmationText;
+    QTimer::singleShot(10, [&confirmationText]() {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            if (auto *box = qobject_cast<QMessageBox *>(widget)) {
+                confirmationText = box->text();
+                box->button(QMessageBox::No)->click();
+                return;
+            }
+        }
+    });
+    QTest::mouseClick(dialog.findChild<QPushButton *>("localModelDeleteButton"), Qt::LeftButton);
+
+    QVERIFY(confirmationText.contains(QStringLiteral("currently configured Local STT model")));
+    QVERIFY(confirmationText.contains(QStringLiteral("select and apply another installed model")));
+    QVERIFY(confirmationText.contains(QStringLiteral("future server starts")));
+    QVERIFY(manager.lastOperation.isEmpty());
 }
 
 void SettingsDialogTest::asynchronousModelOperationsUpdateState()
