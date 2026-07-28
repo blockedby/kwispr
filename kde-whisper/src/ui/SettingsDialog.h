@@ -5,6 +5,7 @@
 #include "models/ModelCatalog.h"
 
 #include <QDialog>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QSet>
 
@@ -54,6 +55,13 @@ private slots:
                                 bool success,
                                 const QString &stdoutText,
                                 const QString &stderrText);
+    void modelDownloadStatus(const QString &modelId,
+                             const QString &status,
+                             qint64 bytesDone,
+                             qint64 bytesTotal);
+    void modelDownloadProgress(const QString &modelId,
+                               qint64 bytesDone,
+                               qint64 bytesTotal);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -70,6 +78,9 @@ private:
     void buildUi();
     void loadFromSettings(const KwisprSettings &settings);
     void populateModels(const QString &selectedModelId);
+    void populateLanguageChoices(const QString &languageCode);
+    QString selectedLanguageCode() const;
+    static QString formatEta(qint64 seconds);
     void updateBackendVisibility();
     void updateModelControls();
     void updateVadControls();
@@ -93,6 +104,9 @@ private:
     QString m_activeBackend;
     QHash<QString, BackendDraft> m_backendDrafts;
     bool m_modelOperationBusy = false;
+    QString m_activeModelOperation;
+    QString m_activeModelId;
+    QElapsedTimer m_downloadElapsed;
 
     QFormLayout *m_backendForm = nullptr;
     QComboBox *m_backendCombo = nullptr;
@@ -109,7 +123,9 @@ private:
     QPushButton *m_deleteButton = nullptr;
     QProgressBar *m_modelBusyIndicator = nullptr;
     QLabel *m_modelStatusLabel = nullptr;
-    QLineEdit *m_languageEdit = nullptr;
+    QLabel *m_modelDownloadPercentLabel = nullptr;
+    QLabel *m_modelDownloadEtaLabel = nullptr;
+    QComboBox *m_languageCombo = nullptr;
     QLabel *m_languageLabel = nullptr;
     QPlainTextEdit *m_promptEdit = nullptr;
     QLabel *m_promptLabel = nullptr;

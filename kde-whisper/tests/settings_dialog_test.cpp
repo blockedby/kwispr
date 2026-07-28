@@ -35,6 +35,16 @@ public:
     QString lastModelId;
     bool fakeBusy = false;
 
+    void sendStatus(const QString &status, qint64 done, qint64 total)
+    {
+        emit downloadStatus(lastModelId, status, done, total);
+    }
+
+    void sendProgress(qint64 done, qint64 total)
+    {
+        emit downloadProgress(lastModelId, done, total);
+    }
+
     void complete()
     {
         if (!fakeBusy) {
@@ -88,14 +98,22 @@ private slots:
     void deletingConfiguredLocalModelShowsAdditionalWarning();
     void asynchronousModelOperationsUpdateState();
     void busyModelOperationBlocksSaveAndClosingUntilCompletion();
+    void downloadProgressShowsPercentageEtaAndVerification();
+    void languageSelectorUsesCatalogCapabilitiesAndExactCodes();
+    void localLanguageInitializationMatchesRuntime();
+    void unsupportedLocalLanguageBlocksSave();
+    void openAiCustomLanguageAndBackendDraftsRoundTrip();
 };
 
 static ModelCatalog sampleCatalog()
 {
     ModelCatalog catalog;
     catalog.isValid = true;
-    catalog.models.append(LocalModel{QStringLiteral("whisper-large-v3-turbo"), QStringLiteral("Large v3 Turbo"), QStringLiteral("whisper.cpp"), false, {QStringLiteral("en"), QStringLiteral("ru")}, true});
-    catalog.models.append(LocalModel{QStringLiteral("parakeet-tdt"), QStringLiteral("Parakeet TDT"), QStringLiteral("parakeet"), true, {}, false});
+    catalog.models.append(LocalModel{QStringLiteral("whisper-large-v3-turbo"), QStringLiteral("Large v3 Turbo"), QStringLiteral("whisper.cpp"), false, {QStringLiteral("en"), QStringLiteral("ru")}, true, true});
+    catalog.models.append(LocalModel{QStringLiteral("parakeet-tdt"), QStringLiteral("Parakeet TDT"), QStringLiteral("parakeet"), true, {}, false, false});
+    catalog.models.append(LocalModel{QStringLiteral("qwen-no-detect"), QStringLiteral("Qwen Multilingual"), QStringLiteral("transcribe-cpp"), false, {QStringLiteral("bg"), QStringLiteral("en"), QStringLiteral("ru")}, true, false});
+    catalog.models.append(LocalModel{QStringLiteral("qwen-detect"), QStringLiteral("Qwen Detect"), QStringLiteral("transcribe-cpp"), false, {QStringLiteral("en"), QStringLiteral("ru")}, true, true});
+    catalog.models.append(LocalModel{QStringLiteral("russian-mono"), QStringLiteral("Russian Mono"), QStringLiteral("transcribe-cpp"), false, {QStringLiteral("ru")}, false, false});
     return catalog;
 }
 
@@ -129,7 +147,7 @@ void SettingsDialogTest::loadsCurrentSettingsIntoWidgets()
     QCOMPARE(dialog.findChild<QLineEdit *>("apiKeyEdit")->text(), settings.apiKey);
     QCOMPARE(dialog.findChild<QLineEdit *>("modelEdit")->text(), settings.model);
     QCOMPARE(dialog.findChild<QComboBox *>("localModelCombo")->findData(settings.model), -1);
-    QCOMPARE(dialog.findChild<QLineEdit *>("languageEdit")->text(), settings.language);
+    QCOMPARE(dialog.findChild<QComboBox *>("languageEdit")->currentData().toString(), settings.language);
     QCOMPARE(dialog.findChild<QPlainTextEdit *>("promptEdit")->toPlainText(), settings.transcriptionPrompt);
     QVERIFY(!dialog.findChild<QCheckBox *>("autopasteCheck")->isChecked());
     QCOMPARE(dialog.findChild<QComboBox *>("pasteHotkeyCombo")->currentText(), settings.pasteHotkey);
@@ -246,12 +264,15 @@ void SettingsDialogTest::unmatchedLocalModelRoundTripsButCannotBeManaged()
     auto *models = dialog.findChild<QComboBox *>("localModelCombo");
     auto *download = dialog.findChild<QPushButton *>("localModelDownloadButton");
     auto *remove = dialog.findChild<QPushButton *>("localModelDeleteButton");
-    QCOMPARE(models->count(), 3);
+    QCOMPARE(models->count(), 6);
     QCOMPARE(models->currentData().toString(), settings.model);
     QCOMPARE(models->currentText(), QStringLiteral("legacy/custom-local-model (not in catalog)"));
     QVERIFY(!download->isEnabled());
     QVERIFY(!remove->isEnabled());
-    QVERIFY(dialog.findChild<QLineEdit *>("languageEdit")->isVisible());
+    auto *language = dialog.findChild<QComboBox *>("languageEdit");
+    QVERIFY(language->isVisible());
+    QVERIFY(language->isEditable());
+    QCOMPARE(language->currentData().toString(), settings.language);
     QVERIFY(dialog.findChild<QLabel *>("languageLabel")->isVisible());
 
     QVERIFY(dialog.save());
@@ -312,10 +333,14 @@ void SettingsDialogTest::modelComboAndActionsReflectInstallState()
     auto *download = dialog.findChild<QPushButton *>("localModelDownloadButton");
     auto *remove = dialog.findChild<QPushButton *>("localModelDeleteButton");
     auto *row = dialog.findChild<QWidget *>("localModelRow");
-    QCOMPARE(row->layout()->count(), 2);
-    QVERIFY(row->layout()->itemAt(0)->layout());
-    QVERIFY(row->layout()->itemAt(1)->layout());
-    QCOMPARE(models->count(), 2);
+    auto *grid = qobject_cast<QGridLayout *>(row->layout());
+    QVERIFY(grid);
+    QCOMPARE(grid->itemAtPosition(0, 0)->widget(), models);
+    QCOMPARE(grid->itemAtPosition(0, 1)->widget(), download);
+    QCOMPARE(grid->itemAtPosition(0, 2)->widget(), remove);
+    QCOMPARE(grid->itemAtPosition(1, 1)->widget()->objectName(), QStringLiteral("modelDownloadPercentLabel"));
+    QCOMPARE(grid->itemAtPosition(1, 2)->widget()->objectName(), QStringLiteral("modelDownloadEtaLabel"));
+    QCOMPARE(models->count(), 5);
     QCOMPARE(models->itemText(0), QStringLiteral("Large v3 Turbo (installed)"));
     QCOMPARE(models->itemData(0).toString(), QStringLiteral("whisper-large-v3-turbo"));
     QCOMPARE(models->itemText(1), QStringLiteral("Parakeet TDT (not installed)"));
@@ -406,6 +431,8 @@ void SettingsDialogTest::asynchronousModelOperationsUpdateState()
     auto *remove = dialog.findChild<QPushButton *>("localModelDeleteButton");
     auto *busy = dialog.findChild<QProgressBar *>("localModelBusyIndicator");
     auto *status = dialog.findChild<QLabel *>("modelOperationStatusLabel");
+    auto *percent = dialog.findChild<QLabel *>("modelDownloadPercentLabel");
+    auto *eta = dialog.findChild<QLabel *>("modelDownloadEtaLabel");
     models->setCurrentIndex(1);
 
     QTest::mouseClick(download, Qt::LeftButton);
@@ -431,6 +458,10 @@ void SettingsDialogTest::asynchronousModelOperationsUpdateState()
     QTest::mouseClick(remove, Qt::LeftButton);
     QCOMPARE(manager.lastOperation, QStringLiteral("delete"));
     QCOMPARE(manager.lastModelId, QStringLiteral("parakeet-tdt"));
+    QCOMPARE(busy->minimum(), 0);
+    QCOMPARE(busy->maximum(), 0);
+    QVERIFY(percent->isHidden());
+    QVERIFY(eta->isHidden());
     QTRY_COMPARE(models->itemText(1), QStringLiteral("Parakeet TDT (not installed)"));
     QVERIFY(download->isEnabled());
     QVERIFY(!remove->isEnabled());
@@ -494,6 +525,234 @@ void SettingsDialogTest::busyModelOperationBlocksSaveAndClosingUntilCompletion()
     dialog.reject();
     QCOMPARE(rejectedSpy.count(), 1);
     QVERIFY(!dialog.isVisible());
+}
+
+void SettingsDialogTest::downloadProgressShowsPercentageEtaAndVerification()
+{
+    FakeModelManager manager;
+    manager.autoComplete = false;
+    SettingsDialog dialog(localSettings(), sampleCatalog(), {QStringLiteral("whisper-large-v3-turbo")}, nullptr, &manager);
+    dialog.show();
+    auto *models = dialog.findChild<QComboBox *>("localModelCombo");
+    auto *download = dialog.findChild<QPushButton *>("localModelDownloadButton");
+    auto *progress = dialog.findChild<QProgressBar *>("localModelBusyIndicator");
+    auto *percent = dialog.findChild<QLabel *>("modelDownloadPercentLabel");
+    auto *eta = dialog.findChild<QLabel *>("modelDownloadEtaLabel");
+    auto *status = dialog.findChild<QLabel *>("modelOperationStatusLabel");
+    models->setCurrentIndex(models->findData(QStringLiteral("parakeet-tdt")));
+
+    QTest::mouseClick(download, Qt::LeftButton);
+    QCOMPARE(progress->minimum(), 0);
+    QCOMPARE(progress->maximum(), 0);
+    QCOMPARE(percent->text(), QStringLiteral("0%"));
+    QCOMPARE(eta->text(), QStringLiteral("Calculating"));
+    QVERIFY(percent->isVisible());
+    QVERIFY(eta->isVisible());
+
+    manager.sendProgress(0, 100);
+    QCOMPARE(progress->maximum(), 100);
+    QCOMPARE(progress->value(), 0);
+    QTest::qWait(10);
+    manager.sendProgress(25, 100);
+    QCOMPARE(progress->value(), 25);
+    QCOMPARE(percent->text(), QStringLiteral("25%"));
+    QCOMPARE(eta->text(), QStringLiteral("<1m"));
+
+    manager.sendStatus(QStringLiteral("reset"), 0, 100);
+    QCOMPARE(progress->maximum(), 0);
+    manager.sendProgress(0, 100);
+    QCOMPARE(progress->value(), 0);
+    QCOMPARE(percent->text(), QStringLiteral("0%"));
+    QCOMPARE(eta->text(), QStringLiteral("Calculating"));
+    QVERIFY(status->text().contains(QStringLiteral("Retrying")));
+
+    manager.sendProgress(100, 100);
+    manager.sendStatus(QStringLiteral("checksum-verification"), 100, 100);
+    QCOMPARE(progress->value(), 100);
+    QCOMPARE(percent->text(), QStringLiteral("100%"));
+    QCOMPARE(eta->text(), QStringLiteral("Verifying"));
+    QVERIFY(status->text().contains(QStringLiteral("Verifying checksum")));
+
+    manager.complete();
+    QCOMPARE(eta->text(), QStringLiteral("Done"));
+    QVERIFY(status->text().startsWith(QStringLiteral("Done")));
+}
+
+void SettingsDialogTest::languageSelectorUsesCatalogCapabilitiesAndExactCodes()
+{
+    KwisprSettings settings = localSettings();
+    settings.language.clear();
+    EnvFile env;
+    SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+    dialog.show();
+    QTest::qWait(1);
+    auto *models = dialog.findChild<QComboBox *>("localModelCombo");
+    auto *language = dialog.findChild<QComboBox *>("languageEdit");
+
+    QCOMPARE(models->currentData().toString(), QStringLiteral("whisper-large-v3-turbo"));
+    QCOMPARE(language->count(), 3);
+    QCOMPARE(language->itemData(0).toString(), QString());
+    QCOMPARE(language->itemText(0), QStringLiteral("Auto detect (recommended for mixed-language speech)"));
+    QCOMPARE(language->currentData().toString(), QString());
+    QVERIFY(!language->isEditable());
+    QVERIFY(dialog.save());
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QString());
+
+    models->setCurrentIndex(models->findData(QStringLiteral("qwen-detect")));
+    QCOMPARE(language->count(), 3);
+    QCOMPARE(language->itemData(0).toString(), QString());
+
+    models->setCurrentIndex(models->findData(QStringLiteral("qwen-no-detect")));
+    QCOMPARE(language->count(), 3);
+    QCOMPARE(language->itemData(0).toString(), QStringLiteral("bg"));
+    QCOMPARE(language->itemData(1).toString(), QStringLiteral("en"));
+    QCOMPARE(language->itemData(2).toString(), QStringLiteral("ru"));
+    QCOMPARE(language->currentData().toString(), QStringLiteral("en"));
+    QCOMPARE(language->findData(QString()), -1);
+    language->setCurrentIndex(language->findData(QStringLiteral("ru")));
+    QVERIFY(dialog.save());
+    QCOMPARE(dialog.currentSettings().language, QStringLiteral("ru"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("ru"));
+
+    models->setCurrentIndex(models->findData(QStringLiteral("russian-mono")));
+    QCOMPARE(language->count(), 1);
+    QCOMPARE(language->currentData().toString(), QStringLiteral("ru"));
+    QVERIFY(language->isVisible());
+}
+
+void SettingsDialogTest::localLanguageInitializationMatchesRuntime()
+{
+    {
+        KwisprSettings settings = localSettings();
+        settings.model = QStringLiteral("qwen-no-detect");
+        settings.language = QStringLiteral("  AuTo  ");
+        EnvFile env;
+        SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+        auto *language = dialog.findChild<QComboBox *>("languageEdit");
+
+        QCOMPARE(language->currentData().toString(), QStringLiteral("en"));
+        QVERIFY(dialog.save());
+        QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("en"));
+    }
+
+    {
+        KwisprSettings settings = localSettings();
+        settings.model = QStringLiteral("qwen-detect");
+        settings.language = QStringLiteral(" AUTO ");
+        SettingsDialog dialog(settings, sampleCatalog(), {});
+
+        QCOMPARE(dialog.findChild<QComboBox *>("languageEdit")->currentData().toString(), QString());
+        QCOMPARE(dialog.currentSettings().language, QString());
+    }
+
+    {
+        KwisprSettings settings = localSettings();
+        settings.model = QStringLiteral("russian-mono");
+        settings.language = QStringLiteral("   ");
+        SettingsDialog dialog(settings, sampleCatalog(), {});
+
+        QCOMPARE(dialog.findChild<QComboBox *>("languageEdit")->currentData().toString(), QStringLiteral("ru"));
+    }
+
+    {
+        KwisprSettings settings = localSettings();
+        settings.model = QStringLiteral("qwen-no-detect");
+        settings.language = QStringLiteral(" RU ");
+        SettingsDialog dialog(settings, sampleCatalog(), {});
+        auto *backend = dialog.findChild<QComboBox *>("backendCombo");
+        auto *language = dialog.findChild<QComboBox *>("languageEdit");
+
+        QCOMPARE(language->currentData().toString(), QStringLiteral("ru"));
+        QCOMPARE(dialog.currentSettings().language, QStringLiteral("ru"));
+        backend->setCurrentText(QStringLiteral("OpenAI"));
+        backend->setCurrentText(QStringLiteral("Local STT"));
+        QCOMPARE(language->currentData().toString(), QStringLiteral("ru"));
+    }
+
+    {
+        KwisprSettings settings = localSettings();
+        settings.model = QStringLiteral("qwen-no-detect");
+        settings.language = QStringLiteral("ru-RU");
+        SettingsDialog dialog(settings, sampleCatalog(), {});
+
+        QCOMPARE(dialog.findChild<QComboBox *>("languageEdit")->currentData().toString(), QStringLiteral("ru"));
+        QCOMPARE(dialog.currentSettings().language, QStringLiteral("ru"));
+    }
+}
+
+void SettingsDialogTest::unsupportedLocalLanguageBlocksSave()
+{
+    KwisprSettings settings = localSettings();
+    settings.model = QStringLiteral("qwen-no-detect");
+    settings.language = QStringLiteral("  de-DE  ");
+    EnvFile env;
+    env.setValue(QStringLiteral("KWISPR_LANGUAGE"), QStringLiteral("de-DE"));
+    SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+    auto *backend = dialog.findChild<QComboBox *>("backendCombo");
+    auto *language = dialog.findChild<QComboBox *>("languageEdit");
+
+    QVERIFY(!language->isEditable());
+    QCOMPARE(language->count(), 4);
+    QCOMPARE(language->currentData().toString(), QStringLiteral("de-DE"));
+    QVERIFY(language->currentText().contains(QStringLiteral("Unsupported current value")));
+    QVERIFY(language->currentText().contains(QStringLiteral("de-DE")));
+    QCOMPARE(dialog.currentSettings().language, QStringLiteral("de-DE"));
+    backend->setCurrentText(QStringLiteral("OpenAI"));
+    backend->setCurrentText(QStringLiteral("Local STT"));
+    QCOMPARE(language->currentData().toString(), QStringLiteral("de-DE"));
+    QVERIFY(language->currentText().contains(QStringLiteral("Unsupported current value")));
+
+    QVERIFY(!dialog.save());
+    QVERIFY(dialog.lastError().contains(QStringLiteral("de-DE")));
+    QVERIFY(dialog.lastError().contains(QStringLiteral("Qwen Multilingual")));
+    QVERIFY(dialog.lastError().contains(QStringLiteral("Choose a supported language")));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("de-DE"));
+
+    language->setCurrentIndex(language->findData(QStringLiteral("ru")));
+    QVERIFY(dialog.save());
+    QCOMPARE(dialog.currentSettings().language, QStringLiteral("ru"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("ru"));
+}
+
+void SettingsDialogTest::openAiCustomLanguageAndBackendDraftsRoundTrip()
+{
+    KwisprSettings settings;
+    settings.apiUrl = QStringLiteral("https://api.openai.com/v1/audio/transcriptions");
+    settings.model = QStringLiteral("whisper-1");
+    settings.apiKey = QStringLiteral("test-key");
+    settings.language = QStringLiteral("fr");
+    EnvFile env;
+    SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+    auto *backend = dialog.findChild<QComboBox *>("backendCombo");
+    auto *models = dialog.findChild<QComboBox *>("localModelCombo");
+    auto *language = dialog.findChild<QComboBox *>("languageEdit");
+
+    QCOMPARE(backend->currentText(), QStringLiteral("OpenAI"));
+    QVERIFY(language->isEditable());
+    QCOMPARE(language->itemData(0).toString(), QString());
+    QVERIFY(language->findData(QStringLiteral("en")) >= 0);
+    QVERIFY(language->findData(QStringLiteral("ru")) >= 0);
+    QCOMPARE(language->currentData().toString(), QStringLiteral("fr"));
+
+    backend->setCurrentText(QStringLiteral("Local STT"));
+    models->setCurrentIndex(models->findData(QStringLiteral("qwen-no-detect")));
+    language->setCurrentIndex(language->findData(QStringLiteral("ru")));
+    backend->setCurrentText(QStringLiteral("OpenAI"));
+    QCOMPARE(language->currentData().toString(), QStringLiteral("fr"));
+    language->setCurrentText(QStringLiteral("uk"));
+    QCOMPARE(language->currentText(), QStringLiteral("uk"));
+
+    backend->setCurrentText(QStringLiteral("OpenRouter"));
+    QVERIFY(language->isHidden());
+    backend->setCurrentText(QStringLiteral("Local STT"));
+    QCOMPARE(models->currentData().toString(), QStringLiteral("qwen-no-detect"));
+    QCOMPARE(language->currentData().toString(), QStringLiteral("ru"));
+    backend->setCurrentText(QStringLiteral("OpenAI"));
+    QCOMPARE(language->currentText(), QStringLiteral("uk"));
+
+    QVERIFY(dialog.save());
+    QCOMPARE(dialog.currentSettings().language, QStringLiteral("uk"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("uk"));
 }
 
 QTEST_MAIN(SettingsDialogTest)

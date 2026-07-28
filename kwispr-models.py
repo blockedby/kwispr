@@ -9,10 +9,11 @@ import json
 import os
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 DEFAULT_CATALOG = Path(__file__).resolve().parent / "models" / "local-stt-catalog.json"
@@ -20,6 +21,8 @@ DEFAULT_MODEL_DIR = Path(os.environ.get("KWISPR_MODEL_DIR", "~/.local/share/kwis
 HF_BASE_URL = "https://huggingface.co"
 DOWNLOAD_TIMEOUT_SECONDS = 60
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+PROGRESS_INTERVAL_SECONDS = 0.15
+PROGRESS_PROTOCOL = "kwispr-model-download-v1"
 
 
 class CatalogError(ValueError):
@@ -122,9 +125,21 @@ def is_installed(root: Path, model: dict[str, Any]) -> bool:
     return target.is_file() and sha256_file(target) == default_file(model)["sha256"]
 
 
-def download_url(url: str, dest: Path, expected_size: int) -> None:
+def download_url(
+    url: str,
+    dest: Path,
+    expected_size: int,
+    progress: Callable[[int, int], None] | None = None,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    progress_interval: float = PROGRESS_INTERVAL_SECONDS,
+) -> None:
+    """Download exactly expected_size bytes, with throttled initial/final progress."""
     request = urllib.request.Request(url, headers={"User-Agent": "kwispr-models/2.0"})
     downloaded = 0
+    last_reported_at = clock()
+    if progress:
+        progress(0, expected_size)
     with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response, dest.open("wb") as out:
         while chunk := response.read(DOWNLOAD_CHUNK_BYTES):
             downloaded += len(chunk)
@@ -133,10 +148,36 @@ def download_url(url: str, dest: Path, expected_size: int) -> None:
                     f"download exceeds catalog size (expected {expected_size} bytes)"
                 )
             out.write(chunk)
+            now = clock()
+            if progress and (downloaded == expected_size or now - last_reported_at >= progress_interval):
+                progress(downloaded, expected_size)
+                last_reported_at = now
     if downloaded != expected_size:
         raise DownloadError(
             f"download size mismatch (expected {expected_size} bytes, got {downloaded})"
         )
+
+
+class JsonlProgress:
+    """Emit the stable, line-delimited model download protocol."""
+
+    def __init__(self, slug: str, bytes_total: int) -> None:
+        self.slug = slug
+        self.bytes_total = bytes_total
+
+    def emit(self, event: str, bytes_done: int, **fields: Any) -> None:
+        payload = {
+            "protocol": PROGRESS_PROTOCOL,
+            "event": event,
+            "model_slug": self.slug,
+            "bytes_done": bytes_done,
+            "bytes_total": self.bytes_total,
+        }
+        payload.update(fields)
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+    def status(self, phase: str, bytes_done: int) -> None:
+        self.emit("status", bytes_done, phase=phase)
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -196,37 +237,73 @@ def cmd_download(args: argparse.Namespace) -> int:
         return 2
     model = selected[0]
     file = default_file(model)
+    total = file["size_bytes"]
+    jsonl = getattr(args, "progress", None) == "jsonl"
+    reporter = JsonlProgress(model["slug"], total) if jsonl else None
     root = args.model_dir
     root.mkdir(parents=True, exist_ok=True)
     target = model_path(root, model)
     if is_installed(root, model):
-        print(f"{model['slug']}: already installed at {target}")
+        if reporter:
+            reporter.status("already-installed", total)
+            reporter.emit("progress", total)
+            reporter.status("done", total)
+        else:
+            print(f"{model['slug']}: already installed at {target}")
         return 0
 
     urls = download_urls(catalog, model, file)
     with tempfile.TemporaryDirectory(prefix="kwispr-model-", dir=str(root)) as tmp_dir:
         temporary = Path(tmp_dir) / file["filename"]
         errors: list[str] = []
-        for url in urls:
-            print(f"downloading {url}")
+        for attempt, url in enumerate(urls, start=1):
+            if reporter:
+                if attempt > 1:
+                    reporter.emit("reset", 0, attempt=attempt)
+                reporter.emit("attempt", 0, attempt=attempt)
+                reporter.status("downloading", 0)
+            else:
+                print(f"downloading {url}")
             try:
-                download_url(url, temporary, file["size_bytes"])
+                download_url(
+                    url,
+                    temporary,
+                    total,
+                    (lambda done, _total: reporter.emit("progress", done)) if reporter else None,
+                )
             except (OSError, urllib.error.URLError) as error:
                 errors.append(f"{url}: {error}")
+                temporary.unlink(missing_ok=True)
                 continue
+            if reporter:
+                reporter.status("checksum-verification", total)
             actual = sha256_file(temporary)
             if actual != file["sha256"]:
                 errors.append(f"{url}: checksum mismatch (expected {file['sha256']}, got {actual})")
                 temporary.unlink(missing_ok=True)
                 continue
+            if reporter:
+                reporter.status("installing", total)
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(temporary, target)
-            print(f"{model['slug']}: installed at {target}")
+            if reporter:
+                reporter.status("done", total)
+            else:
+                print(f"{model['slug']}: installed at {target}")
             return 0
 
+    if reporter:
+        reporter.status("failed", 0)
     print(f"failed to download a verified copy of {model['slug']}", file=sys.stderr)
-    for error in errors:
-        print(f"  {error}", file=sys.stderr)
+    if reporter:
+        for error in errors[:5]:
+            bounded = error if len(error) <= 500 else error[:497] + "..."
+            print(f"  {bounded}", file=sys.stderr)
+        if len(errors) > 5:
+            print(f"  ... and {len(errors) - 5} more errors", file=sys.stderr)
+    else:
+        for error in errors:
+            print(f"  {error}", file=sys.stderr)
     return 1
 
 
@@ -238,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list", help="list catalog models and install status").set_defaults(func=cmd_list)
     download = sub.add_parser("download", help="download and install a model's default GGUF quant")
     download.add_argument("model", help="catalog model slug")
+    download.add_argument("--progress", choices=("jsonl",), help="emit machine-readable JSONL progress on stdout")
     download.set_defaults(func=cmd_download)
     delete = sub.add_parser("delete", help="delete a model's catalog-managed default GGUF")
     delete.add_argument("model", help="catalog model slug")

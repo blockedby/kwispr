@@ -2,6 +2,7 @@
 
 #include "runtime/ProcessRunner.h"
 
+#include <QByteArray>
 #include <QMap>
 #include <QObject>
 #include <QString>
@@ -38,9 +39,18 @@ signals:
                            bool success,
                            const QString &stdoutText,
                            const QString &stderrText);
+    void downloadStatus(const QString &modelId,
+                        const QString &status,
+                        qint64 bytesDone,
+                        qint64 bytesTotal);
+    void downloadProgress(const QString &modelId,
+                          qint64 bytesDone,
+                          qint64 bytesTotal);
 
 private:
     bool startOperation(const QString &operation, const QString &modelId);
+    void consumeStandardOutput(const QByteArray &chunk);
+    void handleDownloadLine(const QByteArray &line);
     void finishOperation(bool success, const QString &processError = QString());
     ProcessResult runHelper(const QStringList &commandArguments);
 
@@ -53,7 +63,8 @@ private:
     QProcess *m_process = nullptr;
     QString m_operation;
     QString m_modelId;
-    QString m_stdout;
+    QByteArray m_stdout;
+    QByteArray m_downloadLineBuffer;
     QString m_stderr;
     bool m_busy = false;
 };

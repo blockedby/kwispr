@@ -115,7 +115,7 @@ Download a model. Model names are Handy `slug` values; the helper selects that m
 ./kwispr-models.py delete gigaam-v3-e2e-ctc
 ```
 
-The KDE settings dialog also provides nonblocking **Download** and **Delete** actions beside the Local model selector. Deletion is confirmed and delegates to the same catalog-authoritative helper.
+The KDE settings dialog also provides nonblocking **Download** and **Delete** actions beside the Local model selector. Downloads show live percentage and compact ETA, followed by checksum verification. Deletion is confirmed and delegates to the same catalog-authoritative helper. Integrations can request the helper's JSONL protocol with `download SLUG --progress jsonl`; normal CLI output is unchanged.
 
 The full 67-model catalog is synced from Handy commit `ea3c20a3a67c7401d8b19198723760da9d40ac45`; provenance and immutable per-model revisions are recorded in `models/local-stt-catalog.json`.
 
@@ -145,6 +145,8 @@ KWISPR_AUTOPASTE_DELAY=0.30
 KWISPR_SOUNDS=1
 KWISPR_PULSE_SOURCE=default
 ```
+
+`KWISPR_LANGUAGE` is one optional language hint, not a multi-select value. Leave it empty (choose **Auto detect** in KDE) for mixed-language dictation such as Russian plus English; detection is offered only for models whose catalog metadata supports it.
 
 Useful model choices:
 

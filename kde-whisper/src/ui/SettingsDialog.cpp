@@ -10,14 +10,17 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
+#include <QtMath>
 
 namespace {
 constexpr const char *LocalUrl = "http://127.0.0.1:9000/v1/audio/transcriptions";
@@ -37,6 +40,49 @@ QLabel *formLabel(const QString &text, const QString &objectName, QWidget *paren
     auto *label = new QLabel(text, parent);
     label->setObjectName(objectName);
     return label;
+}
+
+QString languageLabel(const QString &code)
+{
+    const QLocale locale(code);
+    QString name = QLocale::languageToString(locale.language());
+    if (locale.language() == QLocale::C || name.isEmpty()) {
+        name = code.toUpper();
+    }
+    return QStringLiteral("%1 (%2)").arg(name, code);
+}
+
+QString baseLanguage(const QString &language)
+{
+    const qsizetype separator = language.indexOf(QLatin1Char('-'));
+    return separator < 0 ? language : language.left(separator);
+}
+
+std::optional<QString> effectiveCatalogLanguage(const LocalModel &model, const QString &language)
+{
+    const QString requested = language.trimmed();
+    if (requested.isEmpty() || requested.compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0) {
+        if (model.supportsLanguageDetection) {
+            return QString();
+        }
+        for (const QString &candidate : model.languages) {
+            if (baseLanguage(candidate).compare(QStringLiteral("en"), Qt::CaseInsensitive) == 0) {
+                return candidate;
+            }
+        }
+        if (!model.languages.isEmpty()) {
+            return model.languages.constFirst();
+        }
+        return std::nullopt;
+    }
+
+    for (const QString &candidate : model.languages) {
+        if (candidate.compare(requested, Qt::CaseInsensitive) == 0
+            || baseLanguage(candidate).compare(baseLanguage(requested), Qt::CaseInsensitive) == 0) {
+            return candidate;
+        }
+    }
+    return std::nullopt;
 }
 }
 
@@ -62,6 +108,10 @@ SettingsDialog::SettingsDialog(const KwisprSettings &settings,
                 this, &SettingsDialog::modelOperationStarted);
         connect(m_modelManager, &ModelManager::operationFinished,
                 this, &SettingsDialog::modelOperationFinished);
+        connect(m_modelManager, &ModelManager::downloadStatus,
+                this, &SettingsDialog::modelDownloadStatus);
+        connect(m_modelManager, &ModelManager::downloadProgress,
+                this, &SettingsDialog::modelDownloadProgress);
         m_modelOperationBusy = m_modelManager->isBusy();
         if (m_modelOperationBusy) {
             m_modelStatusLabel->setText(QStringLiteral("A model operation is already running. Wait for it to finish."));
@@ -102,6 +152,19 @@ bool SettingsDialog::save()
         m_lastError = QStringLiteral("Select a local model before saving Local STT settings.");
         m_modelStatusLabel->setText(m_lastError);
         return false;
+    }
+    if (local) {
+        const auto model = m_catalog.modelById(selectedModelId());
+        const QString language = selectedLanguageCode();
+        if (model && !model->languages.isEmpty() && !effectiveCatalogLanguage(*model, language)) {
+            m_lastError = model->supportsLanguageDetection
+                ? QStringLiteral("Language “%1” is not supported by local model “%2”. Choose Auto detect or a supported language before saving.")
+                      .arg(language, model->name)
+                : QStringLiteral("Language “%1” is not supported by local model “%2”. Choose a supported language before saving.")
+                      .arg(language, model->name);
+            m_modelStatusLabel->setText(m_lastError);
+            return false;
+        }
     }
 
     KwisprSettings settings = settingsFromWidgets();
@@ -180,11 +243,11 @@ void SettingsDialog::buildUi()
 
     m_localModelRow = new QWidget(backendGroup);
     m_localModelRow->setObjectName(QStringLiteral("localModelRow"));
-    auto *modelRowLayout = new QVBoxLayout(m_localModelRow);
-    modelRowLayout->setContentsMargins(0, 0, 0, 0);
-    modelRowLayout->setSpacing(4);
+    auto *modelGrid = new QGridLayout(m_localModelRow);
+    modelGrid->setContentsMargins(0, 0, 0, 0);
+    modelGrid->setHorizontalSpacing(8);
+    modelGrid->setVerticalSpacing(4);
 
-    auto *modelActionsLayout = new QHBoxLayout;
     m_localModelCombo = new QComboBox(m_localModelRow);
     m_localModelCombo->setObjectName(QStringLiteral("localModelCombo"));
     m_localModelCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -193,31 +256,44 @@ void SettingsDialog::buildUi()
     m_downloadButton->setObjectName(QStringLiteral("localModelDownloadButton"));
     m_deleteButton = new QPushButton(QStringLiteral("Delete"), m_localModelRow);
     m_deleteButton->setObjectName(QStringLiteral("localModelDeleteButton"));
-    modelActionsLayout->addWidget(m_localModelCombo, 1);
-    modelActionsLayout->addWidget(m_downloadButton);
-    modelActionsLayout->addWidget(m_deleteButton);
-    modelRowLayout->addLayout(modelActionsLayout);
+    modelGrid->addWidget(m_localModelCombo, 0, 0);
+    modelGrid->addWidget(m_downloadButton, 0, 1);
+    modelGrid->addWidget(m_deleteButton, 0, 2);
 
-    auto *modelStatusLayout = new QHBoxLayout;
-    m_modelBusyIndicator = new QProgressBar(m_localModelRow);
+    auto *progressStatus = new QWidget(m_localModelRow);
+    auto *progressStatusLayout = new QVBoxLayout(progressStatus);
+    progressStatusLayout->setContentsMargins(0, 0, 0, 0);
+    progressStatusLayout->setSpacing(2);
+    m_modelBusyIndicator = new QProgressBar(progressStatus);
     m_modelBusyIndicator->setObjectName(QStringLiteral("localModelBusyIndicator"));
     m_modelBusyIndicator->setRange(0, 0);
     m_modelBusyIndicator->setTextVisible(false);
-    m_modelBusyIndicator->setFixedWidth(48);
-    m_modelStatusLabel = new QLabel(m_localModelRow);
+    m_modelStatusLabel = new QLabel(progressStatus);
     m_modelStatusLabel->setObjectName(QStringLiteral("modelOperationStatusLabel"));
     m_modelStatusLabel->setWordWrap(true);
-    modelStatusLayout->addWidget(m_modelBusyIndicator);
-    modelStatusLayout->addWidget(m_modelStatusLabel, 1);
-    modelRowLayout->addLayout(modelStatusLayout);
+    progressStatusLayout->addWidget(m_modelBusyIndicator);
+    progressStatusLayout->addWidget(m_modelStatusLabel);
+    modelGrid->addWidget(progressStatus, 1, 0);
+
+    m_modelDownloadPercentLabel = new QLabel(m_localModelRow);
+    m_modelDownloadPercentLabel->setObjectName(QStringLiteral("modelDownloadPercentLabel"));
+    m_modelDownloadPercentLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+    m_modelDownloadEtaLabel = new QLabel(m_localModelRow);
+    m_modelDownloadEtaLabel->setObjectName(QStringLiteral("modelDownloadEtaLabel"));
+    m_modelDownloadEtaLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+    modelGrid->addWidget(m_modelDownloadPercentLabel, 1, 1);
+    modelGrid->addWidget(m_modelDownloadEtaLabel, 1, 2);
+    modelGrid->setColumnStretch(0, 1);
+    m_modelDownloadPercentLabel->hide();
+    m_modelDownloadEtaLabel->hide();
 
     m_localModelLabel = formLabel(QStringLiteral("Local model"), QStringLiteral("localModelLabel"), backendGroup);
     m_backendForm->addRow(m_localModelLabel, m_localModelRow);
 
-    m_languageEdit = new QLineEdit(backendGroup);
-    m_languageEdit->setObjectName(QStringLiteral("languageEdit"));
+    m_languageCombo = new QComboBox(backendGroup);
+    m_languageCombo->setObjectName(QStringLiteral("languageEdit"));
     m_languageLabel = formLabel(QStringLiteral("Language"), QStringLiteral("languageLabel"), backendGroup);
-    m_backendForm->addRow(m_languageLabel, m_languageEdit);
+    m_backendForm->addRow(m_languageLabel, m_languageCombo);
 
     m_promptEdit = new QPlainTextEdit(backendGroup);
     m_promptEdit->setObjectName(QStringLiteral("promptEdit"));
@@ -282,6 +358,7 @@ void SettingsDialog::buildUi()
 
     connect(m_backendCombo, &QComboBox::currentTextChanged, this, &SettingsDialog::applyBackendPreset);
     connect(m_localModelCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() {
+        populateLanguageChoices(selectedLanguageCode());
         updateBackendVisibility();
     });
     connect(m_vadEnabledCheck, &QCheckBox::toggled, this, [this]() {
@@ -317,7 +394,7 @@ void SettingsDialog::loadFromSettings(const KwisprSettings &settings)
     if (backendLabel == QLatin1String("Local STT")) {
         populateModels(settings.model);
     }
-    m_languageEdit->setText(settings.language);
+    populateLanguageChoices(settings.language);
     m_promptEdit->setPlainText(settings.transcriptionPrompt);
     m_autopasteCheck->setChecked(settings.autopaste);
     m_pasteHotkeyCombo->setCurrentText(settings.pasteHotkey);
@@ -350,6 +427,101 @@ void SettingsDialog::populateModels(const QString &selectedModelId)
     updateModelControls();
 }
 
+void SettingsDialog::populateLanguageChoices(const QString &languageCode)
+{
+    const QString requested = languageCode.trimmed();
+    const QString backend = m_backendCombo->currentText();
+    const QSignalBlocker blocker(m_languageCombo);
+    m_languageCombo->clear();
+
+    if (backend == QLatin1String("Local STT")) {
+        const auto model = m_catalog.modelById(selectedModelId());
+        if (model) {
+            m_languageCombo->setEditable(false);
+            if (model->supportsLanguageDetection) {
+                m_languageCombo->addItem(
+                    QStringLiteral("Auto detect (recommended for mixed-language speech)"), QString());
+            }
+            for (const QString &code : model->languages) {
+                m_languageCombo->addItem(languageLabel(code), code);
+            }
+
+            int index = -1;
+            if (!model->languages.isEmpty()) {
+                const auto effective = effectiveCatalogLanguage(*model, requested);
+                if (effective) {
+                    index = m_languageCombo->findData(*effective);
+                } else {
+                    m_languageCombo->addItem(
+                        QStringLiteral("Unsupported current value: %1 — choose another language").arg(requested),
+                        requested);
+                    index = m_languageCombo->count() - 1;
+                }
+            } else if (m_languageCombo->count() > 0) {
+                index = 0;
+            }
+            m_languageCombo->setCurrentIndex(index);
+            return;
+        }
+
+        m_languageCombo->setEditable(true);
+        if (requested.isEmpty()) {
+            m_languageCombo->addItem(QStringLiteral("Auto"), QString());
+        } else {
+            m_languageCombo->addItem(requested, requested);
+        }
+        m_languageCombo->setCurrentIndex(0);
+        return;
+    }
+
+    m_languageCombo->setEditable(true);
+    if (backend == QLatin1String("OpenAI")) {
+        m_languageCombo->addItem(QStringLiteral("Auto"), QString());
+        m_languageCombo->addItem(languageLabel(QStringLiteral("en")), QStringLiteral("en"));
+        m_languageCombo->addItem(languageLabel(QStringLiteral("ru")), QStringLiteral("ru"));
+        int index = m_languageCombo->findData(requested);
+        if (index < 0 && !requested.isEmpty()) {
+            m_languageCombo->addItem(requested, requested);
+            index = m_languageCombo->count() - 1;
+        }
+        m_languageCombo->setCurrentIndex(index < 0 ? 0 : index);
+        return;
+    }
+
+    if (requested.isEmpty()) {
+        m_languageCombo->addItem(QStringLiteral("Auto"), QString());
+    } else {
+        m_languageCombo->addItem(requested, requested);
+    }
+    m_languageCombo->setCurrentIndex(0);
+}
+
+QString SettingsDialog::selectedLanguageCode() const
+{
+    const int index = m_languageCombo->currentIndex();
+    if (index >= 0 && m_languageCombo->currentText() == m_languageCombo->itemText(index)) {
+        return m_languageCombo->itemData(index).toString().trimmed();
+    }
+    return m_languageCombo->currentText().trimmed();
+}
+
+QString SettingsDialog::formatEta(qint64 seconds)
+{
+    if (seconds < 60) {
+        return QStringLiteral("<1m");
+    }
+    if (seconds < 3600) {
+        const qint64 minutes = seconds / 60;
+        const qint64 remainder = seconds % 60;
+        return remainder == 0 ? QStringLiteral("%1m").arg(minutes)
+                              : QStringLiteral("%1m %2s").arg(minutes).arg(remainder);
+    }
+    const qint64 hours = seconds / 3600;
+    const qint64 minutes = (seconds % 3600) / 60;
+    return minutes == 0 ? QStringLiteral("%1h").arg(hours)
+                        : QStringLiteral("%1h %2m").arg(hours).arg(minutes);
+}
+
 void SettingsDialog::applyBackendPreset(const QString &backendLabel)
 {
     if (backendLabel == m_activeBackend) {
@@ -375,14 +547,15 @@ void SettingsDialog::updateBackendVisibility()
     const bool openAi = backend == QLatin1String("OpenAI");
     const bool openRouter = backend == QLatin1String("OpenRouter");
     const auto localModel = m_catalog.modelById(selectedModelId());
-    const bool localLanguageVisible = !localModel || localModel->supportsLanguageSelection;
+    const bool localLanguageVisible = !localModel || !localModel->languages.isEmpty()
+        || localModel->supportsLanguageSelection || localModel->supportsLanguageDetection;
 
     setBackendRowVisible(m_apiUrlEdit, m_apiUrlLabel, true);
     m_apiUrlEdit->setReadOnly(local);
     setBackendRowVisible(m_apiKeyEdit, m_apiKeyLabel, !local);
     setBackendRowVisible(m_modelEdit, m_modelLabel, !local);
     setBackendRowVisible(m_localModelRow, m_localModelLabel, local);
-    setBackendRowVisible(m_languageEdit, m_languageLabel, openAi || (local && localLanguageVisible));
+    setBackendRowVisible(m_languageCombo, m_languageLabel, openAi || (local && localLanguageVisible));
     setBackendRowVisible(m_promptEdit, m_promptLabel, openRouter);
     m_vadGroup->setVisible(local);
     updateVadControls();
@@ -437,8 +610,8 @@ void SettingsDialog::saveActiveBackendDraft()
     m_backendDrafts.insert(m_activeBackend, BackendDraft{
         m_apiUrlEdit->text(),
         m_apiKeyEdit->text(),
-        m_modelEdit->text(),
-        m_languageEdit->text(),
+        m_activeBackend == QLatin1String("Local STT") ? selectedModelId() : m_modelEdit->text(),
+        selectedLanguageCode(),
         m_promptEdit->toPlainText(),
     });
 }
@@ -450,11 +623,13 @@ void SettingsDialog::loadBackendDraft(const QString &backendLabel)
         draft = m_backendDrafts.value(backendLabel);
     } else {
         draft.apiKey = m_apiKeyEdit->text();
-        draft.language = m_languageEdit->text();
+        draft.language = selectedLanguageCode();
         draft.prompt = m_promptEdit->toPlainText();
         if (backendLabel == QLatin1String("Local STT")) {
             draft.apiUrl = QString::fromLatin1(LocalUrl);
-            draft.model = m_modelEdit->text();
+            draft.model = !selectedModelId().isEmpty()
+                ? selectedModelId()
+                : (m_catalog.models.isEmpty() ? QString() : m_catalog.models.constFirst().id);
         } else if (backendLabel == QLatin1String("OpenAI")) {
             draft.apiUrl = QString::fromLatin1(OpenAiUrl);
             draft.model = QStringLiteral("whisper-1");
@@ -468,7 +643,10 @@ void SettingsDialog::loadBackendDraft(const QString &backendLabel)
     m_apiUrlEdit->setText(draft.apiUrl);
     m_apiKeyEdit->setText(draft.apiKey);
     m_modelEdit->setText(draft.model);
-    m_languageEdit->setText(draft.language);
+    if (backendLabel == QLatin1String("Local STT")) {
+        populateModels(draft.model);
+    }
+    populateLanguageChoices(draft.language);
     m_promptEdit->setPlainText(draft.prompt);
 }
 
@@ -521,12 +699,93 @@ void SettingsDialog::confirmAndDeleteModel()
 void SettingsDialog::modelOperationStarted(const QString &operation, const QString &modelId)
 {
     m_modelOperationBusy = true;
+    m_activeModelOperation = operation;
+    m_activeModelId = modelId;
     const auto model = m_catalog.modelById(modelId);
     const QString name = model ? model->name : modelId;
-    m_modelStatusLabel->setText(operation == QLatin1String("delete")
-                                    ? QStringLiteral("Deleting %1…").arg(name)
-                                    : QStringLiteral("Downloading %1…").arg(name));
+    if (operation == QLatin1String("download")) {
+        m_downloadElapsed.restart();
+        m_modelBusyIndicator->setRange(0, 0);
+        m_modelDownloadPercentLabel->setText(QStringLiteral("0%"));
+        m_modelDownloadEtaLabel->setText(QStringLiteral("Calculating"));
+        m_modelDownloadPercentLabel->show();
+        m_modelDownloadEtaLabel->show();
+        m_modelStatusLabel->setText(QStringLiteral("Downloading %1…").arg(name));
+    } else {
+        m_modelBusyIndicator->setRange(0, 0);
+        m_modelDownloadPercentLabel->hide();
+        m_modelDownloadEtaLabel->hide();
+        m_modelStatusLabel->setText(QStringLiteral("Deleting %1…").arg(name));
+    }
     updateModelControls();
+}
+
+void SettingsDialog::modelDownloadStatus(const QString &modelId,
+                                         const QString &status,
+                                         qint64 bytesDone,
+                                         qint64 bytesTotal)
+{
+    if (!m_modelOperationBusy || m_activeModelOperation != QLatin1String("download")
+        || modelId != m_activeModelId) {
+        return;
+    }
+    if (status == QLatin1String("reset") || status == QLatin1String("attempt")) {
+        m_downloadElapsed.restart();
+        m_modelBusyIndicator->setRange(0, 0);
+        m_modelDownloadPercentLabel->setText(QStringLiteral("0%"));
+        m_modelDownloadEtaLabel->setText(QStringLiteral("Calculating"));
+        m_modelStatusLabel->setText(status == QLatin1String("reset")
+                                        ? QStringLiteral("Retrying another download source…")
+                                        : QStringLiteral("Connecting to download source…"));
+    } else if (status == QLatin1String("downloading")) {
+        m_modelStatusLabel->setText(QStringLiteral("Downloading…"));
+    } else if (status == QLatin1String("checksum-verification")) {
+        m_modelBusyIndicator->setRange(0, 100);
+        m_modelBusyIndicator->setValue(100);
+        m_modelDownloadPercentLabel->setText(QStringLiteral("100%"));
+        m_modelDownloadEtaLabel->setText(QStringLiteral("Verifying"));
+        m_modelStatusLabel->setText(QStringLiteral("Verifying checksum…"));
+    } else if (status == QLatin1String("installing")) {
+        m_modelStatusLabel->setText(QStringLiteral("Installing verified model…"));
+        m_modelDownloadEtaLabel->setText(QStringLiteral("Installing"));
+    } else if (status == QLatin1String("already-installed")) {
+        m_modelBusyIndicator->setRange(0, 100);
+        m_modelBusyIndicator->setValue(100);
+        m_modelDownloadPercentLabel->setText(QStringLiteral("100%"));
+        m_modelDownloadEtaLabel->setText(QStringLiteral("Done"));
+        m_modelStatusLabel->setText(QStringLiteral("Model is already installed."));
+    } else if (status == QLatin1String("done")) {
+        m_modelDownloadEtaLabel->setText(QStringLiteral("Done"));
+    } else if (status == QLatin1String("failed")) {
+        m_modelDownloadEtaLabel->setText(QStringLiteral("Failed"));
+    }
+    Q_UNUSED(bytesDone);
+    Q_UNUSED(bytesTotal);
+}
+
+void SettingsDialog::modelDownloadProgress(const QString &modelId,
+                                           qint64 bytesDone,
+                                           qint64 bytesTotal)
+{
+    if (!m_modelOperationBusy || m_activeModelOperation != QLatin1String("download")
+        || modelId != m_activeModelId || bytesTotal <= 0 || bytesDone < 0 || bytesDone > bytesTotal) {
+        return;
+    }
+    const int percent = qBound(0, static_cast<int>((100.0 * bytesDone) / bytesTotal), 100);
+    m_modelBusyIndicator->setRange(0, 100);
+    m_modelBusyIndicator->setValue(percent);
+    m_modelDownloadPercentLabel->setText(QStringLiteral("%1%").arg(percent));
+    if (bytesDone <= 0 || !m_downloadElapsed.isValid() || m_downloadElapsed.elapsed() <= 0) {
+        m_modelDownloadEtaLabel->setText(QStringLiteral("Calculating"));
+        return;
+    }
+    const double bytesPerSecond = bytesDone * 1000.0 / m_downloadElapsed.elapsed();
+    if (bytesPerSecond <= 0.0) {
+        m_modelDownloadEtaLabel->setText(QStringLiteral("Calculating"));
+        return;
+    }
+    const qint64 remainingSeconds = qCeil((bytesTotal - bytesDone) / bytesPerSecond);
+    m_modelDownloadEtaLabel->setText(formatEta(remainingSeconds));
 }
 
 QString SettingsDialog::operationError(const QString &stdoutText, const QString &stderrText) const
@@ -549,19 +808,32 @@ void SettingsDialog::modelOperationFinished(const QString &operation,
                                              const QString &stderrText)
 {
     m_modelOperationBusy = false;
+    m_activeModelOperation.clear();
+    m_activeModelId.clear();
     const auto model = m_catalog.modelById(modelId);
     const QString name = model ? model->name : modelId;
     if (success) {
         if (operation == QLatin1String("download")) {
             m_installedModelIds.insert(modelId);
-            m_modelStatusLabel->setText(QStringLiteral("Downloaded %1.").arg(name));
+            m_modelBusyIndicator->setValue(100);
+            m_modelDownloadPercentLabel->setText(QStringLiteral("100%"));
+            m_modelDownloadEtaLabel->setText(QStringLiteral("Done"));
+            m_modelStatusLabel->setText(QStringLiteral("Done — Downloaded %1.").arg(name));
         } else if (operation == QLatin1String("delete")) {
             m_installedModelIds.remove(modelId);
+            m_modelDownloadPercentLabel->hide();
+            m_modelDownloadEtaLabel->hide();
             m_modelStatusLabel->setText(QStringLiteral("Deleted %1.").arg(name));
         }
         populateModels(modelId);
     } else {
         const QString action = operation == QLatin1String("delete") ? QStringLiteral("Delete") : QStringLiteral("Download");
+        if (operation == QLatin1String("download")) {
+            m_modelDownloadEtaLabel->setText(QStringLiteral("Failed"));
+        } else {
+            m_modelDownloadPercentLabel->hide();
+            m_modelDownloadEtaLabel->hide();
+        }
         m_modelStatusLabel->setText(QStringLiteral("%1 failed: %2").arg(action, operationError(stdoutText, stderrText)));
     }
     updateModelControls();
@@ -575,7 +847,7 @@ KwisprSettings SettingsDialog::settingsFromWidgets() const
     settings.apiUrl = m_apiUrlEdit->text().trimmed();
     settings.apiKey = m_apiKeyEdit->text();
     settings.model = local ? selectedModelId() : m_modelEdit->text().trimmed();
-    settings.language = m_languageEdit->text().trimmed();
+    settings.language = selectedLanguageCode();
     settings.transcriptionPrompt = m_promptEdit->toPlainText();
     settings.autopaste = m_autopasteCheck->isChecked();
     settings.pasteHotkey = m_pasteHotkeyCombo->currentText();

@@ -74,7 +74,7 @@ The tray action also delegates to `kwispr.sh toggle`, so both paths exercise the
 
 ## Local STT models
 
-The **Local model** row in KDE Whisper settings shows catalog install state and provides asynchronous **Download** and confirmed **Delete** actions. The same operations are available through the authoritative helper:
+The **Local model** row in KDE Whisper settings shows catalog install state and provides asynchronous **Download** and confirmed **Delete** actions. Downloads report live percentage and compact ETA, then clearly show checksum verification. The same operations are available through the authoritative helper:
 
 ```bash
 ./kwispr-models.py download whisper-large-v3-turbo
@@ -86,6 +86,8 @@ Deletion removes only the slug's catalog-selected default GGUF from `KWISPR_MODE
 ```env
 KWISPR_MODEL=whisper-large-v3-turbo
 ```
+
+**Language** is a single optional hint. Catalog models offer only their supported language codes and offer **Auto detect** only when detection is supported. Choose Auto (an empty `KWISPR_LANGUAGE`) for mixed-language dictation such as Russian plus English. OpenAI accepts one editable hint; OpenRouter does not use this setting.
 
 ## Current limitations
 

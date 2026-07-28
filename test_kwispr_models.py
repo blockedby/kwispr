@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name("kwispr-models.py")
 spec = importlib.util.spec_from_file_location("kwispr_models", MODULE_PATH)
@@ -94,6 +95,107 @@ class KwisprModelsValidationTest(unittest.TestCase):
             self.assertEqual(urls[0], f"{(tmp / 'source').as_uri()}/{suffix}")
             self.assertEqual(urls[1], f"https://huggingface.co/{suffix.replace('/' + 'a' * 40 + '/', '/resolve/' + 'a' * 40 + '/')}")
             self.assertNotIn("/resolve/main/", urls[1])
+
+    def test_download_url_progress_is_throttled_with_initial_and_final_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_s:
+            destination = Path(tmp_s) / "download.gguf"
+            reports: list[tuple[int, int]] = []
+            clock_values = iter((0.0, 0.05, 0.16, 0.17))
+            old_chunk_size = kwispr_models.DOWNLOAD_CHUNK_BYTES
+            kwispr_models.DOWNLOAD_CHUNK_BYTES = 2
+            try:
+                with mock.patch.object(kwispr_models.urllib.request, "urlopen", return_value=io.BytesIO(b"abcdef")):
+                    kwispr_models.download_url(
+                        "https://example.invalid/model.gguf",
+                        destination,
+                        6,
+                        lambda done, total: reports.append((done, total)),
+                        clock=lambda: next(clock_values),
+                        progress_interval=0.1,
+                    )
+            finally:
+                kwispr_models.DOWNLOAD_CHUNK_BYTES = old_chunk_size
+            self.assertEqual(destination.read_bytes(), b"abcdef")
+            self.assertEqual(reports, [(0, 6), (4, 6), (6, 6)])
+
+    def test_jsonl_progress_protocol_is_valid_monotonic_and_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_s:
+            tmp = Path(tmp_s)
+            catalog_path, _ = self.write_catalog(tmp)
+            rc = self.run_cli(
+                "--catalog", str(catalog_path), "--model-dir", str(tmp / "models"),
+                "download", "tiny-model", "--progress", "jsonl",
+            )
+
+            self.assertEqual(rc, 0)
+            events = [json.loads(line) for line in self.last_stdout.splitlines()]
+            self.assertTrue(events)
+            for event in events:
+                self.assertEqual(event["protocol"], kwispr_models.PROGRESS_PROTOCOL)
+                self.assertEqual(event["model_slug"], "tiny-model")
+                self.assertEqual(event["bytes_total"], len(b"test gguf bytes"))
+                self.assertLessEqual(event["bytes_done"], event["bytes_total"])
+            self.assertEqual(events[0]["event"], "attempt")
+            progress = [event["bytes_done"] for event in events if event["event"] == "progress"]
+            self.assertEqual(progress[0], 0)
+            self.assertEqual(progress[-1], len(b"test gguf bytes"))
+            self.assertEqual(progress, sorted(progress))
+            phases = [event.get("phase") for event in events if event["event"] == "status"]
+            self.assertIn("checksum-verification", phases)
+            self.assertIn("installing", phases)
+            self.assertEqual(phases[-1], "done")
+            self.assertNotIn("downloading ", self.last_stdout)
+
+    def test_jsonl_fallback_emits_reset_and_restarts_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_s:
+            tmp = Path(tmp_s)
+            catalog_path, model = self.write_catalog(tmp)
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+            catalog["mirrors"] = [(tmp / "missing-mirror").as_uri()]
+            catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+            selected_file = kwispr_models.default_file(model)
+            hf_file = tmp / "hf" / "example org" / "tiny model-gguf" / "resolve" / model["revision"] / selected_file["filename"]
+            hf_file.parent.mkdir(parents=True)
+            hf_file.write_bytes(b"test gguf bytes")
+            old_hf = kwispr_models.HF_BASE_URL
+            kwispr_models.HF_BASE_URL = (tmp / "hf").as_uri()
+            try:
+                rc = self.run_cli(
+                    "--catalog", str(catalog_path), "--model-dir", str(tmp / "models"),
+                    "download", "tiny-model", "--progress", "jsonl",
+                )
+            finally:
+                kwispr_models.HF_BASE_URL = old_hf
+
+            self.assertEqual(rc, 0)
+            events = [json.loads(line) for line in self.last_stdout.splitlines()]
+            attempts = [event for event in events if event["event"] == "attempt"]
+            self.assertEqual([event["attempt"] for event in attempts], [1, 2])
+            reset_index = next(i for i, event in enumerate(events) if event["event"] == "reset")
+            self.assertEqual(events[reset_index]["bytes_done"], 0)
+            self.assertEqual(events[reset_index + 1]["event"], "attempt")
+            second_progress = [
+                event["bytes_done"] for event in events[reset_index:]
+                if event["event"] == "progress"
+            ]
+            self.assertEqual(second_progress[0], 0)
+            self.assertEqual(second_progress, sorted(second_progress))
+            self.assertEqual(second_progress[-1], selected_file["size_bytes"])
+
+    def test_normal_download_output_contract_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_s:
+            tmp = Path(tmp_s)
+            catalog_path, model = self.write_catalog(tmp)
+            target = kwispr_models.model_path(tmp / "models", model)
+            self.assertEqual(self.run_cli(
+                "--catalog", str(catalog_path), "--model-dir", str(tmp / "models"),
+                "download", "tiny-model",
+            ), 0)
+            self.assertEqual(
+                self.last_stdout,
+                f"downloading {json.loads(catalog_path.read_text(encoding='utf-8'))['mirrors'][0]}/example%20org/tiny%20model-gguf/{'a' * 40}/tiny%20model-Q8_0.gguf\n"
+                f"tiny-model: installed at {target}\n",
+            )
 
     def test_local_download_verify_idempotence_tamper_and_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_s:
