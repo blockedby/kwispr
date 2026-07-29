@@ -13,6 +13,7 @@ struct LocalModel
     bool artifactIsDirectory = false;
     QStringList languages;
     bool supportsLanguageSelection = false;
+    bool supportsLanguageDetection = false;
 };
 
 struct ModelCatalog

@@ -45,14 +45,17 @@ Use your existing KDE global shortcut for dictation:
 
 The tray Toggle Recording action calls the same `kwispr.sh toggle` command.
 
-## Model downloads
+## Model management
 
-KDE Whisper reads the local catalog for display, but model download/verify remains delegated to the existing helper:
+The Local model row provides asynchronous **Download** and confirmed **Delete** controls. Downloads show live percentage, compact ETA, and checksum-verification state. KDE Whisper delegates both to the catalog-authoritative helper without invoking a shell:
 
 ```bash
 ./kwispr-models.py download whisper-large-v3-turbo
+./kwispr-models.py delete whisper-large-v3-turbo
 ./kwispr-models.py verify whisper-large-v3-turbo
 ```
+
+Delete removes only the catalog-selected default GGUF for that slug. Language is one optional hint: choose **Auto detect** (empty `KWISPR_LANGUAGE`) for mixed-language speech when the selected catalog model supports detection.
 
 ## Install metadata
 

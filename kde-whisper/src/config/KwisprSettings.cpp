@@ -2,6 +2,10 @@
 
 #include "config/EnvFile.h"
 
+#include <QDir>
+#include <QFileInfo>
+#include <QStandardPaths>
+
 #include <cmath>
 
 namespace {
@@ -14,6 +18,26 @@ void addError(QStringList *errors, const QString &message)
     if (errors) {
         errors->append(message);
     }
+}
+
+bool envEnabled(const QString &value, bool fallback)
+{
+    if (value.trimmed().isEmpty()) {
+        return fallback;
+    }
+    const QString normalized = value.trimmed().toLower();
+    return normalized != QLatin1String("0") && normalized != QLatin1String("false") && normalized != QLatin1String("no");
+}
+
+QString canonicalOrLegacyValue(const EnvFile &env,
+                               const QString &canonicalKey,
+                               const QString &legacyKey,
+                               const QString &fallback)
+{
+    if (env.contains(canonicalKey)) {
+        return env.value(canonicalKey);
+    }
+    return env.value(legacyKey, fallback);
 }
 }
 
@@ -48,6 +72,67 @@ void KwisprSettings::applyOpenRouterPreset(const QString &key, const QString &op
     openRouterAppTitle = "KDE Whisper";
 }
 
+KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
+{
+    KwisprSettings settings;
+    settings.backend = env.value(QStringLiteral("KWISPR_BACKEND"), settings.backend);
+    settings.apiUrl = env.value(QStringLiteral("KWISPR_API_URL"), settings.apiUrl);
+    settings.apiKey = env.value(QStringLiteral("KWISPR_API_KEY"), settings.apiKey);
+    settings.model = env.value(QStringLiteral("KWISPR_MODEL"), settings.model);
+    settings.language = env.value(QStringLiteral("KWISPR_LANGUAGE"), settings.language);
+    settings.modelDir = env.value(QStringLiteral("KWISPR_MODEL_DIR"), settings.modelDir);
+    settings.audioFormat = env.value(QStringLiteral("KWISPR_AUDIO_FORMAT"), settings.audioFormat);
+    settings.transcriptionPrompt = env.value(QStringLiteral("KWISPR_TRANSCRIPTION_PROMPT"), settings.transcriptionPrompt);
+    settings.openRouterReferer = canonicalOrLegacyValue(env,
+                                                        QStringLiteral("KWISPR_HTTP_REFERER"),
+                                                        QStringLiteral("KWISPR_OPENROUTER_HTTP_REFERER"),
+                                                        settings.openRouterReferer);
+    settings.openRouterAppTitle = canonicalOrLegacyValue(env,
+                                                          QStringLiteral("KWISPR_APP_TITLE"),
+                                                          QStringLiteral("KWISPR_OPENROUTER_APP_TITLE"),
+                                                          settings.openRouterAppTitle);
+    settings.autopaste = envEnabled(env.value(QStringLiteral("KWISPR_AUTOPASTE")), settings.autopaste);
+    settings.pasteHotkey = env.value(QStringLiteral("KWISPR_PASTE_HOTKEY"), settings.pasteHotkey);
+    bool ok = false;
+    const double delay = env.value(QStringLiteral("KWISPR_AUTOPASTE_DELAY")).toDouble(&ok);
+    if (ok) {
+        settings.autopasteDelay = delay;
+    }
+    settings.sounds = envEnabled(env.value(QStringLiteral("KWISPR_SOUNDS")), settings.sounds);
+    settings.pulseSource = env.value(QStringLiteral("KWISPR_PULSE_SOURCE"), settings.pulseSource);
+    const QString vadEnabledKey = env.contains(QStringLiteral("KWISPR_VAD_ENABLED"))
+        ? QStringLiteral("KWISPR_VAD_ENABLED")
+        : QStringLiteral("KWISPR_VAD");
+    settings.vadEnabled = envEnabled(env.value(vadEnabledKey), settings.vadEnabled);
+    settings.vadProvider = env.value(QStringLiteral("KWISPR_VAD_PROVIDER"), settings.vadProvider);
+    settings.vadModelPath = env.value(QStringLiteral("KWISPR_VAD_MODEL"), settings.vadModelPath);
+    const double threshold = env.value(QStringLiteral("KWISPR_VAD_THRESHOLD")).toDouble(&ok);
+    if (ok) {
+        settings.vadThreshold = threshold;
+    }
+    const int frameMs = env.value(QStringLiteral("KWISPR_VAD_FRAME_MS")).toInt(&ok);
+    if (ok) {
+        settings.vadFrameMs = frameMs;
+    }
+    settings.modelDir = settings.resolvedModelDir();
+    return settings;
+}
+
+QString KwisprSettings::resolvedModelDir() const
+{
+    QString path = modelDir.trimmed();
+    if (path.isEmpty()) {
+        path = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation))
+                   .filePath(QStringLiteral("kwispr/models"));
+    } else if (path == QLatin1String("~")) {
+        path = QDir::homePath();
+    } else if (path.startsWith(QLatin1String("~/"))) {
+        path = QDir::home().filePath(path.mid(2));
+    }
+
+    return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+}
+
 void KwisprSettings::writeTo(EnvFile &env) const
 {
     env.setValue("KWISPR_BACKEND", backend);
@@ -62,20 +147,18 @@ void KwisprSettings::writeTo(EnvFile &env) const
     env.setValue("KWISPR_AUTOPASTE_DELAY", QString::number(autopasteDelay, 'f', 2));
     env.setValue("KWISPR_SOUNDS", sounds ? "1" : "0");
 
-    if (!modelDir.isEmpty()) {
-        env.setValue("KWISPR_MODEL_DIR", modelDir);
-    }
+    env.setValue("KWISPR_MODEL_DIR", resolvedModelDir());
     if (!transcriptionPrompt.isEmpty()) {
         env.setValue("KWISPR_TRANSCRIPTION_PROMPT", transcriptionPrompt);
     }
-    if (!openRouterReferer.isEmpty()) {
-        env.setValue("KWISPR_OPENROUTER_HTTP_REFERER", openRouterReferer);
-    }
-    if (!openRouterAppTitle.isEmpty()) {
-        env.setValue("KWISPR_OPENROUTER_APP_TITLE", openRouterAppTitle);
-    }
+    env.setValue("KWISPR_HTTP_REFERER", openRouterReferer);
+    env.setValue("KWISPR_OPENROUTER_HTTP_REFERER", openRouterReferer);
+    env.setValue("KWISPR_APP_TITLE", openRouterAppTitle);
+    env.setValue("KWISPR_OPENROUTER_APP_TITLE", openRouterAppTitle);
 
-    env.setValue("KWISPR_VAD", vadEnabled ? "1" : "0");
+    const QString vadEnabledValue = vadEnabled ? QStringLiteral("1") : QStringLiteral("0");
+    env.setValue("KWISPR_VAD_ENABLED", vadEnabledValue);
+    env.setValue("KWISPR_VAD", vadEnabledValue);
     env.setValue("KWISPR_VAD_PROVIDER", vadProvider);
     env.setValue("KWISPR_VAD_MODEL", vadModelPath);
     env.setValue("KWISPR_VAD_THRESHOLD", QString::number(vadThreshold, 'g', 12));
