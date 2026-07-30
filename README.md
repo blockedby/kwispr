@@ -105,6 +105,8 @@ Build backend behavior:
 
 The files under `~/.local` are always installed rootlessly. Privileged package provisioning is a separate, explicit host-build step. Pre-existing packages and their install reasons are not changed, and required Qt/KF6, Vulkan, ffmpeg, and desktop runtime packages are not included in temporary cleanup.
 
+`--autostart` installs `~/.config/autostart/org.kwispr.KdeWhisper.desktop`. When installation runs over SSH while the user's KDE graphical session is active, the installer also starts or restarts the tray in that session through the user systemd manager. Without an active graphical session it starts at the next login; `--no-systemd-actions` skips the immediate launch. Upgrades stop the old installed tray before replacing it. `--uninstall` stops the tray and removes its autostart entry while preserving user configuration and downloaded models.
+
 No `.env` preparation is required. Open the graphical configuration after installation with:
 
 ```bash

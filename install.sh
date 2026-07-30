@@ -35,7 +35,7 @@ Options:
   --prefix PATH              Install prefix (default: ~/.local)
   --with-local-stt           Install the built offline STT runtime
   --without-local-stt        Install cloud/tray components only
-  --autostart                Start the KDE tray at login
+  --autostart                Start the KDE tray now when possible and at login
   --no-autostart             Do not start the tray at login
   --local-stt-autostart      Enable and start local STT at login
   --no-local-stt-autostart   Install local STT without enabling it
@@ -712,8 +712,114 @@ systemctl_user() {
   systemctl --user "$@"
 }
 
+stop_tray_processes() {
+  local stopped_count
+  [[ -e "$LIB_DIR/kde-whisper" ]] || return 0
+  command -v python3 >/dev/null 2>&1 \
+    || fail "python3 is required to stop the installed tray safely"
+
+  stopped_count="$(python3 - "$LIB_DIR/kde-whisper" <<'PY'
+import os
+import select
+import signal
+import sys
+import time
+
+expected = os.path.realpath(sys.argv[1])
+current_uid = os.geteuid()
+processes = []
+
+
+def executable_path(pid):
+    path = os.readlink(f"/proc/{pid}/exe")
+    if path.endswith(" (deleted)"):
+        path = path[:-10]
+    return os.path.realpath(path)
+
+
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    pid = int(name)
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != current_uid or executable_path(pid) != expected:
+            continue
+        pidfd = os.pidfd_open(pid)
+        # Revalidate after pidfd_open: the descriptor is now bound to this exact process,
+        # so later PID reuse cannot redirect either signal to an unrelated process.
+        if os.stat(f"/proc/{pid}").st_uid != current_uid or executable_path(pid) != expected:
+            os.close(pidfd)
+            continue
+        processes.append((pid, pidfd))
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+
+for _pid, pidfd in processes:
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+deadline = time.monotonic() + 5.0
+remaining = list(processes)
+while remaining and time.monotonic() < deadline:
+    alive = []
+    for pid, pidfd in remaining:
+        poller = select.poll()
+        poller.register(pidfd, select.POLLIN)
+        if not poller.poll(0):
+            alive.append((pid, pidfd))
+    remaining = alive
+    if remaining:
+        time.sleep(0.1)
+
+for _pid, pidfd in remaining:
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+for _pid, pidfd in processes:
+    os.close(pidfd)
+
+print(len(processes))
+PY
+)" || fail "Could not stop the installed Kwispr tray"
+
+  if ((stopped_count > 0)); then
+    ok "Stopped the running Kwispr tray"
+  fi
+}
+
+start_tray_in_graphical_session() {
+  [[ "$TRAY_AUTOSTART" == 1 ]] || return 0
+  if [[ "$NO_SYSTEMD_ACTIONS" == 1 ]]; then
+    info "Tray autostart enabled; current-session launch skipped (--no-systemd-actions)"
+    return 0
+  fi
+  if ! command -v systemctl >/dev/null 2>&1 || ! command -v systemd-run >/dev/null 2>&1; then
+    info "Tray autostart enabled; it will start at the next graphical login"
+    return 0
+  fi
+  if ! systemctl --user --quiet is-active graphical-session.target; then
+    info "Tray autostart enabled; no active graphical session was found"
+    return 0
+  fi
+
+  if systemd-run --user --quiet --collect --service-type=exec \
+      --unit="kwispr-tray-install-$BASHPID.service" \
+      --property=PartOf=graphical-session.target \
+      --property=After=graphical-session.target \
+      "$BIN_DIR/kde-whisper"; then
+    ok "Kwispr tray started in the current graphical session"
+  else
+    warn "Tray autostart is installed, but the current-session launch failed"
+  fi
+}
+
 uninstall_kwispr() {
   banner
+  stop_tray_processes
   info "Removing application files from $PREFIX"
   if [[ -f "$SYSTEMD_USER_DIR/kwispr-local-stt.service" ]]; then
     systemctl_user disable --now kwispr-local-stt.service >/dev/null 2>&1 || true
@@ -725,8 +831,11 @@ uninstall_kwispr() {
     "$BIN_DIR/kde-whisper" \
     "$APPLICATIONS_DIR/org.kwispr.KdeWhisper.desktop" \
     "$METAINFO_DIR/org.kwispr.KdeWhisper.metainfo.xml" \
-    "$ICON_DIR/org.kwispr.KdeWhisper.svg" \
-    "$AUTOSTART_DIR/org.kwispr.KdeWhisper.desktop"
+    "$ICON_DIR/org.kwispr.KdeWhisper.svg"
+  if [[ -e "$AUTOSTART_DIR/org.kwispr.KdeWhisper.desktop" || -L "$AUTOSTART_DIR/org.kwispr.KdeWhisper.desktop" ]]; then
+    rm -f "$AUTOSTART_DIR/org.kwispr.KdeWhisper.desktop"
+    ok "Kwispr tray autostart entry removed"
+  fi
   rm -rf "$LIB_DIR" "$RUNTIME_ROOT"
   ok "Kwispr application files removed"
   info "Settings and downloaded models were preserved:"
@@ -799,6 +908,7 @@ if [[ "$WITH_LOCAL_STT" == 1 ]]; then
     || fail "Local STT binary not found: $LOCAL_STT_RELEASE_DIR/kwispr-local-stt"
 fi
 
+stop_tray_processes
 info "Installing application files"
 mkdir -p "$LIB_DIR" "$RUNTIME_ROOT/models" "$RUNTIME_ROOT/sounds" \
   "$APPLICATIONS_DIR" "$METAINFO_DIR" "$ICON_DIR" "$CONFIG_DIR" "$MODEL_DIR"
@@ -814,8 +924,10 @@ write_desktop_file "$APPLICATIONS_DIR/org.kwispr.KdeWhisper.desktop"
 
 if [[ "$TRAY_AUTOSTART" == 1 ]]; then
   write_desktop_file "$AUTOSTART_DIR/org.kwispr.KdeWhisper.desktop"
+  ok "Kwispr tray added to graphical-session autostart"
 else
   rm -f "$AUTOSTART_DIR/org.kwispr.KdeWhisper.desktop"
+  info "Kwispr tray autostart disabled"
 fi
 
 if [[ ! -f "$CONFIG_FILE" && -f "$LEGACY_CONFIG" ]]; then
@@ -871,6 +983,7 @@ command -v update-desktop-database >/dev/null 2>&1 \
 [[ -x "$BIN_DIR/kwispr" ]] || fail "Installed CLI validation failed"
 [[ -x "$BIN_DIR/kde-whisper" ]] || fail "Installed tray validation failed"
 [[ -f "$RUNTIME_ROOT/models/local-stt-catalog.json" ]] || fail "Installed catalog validation failed"
+start_tray_in_graphical_session
 ok "Kwispr installed successfully"
 
 printf '\n'
