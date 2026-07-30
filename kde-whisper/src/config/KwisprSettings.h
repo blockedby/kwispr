@@ -28,7 +28,7 @@ public:
     bool vadEnabled = false;
     QString vadProvider = "energy";
     QString vadModelPath;
-    double vadThreshold = 0.5;
+    double vadThreshold = 0.01;
     int vadFrameMs = 30;
 
     void applyLocalPreset(const QString &localModel, const QString &localModelDir, const QString &lang);

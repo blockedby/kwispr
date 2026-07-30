@@ -17,6 +17,7 @@ private slots:
     void openRouterPresetWritesChatBackendKeys();
     void openRouterMetadataEnvUsesCanonicalKeysWithLegacyCompatibility();
     void pasteHotkeyValidationAllowsOnlySupportedValues();
+    void vadDefaultsMatchEnergyRuntime();
     void vadEnvUsesCanonicalKeyWithLegacyCompatibility();
     void vadValidationMatchesRuntimeRequirements();
 };
@@ -162,6 +163,13 @@ void SettingsModelTest::pasteHotkeyValidationAllowsOnlySupportedValues()
     QStringList errors;
     QVERIFY(!settings.validate(&errors));
     QVERIFY(errors.join('\n').contains("paste hotkey"));
+}
+
+void SettingsModelTest::vadDefaultsMatchEnergyRuntime()
+{
+    const KwisprSettings settings;
+    QCOMPARE(settings.vadProvider, QStringLiteral("energy"));
+    QCOMPARE(settings.vadThreshold, 0.01);
 }
 
 void SettingsModelTest::vadEnvUsesCanonicalKeyWithLegacyCompatibility()
