@@ -10,15 +10,21 @@
 - delegates recording/retry to the existing `kwispr.sh toggle` and `kwispr.sh retry` commands;
 - reads the local STT model catalog and delegates downloads to `kwispr-models.py`.
 
-## Build and test in Podman
+## Build and test
 
-All KDE/Qt development dependencies are installed inside the Arch-based Podman image:
+The top-level installer supports a native Arch build with temporary dependencies:
+
+```bash
+./install.sh --build-backend host
+```
+
+It snapshots pacman package state, installs only missing build packages as dependencies, and removes only packages introduced by that build. Use `--keep-build-deps` to retain a development environment. Podman remains an optional isolated backend:
 
 ```bash
 ./kde-whisper/scripts/podman-test.sh
 ```
 
-Run one test:
+Run one containerized test:
 
 ```bash
 ./kde-whisper/scripts/podman-test.sh -R TrayControllerTest
@@ -28,16 +34,13 @@ The test wrapper sets `QT_QPA_PLATFORM=offscreen` by default so Qt tests can run
 
 ## Build artifact
 
-The test command configures and builds under:
+The Podman command configures and builds under `kde-whisper/build/`. The installer keeps native caches separately under `kde-whisper/build-host/`, preventing container source paths or generator choices from poisoning a later host build.
 
-```text
-kde-whisper/build/
-```
-
-After a successful build, the binary is:
+After a successful build, the binary is respectively:
 
 ```text
 kde-whisper/build/kde-whisper
+kde-whisper/build-host/kde-whisper
 ```
 
 Run it on your KDE desktop from the repository root:

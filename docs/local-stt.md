@@ -47,17 +47,23 @@ Downloaded bytes must match both the catalog size and SHA256 before an atomic in
 
 Linux uses transcribe-cpp `0.1.3` with Handy's dynamic-backend posture: loadable CPU variants and Vulkan. `transcribe-rs` is retained only for optional Silero VAD.
 
-Prefer the repository's Podman builder:
+For an end-user native Arch build, let the installer provision and later remove only the missing build dependencies:
 
 ```bash
-./rust-local-stt/build-in-podman.sh
+./install.sh --build-backend host --with-local-stt
 ```
 
-Or, with Rust/CMake/Clang/Vulkan/shaderc development packages installed:
+For a persistent development environment, add `--keep-build-deps`, or install the toolchain yourself and run:
 
 ```bash
 cd rust-local-stt
-cargo build --release
+cargo build --release --locked
+```
+
+Podman remains available as an optional isolated builder when already installed:
+
+```bash
+./rust-local-stt/build-in-podman.sh
 ```
 
 The build stages `libtranscribe.so*` and `libggml*.so*` runtime/backend files into `rust-local-stt/target/release/` beside the binary. Keep these files together if copying the runtime.

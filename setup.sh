@@ -14,18 +14,19 @@ fi
 install_runtime_packages() {
   if command -v pacman >/dev/null 2>&1; then
     echo "==> Installing pacman packages..."
-    sudo pacman -S --needed ffmpeg curl jq wl-clipboard libnotify pipewire-pulse ydotool acl podman python gum
+    sudo pacman -S --needed ffmpeg curl jq wl-clipboard libnotify pipewire-pulse ydotool acl python gum
   elif command -v apt >/dev/null 2>&1; then
     echo "==> Installing APT packages..."
-    sudo apt install -y ffmpeg curl jq wl-clipboard libnotify-bin acl podman python3
+    sudo apt install -y ffmpeg curl jq wl-clipboard libnotify-bin acl python3
   else
-    echo "WARN: No supported package manager found. Install ffmpeg curl jq wl-clipboard libnotify acl podman and optionally ydotool manually."
+    echo "WARN: No supported package manager found. Install ffmpeg curl jq wl-clipboard libnotify acl and optionally ydotool manually."
   fi
 }
 
-echo "==> Optional privileged dependency/integration setup"
-echo "    This helper uses sudo for packages and, if selected, /dev/uinput access."
-echo "    The application installer itself (./install.sh) remains rootless."
+echo "==> Optional privileged runtime/integration setup"
+echo "    This helper uses sudo for desktop packages and, if selected, /dev/uinput access."
+echo "    It does not install Podman or compiler toolchains."
+echo "    Application files installed by ./install.sh remain under the user prefix."
 echo ""
 install_runtime_packages
 

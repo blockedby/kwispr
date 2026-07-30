@@ -57,19 +57,13 @@ Runtime packages:
 | `pipewire-pulse` | Pulse-compatible recording source |
 | `ydotool` + `ydotoold` | optional auto-paste on Wayland |
 
-On CachyOS/Arch:
+On CachyOS/Arch, `setup.sh` can provision desktop/recording integration without installing Podman:
 
 ```bash
-sudo pacman -S --needed ffmpeg curl jq wl-clipboard libnotify pipewire-pulse ydotool python podman gum
+./setup.sh
 ```
 
-For local Rust STT builds on the host:
-
-```bash
-sudo pacman -S --needed rust cmake clang vulkan-headers vulkan-icd-loader shaderc spirv-headers pkgconf
-```
-
-Or build in Podman so build dependencies do not pollute the host; see [Build local STT in Podman](#build-local-stt-in-podman).
+The application installer can build natively with temporary Arch development packages, use an already-installed Podman, or consume existing artifacts. Runtime dependencies remain installed; only the exact build-only package set introduced by that installer run is eligible for cleanup.
 
 ## Install
 
@@ -83,11 +77,26 @@ cd kwispr
 The installer uses [Gum](https://github.com/charmbracelet/gum) when it is already available and falls back to portable terminal prompts otherwise. Useful unattended forms:
 
 ```bash
-./install.sh --yes --autostart --without-local-stt
-./install.sh --yes --autostart --with-local-stt --local-stt-autostart
-./install.sh --test    # optional developer verification
+./install.sh --yes --build-backend host --allow-package-install --autostart --without-local-stt
+./install.sh --yes --build-backend host --allow-package-install --autostart --with-local-stt --local-stt-autostart
+./install.sh --build-backend host       # native Arch build
+./install.sh --build-backend podman     # require an existing Podman installation
+./install.sh --build-backend existing   # use existing/override artifacts
+./install.sh --test                     # optional developer verification
 ./install.sh --uninstall
 ```
+
+Build backend behavior:
+
+- `auto` uses Podman only when it is already installed; otherwise it selects the native host build.
+- `host` on Arch shows missing runtime and temporary build packages before asking to run `sudo pacman`. Missing build packages are installed with `--asdeps` and removed after the build.
+- `podman` never installs Podman; it fails clearly when the command is unavailable.
+- `existing` performs no build and is also available through the backward-compatible `--skip-build` alias.
+- `--keep-build-deps` leaves newly installed native build dependencies in place.
+- unattended package provisioning requires both `--yes` and `--allow-package-install`; `--yes` alone never authorizes `sudo pacman`.
+- native provisioning refuses a partial Arch upgrade state; run `sudo pacman -Syu` first when pending upgrades are reported.
+
+The files under `~/.local` are always installed rootlessly. Privileged package provisioning is a separate, explicit host-build step. Pre-existing packages and their install reasons are not changed, and required Qt/KF6, Vulkan, ffmpeg, and desktop runtime packages are not included in temporary cleanup.
 
 No `.env` preparation is required. Open the graphical configuration after installation with:
 
@@ -171,9 +180,9 @@ Useful model choices:
 | Mixed Russian/English | `whisper-large-v3-turbo` |
 | European multilingual dictation | `parakeet-tdt-0.6b-v3` |
 
-### Build local STT in Podman
+### Optional local STT build in Podman
 
-A container build file is included at `rust-local-stt/Containerfile`.
+Podman is an optional isolation backend and is never installed implicitly. A container build file is included at `rust-local-stt/Containerfile`.
 
 Convenience script:
 

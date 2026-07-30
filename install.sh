@@ -14,6 +14,9 @@ OPEN_SETTINGS=""
 ASSUME_YES=0
 PLAIN=0
 SKIP_BUILD=0
+BUILD_BACKEND=""
+KEEP_BUILD_DEPS=0
+ALLOW_PACKAGE_INSTALL=0
 NO_SYSTEMD_ACTIONS="${KWISPR_INSTALL_NO_SYSTEMD:-0}"
 RUN_TESTS=0
 UNINSTALL=0
@@ -22,7 +25,7 @@ usage() {
   cat <<'EOF'
 Usage: ./install.sh [options]
 
-A polished user-local install is the default; no sudo is required.
+Application files install user-locally; optional Arch dependency provisioning may use sudo.
 
 Options:
   --prefix PATH              Install prefix (default: ~/.local)
@@ -34,8 +37,11 @@ Options:
   --no-local-stt-autostart   Install local STT without enabling it
   --open-settings            Open the graphical settings after install
   --no-open-settings         Do not open settings after install
-  --skip-build               Use existing/override build artifacts
-  --test                     Run the KDE test suite after building
+  --build-backend MODE       Build with auto, host, podman, or existing
+  --skip-build               Alias for --build-backend existing
+  --keep-build-deps          Keep native Arch build dependencies
+  --allow-package-install    Authorize pacman in noninteractive mode
+  --test                     Run developer tests after building
   --yes                      Accept recommended defaults; no prompts
   --plain                    Disable Gum and ANSI decoration
   --no-systemd-actions       Write units but do not call systemctl
@@ -59,7 +65,10 @@ while (($#)); do
     --no-local-stt-autostart) LOCAL_STT_AUTOSTART=0; shift ;;
     --open-settings) OPEN_SETTINGS=1; shift ;;
     --no-open-settings) OPEN_SETTINGS=0; shift ;;
+    --build-backend) [[ $# -ge 2 ]] || { echo "--build-backend needs auto, host, podman, or existing" >&2; exit 2; }; BUILD_BACKEND="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
+    --keep-build-deps) KEEP_BUILD_DEPS=1; shift ;;
+    --allow-package-install) ALLOW_PACKAGE_INSTALL=1; shift ;;
     --test) RUN_TESTS=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
     --plain) PLAIN=1; shift ;;
@@ -69,6 +78,18 @@ while (($#)); do
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+case "$BUILD_BACKEND" in
+  ""|auto|host|podman|existing) ;;
+  *) echo "Invalid build backend: $BUILD_BACKEND (expected auto, host, podman, or existing)" >&2; exit 2 ;;
+esac
+if [[ "$SKIP_BUILD" == 1 ]]; then
+  if [[ -n "$BUILD_BACKEND" && "$BUILD_BACKEND" != existing ]]; then
+    echo "--skip-build conflicts with --build-backend $BUILD_BACKEND" >&2
+    exit 2
+  fi
+  BUILD_BACKEND=existing
+fi
 
 PREFIX="$(realpath -m "$PREFIX")"
 BIN_DIR="$PREFIX/bin"
@@ -83,6 +104,7 @@ AUTOSTART_DIR="$XDG_CONFIG_HOME_VALUE/autostart"
 SYSTEMD_USER_DIR="$XDG_CONFIG_HOME_VALUE/systemd/user"
 MODEL_DIR="$XDG_DATA_HOME_VALUE/kwispr/models"
 LEGACY_CONFIG="${KWISPR_LEGACY_CONFIG:-$ROOT_DIR/.env}"
+KDE_HOST_BUILD_DIR="$ROOT_DIR/kde-whisper/build-host"
 
 USE_GUM=0
 if [[ "$PLAIN" == 0 && "$ASSUME_YES" == 0 && -t 0 && -t 1 ]] && command -v gum >/dev/null 2>&1; then
@@ -158,6 +180,291 @@ run_step() {
   tail -n 40 "$log" >&2 || true
   rm -f "$log"
   exit 1
+}
+
+PACMAN_BIN="${KWISPR_PACMAN_BIN:-pacman}"
+SUDO_BIN="${KWISPR_SUDO_BIN:-sudo}"
+ARCH_STATE_DIR=""
+ARCH_BUILD_REFERENCE=""
+ARCH_BUILD_PACKAGE_FILE=""
+ARCH_BUILD_CLEANUP_PENDING=0
+PACMAN_ROOT_COMMAND=()
+
+print_package_list() {
+  local title="$1"; shift
+  if (($# == 0)); then
+    info "$title: none"
+  else
+    info "$title: $*"
+  fi
+}
+
+arch_missing_packages() {
+  local package
+  for package in "$@"; do
+    "$PACMAN_BIN" -Qq "$package" >/dev/null 2>&1 || printf '%s\n' "$package"
+  done
+}
+
+arch_package_plan() {
+  local output package
+  if output="$("$PACMAN_BIN" -Sp --needed --print-format '%n' -- "$@" 2>/dev/null)"; then
+    while IFS= read -r package; do
+      [[ -n "$package" ]] && printf '%s\n' "$package"
+    done <<< "$output"
+  else
+    printf '%s\n' "$@"
+  fi
+}
+
+subtract_package_lists() {
+  local candidate excluded
+  for candidate in "$@"; do
+    excluded=0
+    if [[ -n "${ARCH_RUNTIME_PLAN_FILE:-}" && -f "$ARCH_RUNTIME_PLAN_FILE" ]] \
+      && grep -Fqx -- "$candidate" "$ARCH_RUNTIME_PLAN_FILE"; then
+      excluded=1
+    fi
+    [[ "$excluded" == 1 ]] || printf '%s\n' "$candidate"
+  done
+}
+
+snapshot_arch_packages() {
+  local destination="$1"
+  "$PACMAN_BIN" -Qq | LC_ALL=C sort -u > "$destination"
+}
+
+cleanup_arch_build_packages() {
+  local current_file cleanup_failed=0
+  local -a introduced=()
+  [[ "$ARCH_BUILD_CLEANUP_PENDING" == 1 ]] || return 0
+  [[ "$KEEP_BUILD_DEPS" == 0 ]] || return 0
+  [[ -n "$ARCH_BUILD_REFERENCE" && -f "$ARCH_BUILD_REFERENCE" ]] || return 0
+
+  current_file="$ARCH_STATE_DIR/current-packages"
+  if ! snapshot_arch_packages "$current_file"; then
+    warn "Could not inspect pacman state; temporary build packages were not removed"
+    return 1
+  fi
+  if [[ -n "$ARCH_BUILD_PACKAGE_FILE" && -f "$ARCH_BUILD_PACKAGE_FILE" ]]; then
+    while IFS= read -r package; do
+      [[ -n "$package" ]] && grep -Fqx -- "$package" "$current_file" && introduced+=("$package")
+    done < "$ARCH_BUILD_PACKAGE_FILE"
+  else
+    # Last-resort recovery for an interrupted transaction before its plan was persisted.
+    mapfile -t introduced < <(comm -13 "$ARCH_BUILD_REFERENCE" "$current_file")
+  fi
+  if ((${#introduced[@]} == 0)); then
+    ARCH_BUILD_CLEANUP_PENDING=0
+    return 0
+  fi
+
+  print_package_list "Removing build-only packages introduced by this run" "${introduced[@]}"
+  if ! "${PACMAN_ROOT_COMMAND[@]}" -R --noconfirm -- "${introduced[@]}"; then
+    warn "Automatic build-dependency cleanup failed; no pre-existing package was selected"
+    cleanup_failed=1
+  else
+    ARCH_BUILD_CLEANUP_PENDING=0
+    ok "Removed temporary native build dependencies"
+  fi
+  return "$cleanup_failed"
+}
+
+installer_exit() {
+  local status=$?
+  trap - EXIT INT TERM
+  if ! cleanup_arch_build_packages && [[ "$status" == 0 ]]; then
+    status=1
+  fi
+  [[ -z "$ARCH_STATE_DIR" ]] || rm -rf "$ARCH_STATE_DIR"
+  exit "$status"
+}
+
+trap installer_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+choose_build_backend() {
+  local selection answer
+  if [[ "$USE_GUM" == 1 ]]; then
+    selection="$(gum choose \
+      "Native Arch build (temporary build dependencies)" \
+      "Podman" \
+      "Existing build artifact")" || exit 1
+    case "$selection" in
+      Native*) BUILD_BACKEND=host ;;
+      Podman) BUILD_BACKEND=podman ;;
+      Existing*) BUILD_BACKEND=existing ;;
+    esac
+    return
+  fi
+
+  printf '\nBuild backend\n'
+  printf '  1) Native Arch build (temporary build dependencies)\n'
+  printf '  2) Podman\n'
+  printf '  3) Existing build artifact\n'
+  read -r -p "Select [1-3]: " answer
+  case "$answer" in
+    1) BUILD_BACKEND=host ;;
+    2) BUILD_BACKEND=podman ;;
+    3) BUILD_BACKEND=existing ;;
+    *) fail "Invalid build backend selection" ;;
+  esac
+}
+
+resolve_build_backend() {
+  if [[ -z "$BUILD_BACKEND" ]]; then
+    if [[ "$ASSUME_YES" == 1 ]]; then
+      BUILD_BACKEND=auto
+    else
+      choose_build_backend
+    fi
+  fi
+  if [[ "$BUILD_BACKEND" == auto ]]; then
+    if command -v podman >/dev/null 2>&1; then
+      BUILD_BACKEND=podman
+    else
+      BUILD_BACKEND=host
+    fi
+  fi
+  info "Build backend: $BUILD_BACKEND"
+}
+
+prepare_native_arch_packages() {
+  local package
+  local -a runtime_packages build_packages missing_runtime_packages missing_build_packages
+  local -a runtime_plan build_plan cleanup_plan
+
+  command -v "$PACMAN_BIN" >/dev/null 2>&1 || return 0
+
+  runtime_packages=(ffmpeg curl jq python wl-clipboard libnotify qt6-base kcoreaddons kstatusnotifieritem)
+  command -v pactl >/dev/null 2>&1 || runtime_packages+=(pipewire-pulse)
+  if [[ "$WITH_LOCAL_STT" == 1 ]]; then
+    runtime_packages+=(vulkan-icd-loader)
+  fi
+  build_packages=()
+  if [[ "$BUILD_BACKEND" == host ]]; then
+    build_packages=(base-devel cmake ninja extra-cmake-modules qt6-tools git)
+    if [[ "$WITH_LOCAL_STT" == 1 ]]; then
+      build_packages+=(rust clang pkgconf vulkan-headers shaderc spirv-headers ccache)
+    fi
+  fi
+
+  mapfile -t missing_runtime_packages < <(arch_missing_packages "${runtime_packages[@]}")
+  if ((${#build_packages[@]} > 0)); then
+    mapfile -t missing_build_packages < <(arch_missing_packages "${build_packages[@]}")
+  else
+    missing_build_packages=()
+  fi
+  if ((${#missing_runtime_packages[@]} == 0 && ${#missing_build_packages[@]} == 0)); then
+    return 0
+  fi
+  if [[ -n "$("$PACMAN_BIN" -Qu 2>/dev/null || true)" ]]; then
+    fail "Arch has pending package upgrades; run sudo pacman -Syu before native dependency provisioning"
+  fi
+
+  if ((${#missing_runtime_packages[@]} > 0)); then
+    mapfile -t runtime_plan < <(arch_package_plan "${missing_runtime_packages[@]}" | LC_ALL=C sort -u)
+  else
+    runtime_plan=()
+  fi
+  ARCH_STATE_DIR="$(mktemp -d)"
+  ARCH_RUNTIME_PLAN_FILE="$ARCH_STATE_DIR/runtime-plan"
+  printf '%s\n' "${runtime_plan[@]}" | LC_ALL=C sort -u > "$ARCH_RUNTIME_PLAN_FILE"
+  if ((${#missing_build_packages[@]} > 0)); then
+    mapfile -t build_plan < <(arch_package_plan "${missing_build_packages[@]}" | LC_ALL=C sort -u)
+    mapfile -t cleanup_plan < <(subtract_package_lists "${build_plan[@]}")
+  else
+    build_plan=()
+    cleanup_plan=()
+  fi
+
+  print_package_list "Runtime packages that will remain installed" "${runtime_plan[@]}"
+  print_package_list "Temporary native build packages" "${cleanup_plan[@]}"
+  print_package_list "Packages scheduled for cleanup" "${cleanup_plan[@]}"
+  if ((EUID == 0)); then
+    PACMAN_ROOT_COMMAND=("$PACMAN_BIN")
+    info "Privilege escalation: not needed (already running as root)"
+  else
+    command -v "$SUDO_BIN" >/dev/null 2>&1 || fail "sudo is required to install missing Arch packages"
+    PACMAN_ROOT_COMMAND=("$SUDO_BIN" "$PACMAN_BIN")
+    info "Privilege escalation: sudo will be used for pacman"
+  fi
+
+  if [[ "$ASSUME_YES" == 1 && "$ALLOW_PACKAGE_INSTALL" != 1 ]]; then
+    fail "Missing Arch packages require explicit authorization; add --allow-package-install"
+  fi
+  if [[ "$ASSUME_YES" == 0 ]] && ! confirm "Install the listed Arch packages?" 0; then
+    fail "Package installation was not authorized"
+  fi
+
+  snapshot_arch_packages "$ARCH_STATE_DIR/before-packages"
+  "$PACMAN_BIN" -Q | LC_ALL=C sort -u > "$ARCH_STATE_DIR/before-package-versions"
+  "$PACMAN_BIN" -Qqe | LC_ALL=C sort -u > "$ARCH_STATE_DIR/before-explicit"
+  "$PACMAN_BIN" -Qqd | LC_ALL=C sort -u > "$ARCH_STATE_DIR/before-dependencies"
+
+  if ((${#missing_runtime_packages[@]} > 0)); then
+    mapfile -t missing_runtime_packages < <(arch_missing_packages "${missing_runtime_packages[@]}")
+    if ((${#missing_runtime_packages[@]} > 0)); then
+      run_step "Installing required runtime packages" \
+        "${PACMAN_ROOT_COMMAND[@]}" -S --needed --noconfirm -- "${missing_runtime_packages[@]}"
+    fi
+  fi
+
+  snapshot_arch_packages "$ARCH_STATE_DIR/after-runtime-packages"
+  ARCH_BUILD_REFERENCE="$ARCH_STATE_DIR/after-runtime-packages"
+  ARCH_BUILD_PACKAGE_FILE="$ARCH_STATE_DIR/build-packages-introduced"
+  if ((${#missing_build_packages[@]} > 0)); then
+    mapfile -t missing_build_packages < <(arch_missing_packages "${missing_build_packages[@]}")
+    if ((${#missing_build_packages[@]} > 0)); then
+      printf '%s\n' "${cleanup_plan[@]}" | LC_ALL=C sort -u > "$ARCH_BUILD_PACKAGE_FILE"
+      ARCH_BUILD_CLEANUP_PENDING=1
+      run_step "Installing temporary native build packages as dependencies" \
+        "${PACMAN_ROOT_COMMAND[@]}" -S --asdeps --needed --noconfirm -- "${missing_build_packages[@]}"
+      snapshot_arch_packages "$ARCH_STATE_DIR/after-build-packages"
+      comm -13 "$ARCH_BUILD_REFERENCE" "$ARCH_STATE_DIR/after-build-packages" > "$ARCH_BUILD_PACKAGE_FILE"
+      mapfile -t cleanup_plan < "$ARCH_BUILD_PACKAGE_FILE"
+      print_package_list "Exact build-only package set introduced by this run" "${cleanup_plan[@]}"
+      if [[ "$KEEP_BUILD_DEPS" == 1 ]]; then
+        ARCH_BUILD_CLEANUP_PENDING=0
+        info "Keeping native build dependencies by request"
+      fi
+    fi
+  fi
+}
+
+build_on_host() {
+  local -a cmake_args
+  command -v cmake >/dev/null 2>&1 || fail "cmake is required for the host build"
+  # Keep native caches separate from Podman's /work paths and always refresh
+  # this installer-owned directory so source paths/generators cannot conflict.
+  rm -rf "$KDE_HOST_BUILD_DIR"
+  cmake_args=(-S "$ROOT_DIR/kde-whisper" -B "$KDE_HOST_BUILD_DIR" "-DBUILD_TESTING=$([[ "$RUN_TESTS" == 1 ]] && echo ON || echo OFF)")
+  command -v ninja >/dev/null 2>&1 && cmake_args+=(-G Ninja)
+  run_step "Configuring KDE Whisper on the host" cmake "${cmake_args[@]}"
+  run_step "Building KDE Whisper on the host" cmake --build "$KDE_HOST_BUILD_DIR"
+  if [[ "$RUN_TESTS" == 1 ]]; then
+    run_step "Testing KDE Whisper on the host" ctest --test-dir "$KDE_HOST_BUILD_DIR" --output-on-failure
+  fi
+  if [[ "$WITH_LOCAL_STT" == 1 ]]; then
+    command -v cargo >/dev/null 2>&1 || fail "cargo is required for the host local STT build"
+    if [[ "$RUN_TESTS" == 1 ]]; then
+      run_step "Testing local STT on the host" cargo test --locked --manifest-path "$ROOT_DIR/rust-local-stt/Cargo.toml"
+    fi
+    run_step "Building local STT on the host" cargo build --release --locked --manifest-path "$ROOT_DIR/rust-local-stt/Cargo.toml"
+  fi
+}
+
+build_in_podman() {
+  command -v podman >/dev/null 2>&1 || fail "Podman backend selected, but podman is not installed"
+  if [[ "$RUN_TESTS" == 1 ]]; then
+    run_step "Building and testing KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-test.sh"
+  else
+    run_step "Building KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-build.sh"
+  fi
+  if [[ "$WITH_LOCAL_STT" == 1 ]]; then
+    run_step "Building local STT in Podman" "$ROOT_DIR/rust-local-stt/build-in-podman.sh"
+  fi
 }
 
 systemd_escape() {
@@ -295,15 +602,6 @@ if [[ "$ASSUME_YES" == 1 ]]; then
   OPEN_SETTINGS="${OPEN_SETTINGS:-0}"
 fi
 
-missing_runtime=()
-for command_name in ffmpeg curl jq python3 notify-send wl-copy; do
-  command -v "$command_name" >/dev/null 2>&1 || missing_runtime+=("$command_name")
-done
-if ((${#missing_runtime[@]} > 0)); then
-  warn "Missing runtime commands: ${missing_runtime[*]}"
-  warn "Run ./setup.sh to install desktop/recording dependencies."
-fi
-
 if [[ -z "$TRAY_AUTOSTART" ]]; then
   if confirm "Start the Kwispr tray automatically when you log in?" 1; then TRAY_AUTOSTART=1; else TRAY_AUTOSTART=0; fi
 fi
@@ -315,35 +613,34 @@ if [[ "$WITH_LOCAL_STT" == 1 && -z "$LOCAL_STT_AUTOSTART" ]]; then
 fi
 LOCAL_STT_AUTOSTART="${LOCAL_STT_AUTOSTART:-0}"
 
-if [[ "$SKIP_BUILD" == 0 ]]; then
-  if command -v podman >/dev/null 2>&1; then
-    if [[ "$RUN_TESTS" == 1 ]]; then
-      run_step "Building and testing KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-test.sh"
-    else
-      run_step "Building KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-build.sh"
-    fi
-  else
-    command -v cmake >/dev/null 2>&1 \
-      || fail "Podman or a host KDE development environment with cmake is required"
-    cmake_args=(-S "$ROOT_DIR/kde-whisper" -B "$ROOT_DIR/kde-whisper/build" "-DBUILD_TESTING=$([[ "$RUN_TESTS" == 1 ]] && echo ON || echo OFF)")
-    command -v ninja >/dev/null 2>&1 && cmake_args+=(-G Ninja)
-    run_step "Configuring KDE Whisper on the host" cmake "${cmake_args[@]}"
-    run_step "Building KDE Whisper on the host" cmake --build "$ROOT_DIR/kde-whisper/build"
-    if [[ "$RUN_TESTS" == 1 ]]; then
-      run_step "Testing KDE Whisper on the host" ctest --test-dir "$ROOT_DIR/kde-whisper/build" --output-on-failure
-    fi
-  fi
+resolve_build_backend
+prepare_native_arch_packages
+
+missing_runtime=()
+for command_name in ffmpeg curl jq python3 notify-send wl-copy; do
+  command -v "$command_name" >/dev/null 2>&1 || missing_runtime+=("$command_name")
+done
+if ((${#missing_runtime[@]} > 0)); then
+  warn "Missing runtime commands after dependency setup: ${missing_runtime[*]}"
+  warn "Run ./setup.sh or install equivalent runtime packages."
 fi
 
-KDE_BINARY="${KWISPR_KDE_BINARY:-$ROOT_DIR/kde-whisper/build/kde-whisper}"
+case "$BUILD_BACKEND" in
+  host) build_on_host ;;
+  podman) build_in_podman ;;
+  existing) info "Using existing build artifacts" ;;
+esac
+
+if [[ "$BUILD_BACKEND" == host ]]; then
+  DEFAULT_KDE_BINARY="$KDE_HOST_BUILD_DIR/kde-whisper"
+else
+  DEFAULT_KDE_BINARY="$ROOT_DIR/kde-whisper/build/kde-whisper"
+fi
+KDE_BINARY="${KWISPR_KDE_BINARY:-$DEFAULT_KDE_BINARY}"
 [[ -x "$KDE_BINARY" ]] || fail "KDE binary not found or executable: $KDE_BINARY"
 
 if [[ "$WITH_LOCAL_STT" == 1 ]]; then
   LOCAL_STT_RELEASE_DIR="${KWISPR_LOCAL_STT_RELEASE_DIR:-$ROOT_DIR/rust-local-stt/target/release}"
-  if [[ ! -x "$LOCAL_STT_RELEASE_DIR/kwispr-local-stt" && "$SKIP_BUILD" == 0 ]]; then
-    command -v podman >/dev/null 2>&1 || fail "Podman is required to build local STT"
-    run_step "Building local STT in Podman" "$ROOT_DIR/rust-local-stt/build-in-podman.sh"
-  fi
   [[ -x "$LOCAL_STT_RELEASE_DIR/kwispr-local-stt" ]] \
     || fail "Local STT binary not found: $LOCAL_STT_RELEASE_DIR/kwispr-local-stt"
 fi
