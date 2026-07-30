@@ -5,11 +5,13 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <QHostAddress>
 
 #include <cmath>
 
 namespace {
-constexpr const char *LocalTranscriptionsUrl = "http://127.0.0.1:9000/v1/audio/transcriptions";
+constexpr const char *LocalTranscriptionsUrl = "http://127.0.0.1:19650/v1/audio/transcriptions";
+constexpr const char *LegacyLocalTranscriptionsUrl = "http://127.0.0.1:9000/v1/audio/transcriptions";
 constexpr const char *OpenAiTranscriptionsUrl = "https://api.openai.com/v1/audio/transcriptions";
 constexpr const char *OpenRouterChatUrl = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -18,6 +20,13 @@ void addError(QStringList *errors, const QString &message)
     if (errors) {
         errors->append(message);
     }
+}
+
+bool isWildcardAddress(const QHostAddress &address)
+{
+    return address == QHostAddress::Any
+        || address == QHostAddress::AnyIPv4
+        || address == QHostAddress::AnyIPv6;
 }
 
 bool envEnabled(const QString &value, bool fallback)
@@ -45,6 +54,7 @@ void KwisprSettings::applyLocalPreset(const QString &localModel, const QString &
 {
     backend = "openai-transcriptions";
     apiUrl = LocalTranscriptionsUrl;
+    localSttConfigured = true;
     apiKey.clear();
     model = localModel;
     language = lang;
@@ -55,6 +65,7 @@ void KwisprSettings::applyOpenAiPreset(const QString &key, const QString &openAi
 {
     backend = "openai-transcriptions";
     apiUrl = OpenAiTranscriptionsUrl;
+    localSttConfigured = false;
     apiKey = key;
     model = openAiModel;
     language = lang;
@@ -64,6 +75,7 @@ void KwisprSettings::applyOpenRouterPreset(const QString &key, const QString &op
 {
     backend = "openrouter-chat";
     apiUrl = OpenRouterChatUrl;
+    localSttConfigured = false;
     apiKey = key;
     model = openRouterModel;
     transcriptionPrompt = prompt;
@@ -75,8 +87,36 @@ void KwisprSettings::applyOpenRouterPreset(const QString &key, const QString &op
 KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
 {
     KwisprSettings settings;
+    bool ok = false;
     settings.backend = env.value(QStringLiteral("KWISPR_BACKEND"), settings.backend);
     settings.apiUrl = env.value(QStringLiteral("KWISPR_API_URL"), settings.apiUrl);
+    settings.localSttHost = env.value(QStringLiteral("KWISPR_LOCAL_STT_HOST"), settings.localSttHost);
+    if (env.contains(QStringLiteral("KWISPR_LOCAL_STT_PORT"))) {
+        settings.localSttPort = env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")).toInt(&ok);
+        if (!ok) {
+            settings.localSttPort = 0;
+        }
+    } else {
+        settings.localSttPort = settings.apiUrl == QLatin1String(LegacyLocalTranscriptionsUrl) ? 9000 : 19650;
+    }
+    QHostAddress bindAddress;
+    settings.localSttAllowLan = bindAddress.setAddress(settings.localSttHost)
+        && !bindAddress.isLoopback();
+    settings.localSttConfigured = envEnabled(env.value(QStringLiteral("KWISPR_LOCAL_STT_CONFIGURED")), false);
+    // The old UI generated this exact URL. Keep both sides on port 9000 until
+    // the user changes them; arbitrary custom URLs and ports remain untouched.
+    if (settings.apiUrl == QLatin1String(LegacyLocalTranscriptionsUrl)) {
+        if (!env.contains(QStringLiteral("KWISPR_LOCAL_STT_HOST"))) {
+            settings.localSttHost = QStringLiteral("127.0.0.1");
+        }
+        if (!env.contains(QStringLiteral("KWISPR_LOCAL_STT_PORT"))) {
+            settings.localSttPort = 9000;
+        }
+        settings.localSttConfigured = true;
+    }
+    if (!settings.localSttConfigured && settings.apiUrl == QLatin1String(LocalTranscriptionsUrl)) {
+        settings.localSttConfigured = true;
+    }
     settings.apiKey = env.value(QStringLiteral("KWISPR_API_KEY"), settings.apiKey);
     settings.model = env.value(QStringLiteral("KWISPR_MODEL"), settings.model);
     settings.language = env.value(QStringLiteral("KWISPR_LANGUAGE"), settings.language);
@@ -93,7 +133,6 @@ KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
                                                           settings.openRouterAppTitle);
     settings.autopaste = envEnabled(env.value(QStringLiteral("KWISPR_AUTOPASTE")), settings.autopaste);
     settings.pasteHotkey = env.value(QStringLiteral("KWISPR_PASTE_HOTKEY"), settings.pasteHotkey);
-    bool ok = false;
     const double delay = env.value(QStringLiteral("KWISPR_AUTOPASTE_DELAY")).toDouble(&ok);
     if (ok) {
         settings.autopasteDelay = delay;
@@ -137,6 +176,9 @@ void KwisprSettings::writeTo(EnvFile &env) const
 {
     env.setValue("KWISPR_BACKEND", backend);
     env.setValue("KWISPR_API_URL", apiUrl);
+    env.setValue("KWISPR_LOCAL_STT_HOST", localSttHost);
+    env.setValue("KWISPR_LOCAL_STT_PORT", QString::number(localSttPort));
+    env.setValue("KWISPR_LOCAL_STT_CONFIGURED", localSttConfigured ? "1" : "0");
     env.setValue("KWISPR_API_KEY", apiKey);
     env.setValue("KWISPR_MODEL", model);
     env.setValue("KWISPR_LANGUAGE", language);
@@ -165,6 +207,33 @@ void KwisprSettings::writeTo(EnvFile &env) const
     env.setValue("KWISPR_VAD_FRAME_MS", QString::number(vadFrameMs));
 }
 
+QUrl KwisprSettings::localSttHealthUrl() const
+{
+    if (localSttConfigured) {
+        QUrl endpoint(apiUrl);
+        QHostAddress destinationAddress;
+        if (destinationAddress.setAddress(endpoint.host()) && isWildcardAddress(destinationAddress)) {
+            endpoint.setHost(QStringLiteral("127.0.0.1"));
+        }
+        endpoint.setPath(QStringLiteral("/health"));
+        endpoint.setQuery(QString());
+        endpoint.setFragment(QString());
+        return endpoint;
+    }
+
+    QString healthHost = localSttHost.trimmed();
+    QHostAddress address;
+    if (address.setAddress(healthHost) && isWildcardAddress(address)) {
+        healthHost = QStringLiteral("127.0.0.1");
+    }
+    QUrl endpoint;
+    endpoint.setScheme(QStringLiteral("http"));
+    endpoint.setHost(healthHost);
+    endpoint.setPort(localSttPort);
+    endpoint.setPath(QStringLiteral("/health"));
+    return endpoint;
+}
+
 bool KwisprSettings::validate(QStringList *errors) const
 {
     bool ok = true;
@@ -172,6 +241,28 @@ bool KwisprSettings::validate(QStringList *errors) const
     if (apiUrl.startsWith(OpenAiTranscriptionsUrl) && apiKey.trimmed().isEmpty()) {
         ok = false;
         addError(errors, "API key is required for the official OpenAI transcription endpoint.");
+    }
+
+    const QUrl endpoint(apiUrl.trimmed());
+    const QString endpointScheme = endpoint.scheme().toLower();
+    QHostAddress destinationAddress;
+    if (!endpoint.isValid() || (endpointScheme != QLatin1String("http") && endpointScheme != QLatin1String("https"))
+        || endpoint.host().isEmpty() || endpoint.port() == 0) {
+        ok = false;
+        addError(errors, "API URL must be a valid HTTP or HTTPS URL with a host and valid port.");
+    } else if (destinationAddress.setAddress(endpoint.host()) && isWildcardAddress(destinationAddress)) {
+        ok = false;
+        addError(errors, "0.0.0.0 and :: are listen addresses, not valid client destinations.");
+    }
+
+    QHostAddress bindAddress;
+    if (!bindAddress.setAddress(localSttHost.trimmed())) {
+        ok = false;
+        addError(errors, "Local STT bind address must be a valid IP address.");
+    }
+    if (localSttPort < 1 || localSttPort > 65535) {
+        ok = false;
+        addError(errors, "Local STT bind port must be between 1 and 65535.");
     }
 
     const QString normalizedHotkey = pasteHotkey.trimmed().toLower();

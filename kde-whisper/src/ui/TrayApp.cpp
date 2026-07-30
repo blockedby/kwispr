@@ -92,15 +92,42 @@ void TrayApp::openSettings()
         }
     }
 
-    SettingsDialog dialog(settings, catalog, installedModelIds, &env, &modelManager);
-    connect(&dialog, &SettingsDialog::settingsSaved, this, [&env, envPath]() {
+    const QString servicePath = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation))
+        .filePath(QStringLiteral("systemd/user/kwispr-local-stt.service"));
+    const bool localRuntimeInstalled = QFileInfo::exists(servicePath);
+    QString previousLocalSttHost = settings.localSttHost;
+    int previousLocalSttPort = settings.localSttPort;
+    SettingsDialog dialog(settings, catalog, installedModelIds, &env, &modelManager,
+                          localRuntimeInstalled);
+    connect(&dialog, &SettingsDialog::settingsSaved, this,
+            [this, &env, envPath, localRuntimeInstalled, previousLocalSttHost, previousLocalSttPort](const KwisprSettings &savedSettings) mutable {
         QDir().mkpath(QFileInfo(envPath).absolutePath());
         if (!env.save(envPath)) {
             QMessageBox::warning(nullptr,
                                  QStringLiteral("KDE Whisper"),
                                  QStringLiteral("Could not save settings to %1: %2")
                                      .arg(envPath, env.errorString()));
+            return;
         }
+        const bool serverChanged = savedSettings.localSttHost != previousLocalSttHost
+            || savedSettings.localSttPort != previousLocalSttPort;
+        if (localRuntimeInstalled && serverChanged) {
+            ProcessRunner restartRunner;
+            const ProcessResult result = restartRunner.run(
+                QStringLiteral("systemctl"),
+                {QStringLiteral("--user"), QStringLiteral("restart"), QStringLiteral("kwispr-local-stt.service")});
+            if (result.exitCode != 0) {
+                QMessageBox::warning(nullptr, QStringLiteral("KDE Whisper"),
+                                     result.stderrText.isEmpty() ? QStringLiteral("Local STT settings saved, but the service could not be restarted.")
+                                                                  : result.stderrText);
+            } else {
+                QMessageBox::information(nullptr, QStringLiteral("KDE Whisper"),
+                                         QStringLiteral("Local STT listen settings applied and the service restarted."));
+            }
+        }
+        previousLocalSttHost = savedSettings.localSttHost;
+        previousLocalSttPort = savedSettings.localSttPort;
+        m_controller->refreshState();
     });
     dialog.exec();
 }
@@ -164,6 +191,12 @@ void TrayApp::quitApplication()
 
 LocalSttState TrayApp::localSttState() const
 {
-    LocalSttClient client(QUrl(QStringLiteral("http://127.0.0.1:9000")));
+    EnvFile env;
+    KwisprSettings settings;
+    const QString envPath = configFilePath();
+    if (env.load(envPath)) {
+        settings = KwisprSettings::fromEnv(env);
+    }
+    LocalSttClient client(settings.localSttHealthUrl());
     return client.checkHealth(500).state;
 }

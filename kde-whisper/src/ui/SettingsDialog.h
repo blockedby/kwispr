@@ -22,6 +22,7 @@ class QLineEdit;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
+class QSpinBox;
 class QWidget;
 
 class SettingsDialog : public QDialog {
@@ -32,6 +33,7 @@ public:
                             const QStringList &installedModelIds,
                             EnvFile *env = nullptr,
                             ModelManager *modelManager = nullptr,
+                            bool localRuntimeInstalled = true,
                             QWidget *parent = nullptr);
 
     bool save();
@@ -104,14 +106,23 @@ private:
     QString m_activeBackend;
     QHash<QString, BackendDraft> m_backendDrafts;
     bool m_modelOperationBusy = false;
+    bool m_localRuntimeInstalled = false;
     QString m_activeModelOperation;
     QString m_activeModelId;
     QElapsedTimer m_downloadElapsed;
 
     QFormLayout *m_backendForm = nullptr;
     QComboBox *m_backendCombo = nullptr;
+    QLabel *m_localSttSectionLabel = nullptr;
     QLineEdit *m_apiUrlEdit = nullptr;
     QLabel *m_apiUrlLabel = nullptr;
+    QLabel *m_resolvedUrlLabel = nullptr;
+    QLabel *m_resolvedUrlFieldLabel = nullptr;
+    QLineEdit *m_localSttHostEdit = nullptr;
+    QLabel *m_localSttHostLabel = nullptr;
+    QSpinBox *m_localSttPortSpin = nullptr;
+    QLabel *m_localSttPortLabel = nullptr;
+    QCheckBox *m_localSttAllowLanCheck = nullptr;
     QLineEdit *m_apiKeyEdit = nullptr;
     QLabel *m_apiKeyLabel = nullptr;
     QLineEdit *m_modelEdit = nullptr;

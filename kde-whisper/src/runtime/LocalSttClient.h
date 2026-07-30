@@ -32,7 +32,7 @@ struct LocalSttStatus
 class LocalSttClient
 {
 public:
-    explicit LocalSttClient(QUrl baseUrl = QUrl(QStringLiteral("http://127.0.0.1:9000")));
+    explicit LocalSttClient(QUrl baseUrl = QUrl(QStringLiteral("http://127.0.0.1:19650")));
 
     LocalSttStatus checkHealth(int timeoutMs = 3000) const;
 

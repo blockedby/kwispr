@@ -12,7 +12,7 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     io::Cursor,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Mutex,
@@ -129,13 +129,19 @@ struct DecodedAudio {
     sample_rate: u32,
 }
 
+const DEFAULT_LOCAL_STT_HOST: &str = "127.0.0.1";
+const DEFAULT_LOCAL_STT_PORT: u16 = 19650;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     transcribe_cpp::init_logging();
     transcribe_cpp::init_backends_default()
         .context("initialize transcribe-cpp dynamic backends")?;
-    let host = arg("--host").unwrap_or_else(|| "127.0.0.1".into());
-    let port: u16 = arg("--port").unwrap_or_else(|| "9000".into()).parse()?;
+    let host = arg("--host").unwrap_or_else(|| DEFAULT_LOCAL_STT_HOST.into());
+    let port: u16 = arg("--port")
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(DEFAULT_LOCAL_STT_PORT);
     let catalog_path =
         PathBuf::from(arg("--catalog").unwrap_or_else(|| "models/local-stt-catalog.json".into()));
     let model_dir = env::var("KWISPR_MODEL_DIR")
@@ -157,7 +163,11 @@ async fn main() -> Result<()> {
         .route("/v1/audio/transcriptions", post(transcribe))
         .layer(DefaultBodyLimit::max(max_upload_bytes()))
         .with_state(app_state);
-    let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    let addr = SocketAddr::new(
+        host.parse::<IpAddr>()
+            .with_context(|| format!("invalid --host IP address: {host}"))?,
+        port,
+    );
     println!(
         "kwispr local STT runtime listening on http://{addr} (vad_enabled={})",
         vad.enabled
@@ -757,6 +767,12 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_bind_defaults_are_loopback_on_19650() {
+        assert_eq!(DEFAULT_LOCAL_STT_HOST, "127.0.0.1");
+        assert_eq!(DEFAULT_LOCAL_STT_PORT, 19650);
+    }
 
     fn test_vad() -> VadConfig {
         VadConfig {

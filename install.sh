@@ -10,6 +10,10 @@ XDG_DATA_HOME_VALUE="${XDG_DATA_HOME:-$HOME/.local/share}"
 WITH_LOCAL_STT=""
 TRAY_AUTOSTART=""
 LOCAL_STT_AUTOSTART=""
+LOCAL_STT_HOST_OPTION=""
+LOCAL_STT_PORT_OPTION=""
+LOCAL_STT_URL_OPTION=""
+LOCAL_STT_MODEL_OPTION=""
 OPEN_SETTINGS=""
 ASSUME_YES=0
 PLAIN=0
@@ -35,6 +39,10 @@ Options:
   --no-autostart             Do not start the tray at login
   --local-stt-autostart      Enable and start local STT at login
   --no-local-stt-autostart   Install local STT without enabling it
+  --local-stt-host ADDRESS   Local runtime listen address (default: 127.0.0.1)
+  --local-stt-port PORT      Local runtime listen port (fresh default: 19650)
+  --local-stt-url URL        Client transcription endpoint (independent of bind)
+  --local-stt-model SLUG     Catalog model sent to a local or remote server
   --open-settings            Open the graphical settings after install
   --no-open-settings         Do not open settings after install
   --build-backend MODE       Build with auto, host, podman, or existing
@@ -63,6 +71,10 @@ while (($#)); do
     --no-autostart) TRAY_AUTOSTART=0; shift ;;
     --local-stt-autostart) LOCAL_STT_AUTOSTART=1; WITH_LOCAL_STT=1; shift ;;
     --no-local-stt-autostart) LOCAL_STT_AUTOSTART=0; shift ;;
+    --local-stt-host) [[ $# -ge 2 ]] || { echo "--local-stt-host needs an address" >&2; exit 2; }; LOCAL_STT_HOST_OPTION="$2"; shift 2 ;;
+    --local-stt-port) [[ $# -ge 2 ]] || { echo "--local-stt-port needs a port" >&2; exit 2; }; LOCAL_STT_PORT_OPTION="$2"; shift 2 ;;
+    --local-stt-url) [[ $# -ge 2 ]] || { echo "--local-stt-url needs a URL" >&2; exit 2; }; LOCAL_STT_URL_OPTION="$2"; shift 2 ;;
+    --local-stt-model) [[ $# -ge 2 ]] || { echo "--local-stt-model needs a slug" >&2; exit 2; }; LOCAL_STT_MODEL_OPTION="$2"; shift 2 ;;
     --open-settings) OPEN_SETTINGS=1; shift ;;
     --no-open-settings) OPEN_SETTINGS=0; shift ;;
     --build-backend) [[ $# -ge 2 ]] || { echo "--build-backend needs auto, host, podman, or existing" >&2; exit 2; }; BUILD_BACKEND="$2"; shift 2 ;;
@@ -474,6 +486,141 @@ systemd_escape() {
   printf '%s' "$value"
 }
 
+validate_local_stt_options() {
+  python3 - "$LOCAL_STT_HOST_OPTION" "$LOCAL_STT_PORT_OPTION" "$LOCAL_STT_URL_OPTION" "$LOCAL_STT_MODEL_OPTION" <<'PY'
+import ipaddress
+import sys
+from urllib.parse import urlsplit
+
+host, port, url, model = sys.argv[1:]
+if host:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise SystemExit(f"invalid --local-stt-host: {exc}")
+if port:
+    try:
+        number = int(port)
+    except ValueError:
+        raise SystemExit("invalid --local-stt-port: expected an integer")
+    if not 1 <= number <= 65535:
+        raise SystemExit("invalid --local-stt-port: expected 1..65535")
+if url:
+    try:
+        parsed = urlsplit(url)
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise SystemExit(f"invalid --local-stt-url: {exc}")
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise SystemExit("invalid --local-stt-url: expected an HTTP(S) URL with a host")
+    if parsed.hostname in {"0.0.0.0", "::"}:
+        raise SystemExit("invalid --local-stt-url: listen wildcard is not a client destination")
+    if parsed_port is not None and not 1 <= parsed_port <= 65535:
+        raise SystemExit("invalid --local-stt-url: port must be 1..65535")
+if model != model.strip() or (model and any(ch.isspace() for ch in model)):
+    raise SystemExit("invalid --local-stt-model: expected a catalog slug without whitespace")
+PY
+}
+
+configure_local_stt_config() {
+  KWISPR_INSTALL_CONFIG_FILE="$CONFIG_FILE" \
+  KWISPR_INSTALL_WITH_LOCAL_STT="$WITH_LOCAL_STT" \
+  KWISPR_INSTALL_LOCAL_STT_HOST="$LOCAL_STT_HOST_OPTION" \
+  KWISPR_INSTALL_LOCAL_STT_PORT="$LOCAL_STT_PORT_OPTION" \
+  KWISPR_INSTALL_LOCAL_STT_URL="$LOCAL_STT_URL_OPTION" \
+  KWISPR_INSTALL_LOCAL_STT_MODEL="$LOCAL_STT_MODEL_OPTION" \
+  python3 <<'PY'
+import os
+import re
+import shlex
+from pathlib import Path
+
+path = Path(os.environ["KWISPR_INSTALL_CONFIG_FILE"])
+with_runtime = os.environ["KWISPR_INSTALL_WITH_LOCAL_STT"] == "1"
+host_option = os.environ["KWISPR_INSTALL_LOCAL_STT_HOST"]
+port_option = os.environ["KWISPR_INSTALL_LOCAL_STT_PORT"]
+url_option = os.environ["KWISPR_INSTALL_LOCAL_STT_URL"]
+model_option = os.environ["KWISPR_INSTALL_LOCAL_STT_MODEL"]
+existed = path.exists()
+lines = path.read_text(encoding="utf-8").splitlines() if existed else []
+assignment = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+indices = {}
+values = {}
+
+def decode(raw):
+    raw = raw.strip()
+    if not raw:
+        return ""
+    try:
+        parsed = shlex.split(raw, posix=True)
+    except ValueError:
+        return raw
+    return parsed[0] if len(parsed) == 1 else raw
+
+for index, line in enumerate(lines):
+    match = assignment.match(line)
+    if match:
+        indices[match.group(1)] = index
+        values[match.group(1)] = decode(match.group(2))
+
+safe = re.compile(r"^[A-Za-z0-9_./:@%+=,\[\]-]+$")
+def encoded(value):
+    if not value or safe.fullmatch(value):
+        return value
+    return "'" + value.replace("'", "'\\''") + "'"
+
+def set_value(key, value):
+    rendered = f"{key}={encoded(str(value))}"
+    if key in indices:
+        lines[indices[key]] = rendered
+    else:
+        indices[key] = len(lines)
+        lines.append(rendered)
+    values[key] = str(value)
+
+legacy_url = "http://127.0.0.1:9000/v1/audio/transcriptions"
+old_generated = values.get("KWISPR_API_URL") == legacy_url and "KWISPR_LOCAL_STT_PORT" not in values
+if old_generated:
+    if "KWISPR_LOCAL_STT_HOST" not in values:
+        set_value("KWISPR_LOCAL_STT_HOST", "127.0.0.1")
+    set_value("KWISPR_LOCAL_STT_PORT", "9000")
+    set_value("KWISPR_LOCAL_STT_CONFIGURED", "1")
+
+fresh_local = with_runtime and not existed
+if with_runtime:
+    if "KWISPR_LOCAL_STT_HOST" not in values:
+        set_value("KWISPR_LOCAL_STT_HOST", "127.0.0.1")
+    if "KWISPR_LOCAL_STT_PORT" not in values:
+        set_value("KWISPR_LOCAL_STT_PORT", "19650")
+if host_option:
+    set_value("KWISPR_LOCAL_STT_HOST", host_option)
+if port_option:
+    set_value("KWISPR_LOCAL_STT_PORT", port_option)
+
+if fresh_local:
+    client_port = port_option or "19650"
+    set_value("KWISPR_BACKEND", "openai-transcriptions")
+    set_value("KWISPR_API_URL", f"http://127.0.0.1:{client_port}/v1/audio/transcriptions")
+    set_value("KWISPR_API_KEY", "")
+    set_value("KWISPR_MODEL", model_option or "whisper-large-v3-turbo")
+    set_value("KWISPR_LOCAL_STT_CONFIGURED", "1")
+if url_option:
+    set_value("KWISPR_BACKEND", "openai-transcriptions")
+    set_value("KWISPR_API_URL", url_option)
+    set_value("KWISPR_API_KEY", "")
+    set_value("KWISPR_LOCAL_STT_CONFIGURED", "1")
+    if "KWISPR_MODEL" not in values:
+        set_value("KWISPR_MODEL", model_option or "whisper-large-v3-turbo")
+if model_option:
+    set_value("KWISPR_MODEL", model_option)
+
+if lines != (path.read_text(encoding="utf-8").splitlines() if existed else []):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+PY
+}
+
 write_wrappers() {
   mkdir -p "$BIN_DIR"
   cat > "$BIN_DIR/kde-whisper" <<EOF
@@ -531,9 +678,11 @@ if [[ -r "\$config_file" ]]; then
   set +a
 fi
 : "\${KWISPR_MODEL_DIR:=\$default_model_dir}"
+: "\${KWISPR_LOCAL_STT_HOST:=127.0.0.1}"
+: "\${KWISPR_LOCAL_STT_PORT:=19650}"
 export KWISPR_MODEL_DIR
 unset KWISPR_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY
-exec $(printf '%q' "$binary") --host 127.0.0.1 --port 9000 --catalog $(printf '%q' "$catalog")
+exec $(printf '%q' "$binary") --host "\$KWISPR_LOCAL_STT_HOST" --port "\$KWISPR_LOCAL_STT_PORT" --catalog $(printf '%q' "$catalog")
 EOF
   chmod 0700 "$launcher"
 
@@ -594,6 +743,10 @@ info "Configuration: $CONFIG_FILE"
 
 if [[ "$ASSUME_YES" == 0 && ! -t 0 ]]; then
   fail "Interactive input is unavailable; rerun with --yes and explicit feature flags."
+fi
+if [[ -n "$LOCAL_STT_HOST_OPTION$LOCAL_STT_PORT_OPTION$LOCAL_STT_URL_OPTION$LOCAL_STT_MODEL_OPTION" ]]; then
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required to validate Local STT options"
+  validate_local_stt_options || fail "Invalid Local STT option"
 fi
 if [[ "$ASSUME_YES" == 1 ]]; then
   TRAY_AUTOSTART="${TRAY_AUTOSTART:-1}"
@@ -672,6 +825,11 @@ elif [[ -f "$CONFIG_FILE" ]]; then
   ok "Preserved existing configuration"
 else
   info "The settings UI will create configuration on first save"
+fi
+
+if [[ "$WITH_LOCAL_STT" == 1 || -f "$CONFIG_FILE" || -n "$LOCAL_STT_HOST_OPTION$LOCAL_STT_PORT_OPTION$LOCAL_STT_URL_OPTION$LOCAL_STT_MODEL_OPTION" ]]; then
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required to configure Local STT"
+  configure_local_stt_config
 fi
 
 if [[ "$WITH_LOCAL_STT" == 1 ]]; then
