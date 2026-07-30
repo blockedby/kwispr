@@ -15,6 +15,7 @@ ASSUME_YES=0
 PLAIN=0
 SKIP_BUILD=0
 NO_SYSTEMD_ACTIONS="${KWISPR_INSTALL_NO_SYSTEMD:-0}"
+RUN_TESTS=0
 UNINSTALL=0
 
 usage() {
@@ -34,6 +35,7 @@ Options:
   --open-settings            Open the graphical settings after install
   --no-open-settings         Do not open settings after install
   --skip-build               Use existing/override build artifacts
+  --test                     Run the KDE test suite after building
   --yes                      Accept recommended defaults; no prompts
   --plain                    Disable Gum and ANSI decoration
   --no-systemd-actions       Write units but do not call systemctl
@@ -58,6 +60,7 @@ while (($#)); do
     --open-settings) OPEN_SETTINGS=1; shift ;;
     --no-open-settings) OPEN_SETTINGS=0; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
+    --test) RUN_TESTS=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
     --plain) PLAIN=1; shift ;;
     --no-systemd-actions) NO_SYSTEMD_ACTIONS=1; shift ;;
@@ -314,14 +317,21 @@ LOCAL_STT_AUTOSTART="${LOCAL_STT_AUTOSTART:-0}"
 
 if [[ "$SKIP_BUILD" == 0 ]]; then
   if command -v podman >/dev/null 2>&1; then
-    run_step "Building and testing KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-test.sh"
+    if [[ "$RUN_TESTS" == 1 ]]; then
+      run_step "Building and testing KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-test.sh"
+    else
+      run_step "Building KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-build.sh"
+    fi
   else
     command -v cmake >/dev/null 2>&1 \
       || fail "Podman or a host KDE development environment with cmake is required"
-    cmake_args=(-S "$ROOT_DIR/kde-whisper" -B "$ROOT_DIR/kde-whisper/build" -DBUILD_TESTING=OFF)
+    cmake_args=(-S "$ROOT_DIR/kde-whisper" -B "$ROOT_DIR/kde-whisper/build" "-DBUILD_TESTING=$([[ "$RUN_TESTS" == 1 ]] && echo ON || echo OFF)")
     command -v ninja >/dev/null 2>&1 && cmake_args+=(-G Ninja)
     run_step "Configuring KDE Whisper on the host" cmake "${cmake_args[@]}"
     run_step "Building KDE Whisper on the host" cmake --build "$ROOT_DIR/kde-whisper/build"
+    if [[ "$RUN_TESTS" == 1 ]]; then
+      run_step "Testing KDE Whisper on the host" ctest --test-dir "$ROOT_DIR/kde-whisper/build" --output-on-failure
+    fi
   fi
 fi
 

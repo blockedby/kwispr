@@ -17,6 +17,11 @@ INSTALLER = REPO_ROOT / "install.sh"
 
 
 class InstallerContractTest(unittest.TestCase):
+    def test_default_install_builds_without_running_test_wrapper(self) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn('run_step "Building KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-build.sh"', installer)
+        self.assertIn('if [[ "$RUN_TESTS" == 1 ]]', installer)
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

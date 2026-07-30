@@ -85,6 +85,7 @@ The installer uses [Gum](https://github.com/charmbracelet/gum) when it is alread
 ```bash
 ./install.sh --yes --autostart --without-local-stt
 ./install.sh --yes --autostart --with-local-stt --local-stt-autostart
+./install.sh --test    # optional developer verification
 ./install.sh --uninstall
 ```
 
