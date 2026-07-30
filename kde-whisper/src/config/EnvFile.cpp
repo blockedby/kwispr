@@ -3,6 +3,7 @@
 #include <QFile>
 #include <QFileDevice>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QTextStream>
 
 bool EnvFile::load(const QString &path) {
@@ -43,8 +44,8 @@ bool EnvFile::load(const QString &path) {
 bool EnvFile::save(const QString &path) {
     m_error.clear();
 
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         m_error = file.errorString();
         return false;
     }
@@ -59,12 +60,17 @@ bool EnvFile::save(const QString &path) {
         }
     }
 
+    out.flush();
     if (out.status() != QTextStream::Ok) {
         m_error = QStringLiteral("failed to write env file");
+        file.cancelWriting();
         return false;
     }
-    file.flush();
     file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    if (!file.commit()) {
+        m_error = file.errorString();
+        return false;
+    }
     return true;
 }
 

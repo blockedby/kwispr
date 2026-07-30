@@ -14,12 +14,12 @@ fi
 install_runtime_packages() {
   if command -v pacman >/dev/null 2>&1; then
     echo "==> Installing pacman packages..."
-    sudo pacman -S --needed ffmpeg curl jq wl-clipboard libnotify pipewire-pulse ydotool acl
+    sudo pacman -S --needed ffmpeg curl jq wl-clipboard libnotify pipewire-pulse ydotool acl podman python gum
   elif command -v apt >/dev/null 2>&1; then
     echo "==> Installing APT packages..."
-    sudo apt install -y ffmpeg curl jq wl-clipboard libnotify-bin acl
+    sudo apt install -y ffmpeg curl jq wl-clipboard libnotify-bin acl podman python3
   else
-    echo "WARN: No supported package manager found. Install ffmpeg curl jq wl-clipboard libnotify acl and optionally ydotool manually."
+    echo "WARN: No supported package manager found. Install ffmpeg curl jq wl-clipboard libnotify acl podman and optionally ydotool manually."
   fi
 }
 
@@ -173,17 +173,14 @@ fi
 echo ""
 echo "==> Setup complete."
 echo ""
-if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
-  echo "NEXT STEPS:"
-  echo "  1. cp $SCRIPT_DIR/.env.example $SCRIPT_DIR/.env"
-  echo "  2. chmod 600 $SCRIPT_DIR/.env"
-  echo "  3. Edit $SCRIPT_DIR/.env and choose cloud or local STT settings"
-  echo "  4. Bind F5 to: $SCRIPT_DIR/kwispr.sh toggle"
-  echo "     System Settings → Shortcuts → Custom Shortcuts → Add New → Command"
-else
-  echo ".env already exists — you're ready."
-  echo "Bind F5 to: $SCRIPT_DIR/kwispr.sh toggle"
-fi
+echo "NEXT STEPS:"
+echo "  1. Run: $SCRIPT_DIR/install.sh"
+echo "  2. Open settings: $HOME/.local/bin/kwispr settings"
+echo "  3. Bind your KDE shortcut to: $HOME/.local/bin/kwispr toggle"
+echo "     System Settings → Shortcuts → Custom Shortcuts → Add New → Command"
+echo ""
+echo "Kwispr stores UI-managed settings in ${XDG_CONFIG_HOME:-$HOME/.config}/kwispr/config.env."
+echo "A repository .env is supported only as a legacy migration source."
 
 if [[ "$NEED_RELOGIN" == "1" ]]; then
   echo ""

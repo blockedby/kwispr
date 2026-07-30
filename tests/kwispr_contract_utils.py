@@ -23,7 +23,9 @@ class KwisprScriptHarness:
         self.repo = self.root / "repo"
         self.home = self.root / "home"
         self.bin = self.root / "bin"
-        self.cache_dir = self.home / ".cache" / "kwispr"
+        self.xdg_config_home = self.home / ".config"
+        self.xdg_cache_home = self.home / ".cache"
+        self.cache_dir = self.xdg_cache_home / "kwispr"
         self.repo.mkdir()
         self.home.mkdir()
         self.bin.mkdir()
@@ -39,6 +41,14 @@ class KwisprScriptHarness:
         lines = [f"{key}={self._quote(value)}" for key, value in values.items()]
         path = self.repo / ".env"
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def write_config(self, **values: str) -> Path:
+        lines = [f"{key}={self._quote(value)}" for key, value in values.items()]
+        path = self.xdg_config_home / "kwispr" / "config.env"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        path.chmod(0o600)
         return path
 
     def make_wav(self, name: str = "sample.wav", size: int = 40000) -> Path:
@@ -58,6 +68,8 @@ class KwisprScriptHarness:
             {
                 "HOME": str(self.home),
                 "PATH": f"{self.bin}:{env.get('PATH', '')}",
+                "XDG_CONFIG_HOME": str(self.xdg_config_home),
+                "XDG_CACHE_HOME": str(self.xdg_cache_home),
                 "KWISPR_CONTRACT_ROOT": str(self.root),
             }
         )

@@ -15,5 +15,6 @@ RUN pacman -Syu --noconfirm --needed \
     kwidgetsaddons \
     ki18n \
     desktop-file-utils \
+    python \
     git \
   && pacman -Scc --noconfirm

@@ -8,7 +8,6 @@
 
 class KStatusNotifierItem;
 class KwisprController;
-class LocalSttProcess;
 class SettingsDialog;
 class ModelManager;
 

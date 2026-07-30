@@ -51,6 +51,7 @@ Runtime packages:
 | `ffmpeg` | microphone recording; OGG/Opus decode for local STT uploads |
 | `curl` | STT HTTP request |
 | `jq` | JSON parsing |
+| `python` / `python3` | local model catalog and downloads |
 | `wl-clipboard` | clipboard integration on Wayland |
 | `libnotify` / `notify-send` | status notifications |
 | `pipewire-pulse` | Pulse-compatible recording source |
@@ -59,7 +60,7 @@ Runtime packages:
 On CachyOS/Arch:
 
 ```bash
-sudo pacman -S --needed ffmpeg curl jq wl-clipboard libnotify pipewire-pulse ydotool
+sudo pacman -S --needed ffmpeg curl jq wl-clipboard libnotify pipewire-pulse ydotool python podman gum
 ```
 
 For local Rust STT builds on the host:
@@ -73,28 +74,36 @@ Or build in Podman so build dependencies do not pollute the host; see [Build loc
 ## Install
 
 ```bash
-git clone git@github.com:blockedby/kwispr.git
+git clone https://github.com/blockedby/kwispr.git
 cd kwispr
-cp .env.example .env
-chmod 600 .env
+./setup.sh       # runtime dependencies and optional ydotool setup
+./install.sh     # polished rootless install under ~/.local
 ```
 
-Optional setup helper:
+The installer uses [Gum](https://github.com/charmbracelet/gum) when it is already available and falls back to portable terminal prompts otherwise. Useful unattended forms:
 
 ```bash
-./setup.sh
+./install.sh --yes --autostart --without-local-stt
+./install.sh --yes --autostart --with-local-stt --local-stt-autostart
+./install.sh --uninstall
 ```
 
-Then edit `.env` for one of the backend modes below.
+No `.env` preparation is required. Open the graphical configuration after installation with:
+
+```bash
+~/.local/bin/kwispr settings
+```
+
+Settings are created with mode `0600` at `$XDG_CONFIG_HOME/kwispr/config.env` (normally `~/.config/kwispr/config.env`). Existing repository `.env` settings are migrated automatically and remain supported as a development-only fallback.
 
 ## Bind a hotkey in KDE
 
 1. Open **System Settings → Shortcuts → Add New → Command/URL Shortcut**.
 2. Trigger: press your desired key/combo.
-3. Action: absolute path to `kwispr.sh`, for example:
+3. Action: the stable installed command:
 
 ```text
-/home/you/code/kwispr/kwispr.sh
+/home/you/.local/bin/kwispr toggle
 ```
 
 Press once to start recording, press again to stop and transcribe.
@@ -103,16 +112,17 @@ Press once to start recording, press again to stop and transcribe.
 
 ### Local/offline STT — recommended for this fork
 
-Download a model. Model names are Handy `slug` values; the helper selects that model's catalog `default_quant`, downloads revision-pinned GGUF bytes (mirror first, then Hugging Face), and verifies SHA256:
+Install the local runtime and download a model. Model names are Handy `slug` values; the helper selects that model's catalog `default_quant`, downloads revision-pinned GGUF bytes (mirror first, then Hugging Face), and verifies SHA256:
 
 ```bash
-./kwispr-models.py list
-./kwispr-models.py download whisper-large-v3-turbo
+./install.sh --with-local-stt
+~/.local/bin/kwispr models list
+~/.local/bin/kwispr models download whisper-large-v3-turbo
 # or for Russian-only dictation:
-./kwispr-models.py download gigaam-v3-e2e-ctc
-./kwispr-models.py verify gigaam-v3-e2e-ctc
+~/.local/bin/kwispr models download gigaam-v3-e2e-ctc
+~/.local/bin/kwispr models verify gigaam-v3-e2e-ctc
 # remove only the catalog-managed default GGUF for a slug:
-./kwispr-models.py delete gigaam-v3-e2e-ctc
+~/.local/bin/kwispr models delete gigaam-v3-e2e-ctc
 ```
 
 The KDE settings dialog also provides nonblocking **Download** and **Delete** actions beside the Local model selector. Downloads show live percentage and compact ETA, followed by checksum verification. Deletion is confirmed and delegates to the same catalog-authoritative helper. Integrations can request the helper's JSONL protocol with `download SLUG --progress jsonl`; normal CLI output is unchanged.
@@ -135,9 +145,9 @@ KWISPR_MODEL_DIR=~/.local/share/kwispr/models \
 
 A successful start prints `kwispr local STT runtime listening on http://127.0.0.1:9000`; at that point the server is ready to receive OpenAI-compatible STT requests at `/v1/audio/transcriptions`.
 
-`.env`:
+Equivalent UI-managed configuration (`$XDG_CONFIG_HOME/kwispr/config.env`):
 
-```bash
+```ini
 KWISPR_BACKEND=openai-transcriptions
 KWISPR_API_URL=http://127.0.0.1:9000/v1/audio/transcriptions
 KWISPR_MODEL=whisper-large-v3-turbo
@@ -193,9 +203,9 @@ Run it on the host so it can see your GPU/Vulkan driver stack and model director
 
 ### OpenAI Whisper cloud mode
 
-`.env`:
+Configure these values in **Kwispr Settings** (shown here in their persisted form):
 
-```bash
+```ini
 KWISPR_BACKEND=openai-transcriptions
 KWISPR_API_URL=https://api.openai.com/v1/audio/transcriptions
 KWISPR_MODEL=whisper-1
@@ -205,9 +215,9 @@ KWISPR_LANGUAGE=
 
 ### OpenRouter audio mode
 
-`.env`:
+Configure these values in **Kwispr Settings**:
 
-```bash
+```ini
 KWISPR_BACKEND=openrouter-chat
 KWISPR_API_URL=https://openrouter.ai/api/v1/chat/completions
 KWISPR_MODEL=google/gemini-2.5-flash
@@ -221,9 +231,10 @@ KWISPR_TRANSCRIPTION_PROMPT='Transcribe this audio exactly as spoken. The speech
 ## Commands
 
 ```bash
-./kwispr.sh                 # same as toggle
-./kwispr.sh toggle          # start/stop recording
-./kwispr.sh retry file.wav  # retry an archived failed recording
+kwispr toggle          # start/stop recording
+kwispr retry file.wav  # retry an archived failed recording
+kwispr settings        # open graphical configuration
+kwispr models list     # inspect local model installs
 ```
 
 Recordings and transcripts are stored in:
@@ -290,7 +301,7 @@ and make sure you are running a freshly rebuilt `kwispr-local-stt` binary from t
 
 | Symptom | Fix |
 |---|---|
-| `No .env` | `cp .env.example .env; chmod 600 .env` |
+| API key/configuration missing | Run `kwispr settings`; configuration is saved under `~/.config/kwispr/`. |
 | `API 413` / `failed to read stream` on long local recordings | Rebuild the Rust local STT runtime from this fork; it raises the body limit. |
 | Local mode returns `[stub transcript]` | You are running `kwispr-local-stt-server.py`; run the Rust runtime for real inference. |
 | `curl: (7) Failed to connect` | Local server is not running or wrong port. |
@@ -314,7 +325,7 @@ This fork also contains an experimental optional KDE/Qt tray and settings app:
 It does **not** replace the proven CLI path. Your KDE global shortcut can keep running:
 
 ```bash
-/path/to/kwispr.sh toggle
+~/.local/bin/kwispr toggle
 ```
 
 The tray action delegates to the same `kwispr.sh toggle` command, and model downloads still use the existing helper:

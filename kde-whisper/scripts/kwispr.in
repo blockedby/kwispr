@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+prefix=$(CDPATH= cd -- "$bin_dir/@KWISPR_BINDIR_TO_PREFIX@" && pwd)
+runtime_root="$prefix/@CMAKE_INSTALL_DATADIR@/kwispr/runtime"
+
+case "${1:-}" in
+    settings)
+        shift
+        exec "$bin_dir/kde-whisper" --settings "$@"
+        ;;
+    models)
+        shift
+        exec "$runtime_root/kwispr-models.py" "$@"
+        ;;
+esac
+
+exec "$runtime_root/kwispr.sh" "$@"

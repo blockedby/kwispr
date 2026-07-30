@@ -57,14 +57,11 @@ The Local model row provides asynchronous **Download** and confirmed **Delete** 
 
 Delete removes only the catalog-selected default GGUF for that slug. Language is one optional hint: choose **Auto detect** (empty `KWISPR_LANGUAGE`) for mixed-language speech when the selected catalog model supports detection.
 
-## Install metadata
+## Installation and metadata
 
-The CMake install target includes:
+For normal rootless installation, run `./install.sh` from the repository root. It provides optional Gum presentation, plain/noninteractive fallback, XDG configuration, autostart, and local STT service setup.
 
-- `kde-whisper` binary;
-- `org.kwispr.KdeWhisper.desktop`;
-- `org.kwispr.KdeWhisper.metainfo.xml`;
-- scalable app icon.
+The CMake install target includes relocatable `kwispr`/`kde-whisper` launchers, the tray binary, shell/model helpers, catalog, sounds, desktop metadata, AppStream metadata, and the app icon.
 
 Staged install example:
 

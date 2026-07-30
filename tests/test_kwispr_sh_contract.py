@@ -10,6 +10,41 @@ from tests.kwispr_contract_utils import KwisprScriptHarness
 
 
 class KwisprShellContractTest(unittest.TestCase):
+    def test_xdg_config_takes_precedence_over_legacy_repo_env(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav(size=40000)
+            h.write_env(
+                KWISPR_BACKEND="openai-transcriptions",
+                KWISPR_API_URL="http://legacy.invalid/v1/audio/transcriptions",
+                KWISPR_MODEL="legacy-model",
+                KWISPR_AUTOPASTE="0",
+            )
+            h.write_config(
+                KWISPR_BACKEND="openai-transcriptions",
+                KWISPR_API_URL="http://127.0.0.1:9000/v1/audio/transcriptions",
+                KWISPR_MODEL="xdg-model",
+                KWISPR_AUTOPASTE="0",
+            )
+            h.fake_curl_response(200, {"text": "configured"})
+
+            result = h.run("retry", str(wav))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = h.curl_invocations()[0]
+            self.assertIn("http://127.0.0.1:9000/v1/audio/transcriptions", args)
+            self.assertIn("model=xdg-model", args)
+            self.assertNotIn("model=legacy-model", args)
+
+    def test_missing_config_does_not_require_repository_dotenv(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav(size=40000)
+
+            result = h.run("retry", str(wav))
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Open Kwispr Settings", result.stderr)
+            self.assertNotIn("Copy .env.example", result.stderr)
+
     def test_local_empty_transcript_is_clean_skip(self) -> None:
         with KwisprScriptHarness() as h:
             wav = h.make_wav(size=40000)

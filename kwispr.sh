@@ -3,14 +3,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CACHE_DIR="$HOME/.cache/kwispr"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+CACHE_DIR="$XDG_CACHE_HOME/kwispr"
 PID_FILE="$CACHE_DIR/current.pid"
 WAV_POINTER="$CACHE_DIR/current.path"
 FIFO_PATH="$CACHE_DIR/ffmpeg.fifo"
 NOTIFY_ID_FILE="$CACHE_DIR/notify.id"
 LAST_FAILED="$CACHE_DIR/last-failed.txt"
 TOGGLE_LOCK="$CACHE_DIR/toggle.lock"
-ENV_FILE="$SCRIPT_DIR/.env"
+CONFIG_FILE="${KWISPR_CONFIG_FILE:-$XDG_CONFIG_HOME/kwispr/config.env}"
+LEGACY_ENV_FILE="$SCRIPT_DIR/.env"
+ACTIVE_CONFIG_FILE="$CONFIG_FILE"
 
 # Minimum wav size to attempt transcription (bytes)
 # 16kHz * 16bit * 1ch = 32000 B/s; 32 KB ≈ 1s of audio
@@ -18,7 +22,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 MIN_WAV_BYTES=32768
 
 # Default sound cues — generated tones in sounds/ (start=high pips,
-# stop=low pups, ready=ascending ding-dong). Override via .env.
+# stop=low pups, ready=ascending ding-dong). Override in the UI or config.
 : "${KWISPR_SOUND_START:=$SCRIPT_DIR/sounds/start.wav}"
 : "${KWISPR_SOUND_STOP:=$SCRIPT_DIR/sounds/stop.wav}"
 : "${KWISPR_SOUND_READY:=$SCRIPT_DIR/sounds/ready.wav}"
@@ -85,11 +89,21 @@ die() {
 }
 
 load_env() {
-  [[ -f "$ENV_FILE" ]] || die "No $ENV_FILE. Copy .env.example to .env."
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+  # XDG config is authoritative. A repository-local .env remains a read-only
+  # compatibility fallback so existing checkouts continue to work while the
+  # installer/UI migrate settings out of the source tree.
+  ACTIVE_CONFIG_FILE="$CONFIG_FILE"
+  if [[ ! -f "$ACTIVE_CONFIG_FILE" && -f "$LEGACY_ENV_FILE" ]]; then
+    ACTIVE_CONFIG_FILE="$LEGACY_ENV_FILE"
+  fi
+
+  if [[ -f "$ACTIVE_CONFIG_FILE" ]]; then
+    set -a
+    # This file is created mode 0600 by Kwispr's settings UI/installer.
+    # shellcheck disable=SC1090
+    source "$ACTIVE_CONFIG_FILE"
+    set +a
+  fi
 
   : "${KWISPR_BACKEND:=openai-transcriptions}"
   : "${KWISPR_API_URL:=https://api.openai.com/v1/audio/transcriptions}"
@@ -107,7 +121,7 @@ load_env() {
 
   if [[ "$KWISPR_API_URL" == "https://api.openai.com/"* ]]; then
     [[ -n "${KWISPR_API_KEY:-}" && "$KWISPR_API_KEY" != "sk-REPLACE_ME" ]] \
-      || die "KWISPR_API_KEY/OPENAI_API_KEY not set in $ENV_FILE"
+      || die "Open Kwispr Settings and configure an API key (config: $CONFIG_FILE)"
   fi
 }
 
@@ -240,7 +254,7 @@ transcribe() {
         -F temperature=0
         -F file=@"$wav"
       )
-      # Optional: force language if KWISPR_LANGUAGE is set in .env
+      # Optional: force language if KWISPR_LANGUAGE is configured.
       if [[ -n "${KWISPR_LANGUAGE:-}" ]]; then
         curl_args+=(-F "language=$KWISPR_LANGUAGE")
       fi

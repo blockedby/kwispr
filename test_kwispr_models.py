@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -59,6 +60,17 @@ class KwisprModelsValidationTest(unittest.TestCase):
         self.last_stdout = stdout.getvalue()
         self.last_stderr = stderr.getvalue()
         return rc
+
+    def test_default_model_dir_respects_xdg_data_home(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"XDG_DATA_HOME": "/tmp/xdg-data", "KWISPR_MODEL_DIR": ""},
+            clear=False,
+        ):
+            self.assertEqual(
+                kwispr_models.default_model_dir(),
+                Path("/tmp/xdg-data/kwispr/models"),
+            )
 
     def test_repository_catalog_v2_is_valid_complete_and_unique(self) -> None:
         catalog = kwispr_models.load_catalog(Path("models/local-stt-catalog.json"))

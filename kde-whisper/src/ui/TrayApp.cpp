@@ -6,15 +6,42 @@
 #include "models/ModelManager.h"
 #include "runtime/KwisprController.h"
 #include "runtime/LocalSttClient.h"
-#include "runtime/LocalSttProcess.h"
 #include "runtime/ProcessRunner.h"
 #include "ui/SettingsDialog.h"
 
 #include <KStatusNotifierItem>
 
 #include <QApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QMessageBox>
+#include <QStandardPaths>
 #include <QUrl>
+
+namespace {
+QString configFilePath()
+{
+    const QString overridePath = qEnvironmentVariable("KWISPR_CONFIG_FILE").trimmed();
+    if (!overridePath.isEmpty()) {
+        return QFileInfo(overridePath).absoluteFilePath();
+    }
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation))
+        .filePath(QStringLiteral("kwispr/config.env"));
+}
+
+void loadConfigWithLegacyMigration(EnvFile *env, const QString &configPath, const QString &legacyPath)
+{
+    if (env->load(configPath)) {
+        return;
+    }
+    if (!QFileInfo::exists(legacyPath) || !env->load(legacyPath)) {
+        return;
+    }
+
+    QDir().mkpath(QFileInfo(configPath).absolutePath());
+    env->save(configPath);
+}
+}
 
 TrayApp::TrayApp(QString repoRoot, QString cacheDir, QObject *parent)
     : QObject(parent)
@@ -44,9 +71,9 @@ void TrayApp::toggleRecording()
 
 void TrayApp::openSettings()
 {
-    const QString envPath = m_repoRoot + QStringLiteral("/.env");
+    const QString envPath = configFilePath();
     EnvFile env;
-    env.load(envPath);
+    loadConfigWithLegacyMigration(&env, envPath, m_repoRoot + QStringLiteral("/.env"));
     KwisprSettings settings = KwisprSettings::fromEnv(env);
     const QString resolvedModelDir = settings.resolvedModelDir();
     settings.modelDir = resolvedModelDir;
@@ -65,30 +92,46 @@ void TrayApp::openSettings()
 
     SettingsDialog dialog(settings, catalog, installedModelIds, &env, &modelManager);
     connect(&dialog, &SettingsDialog::settingsSaved, this, [&env, envPath]() {
-        env.save(envPath);
+        QDir().mkpath(QFileInfo(envPath).absolutePath());
+        if (!env.save(envPath)) {
+            QMessageBox::warning(nullptr,
+                                 QStringLiteral("KDE Whisper"),
+                                 QStringLiteral("Could not save settings to %1: %2")
+                                     .arg(envPath, env.errorString()));
+        }
     });
     dialog.exec();
 }
 
 void TrayApp::startLocalStt()
 {
-    EnvFile env;
-    env.load(m_repoRoot + QStringLiteral("/.env"));
-    const KwisprSettings settings = KwisprSettings::fromEnv(env);
-    const QString resolvedModelDir = settings.resolvedModelDir();
-
     ProcessRunner runner;
-    LocalSttProcess process(m_repoRoot, &runner);
-    const ProcessResult result = process.start(resolvedModelDir);
+    const ProcessResult result = runner.run(
+        QStringLiteral("systemctl"),
+        {QStringLiteral("--user"), QStringLiteral("start"), QStringLiteral("kwispr-local-stt.service")});
     if (result.exitCode != 0) {
-        QMessageBox::warning(nullptr, QStringLiteral("KDE Whisper"), result.stderrText.isEmpty() ? QStringLiteral("Failed to start local STT.") : result.stderrText);
+        QMessageBox::warning(
+            nullptr,
+            QStringLiteral("KDE Whisper"),
+            result.stderrText.isEmpty()
+                ? QStringLiteral("Failed to start local STT. Install the local runtime first.")
+                : result.stderrText);
     }
     m_controller->refreshState();
 }
 
 void TrayApp::stopLocalStt()
 {
-    QMessageBox::information(nullptr, QStringLiteral("KDE Whisper"), QStringLiteral("Stopping managed local STT processes will be implemented in a later task."));
+    ProcessRunner runner;
+    const ProcessResult result = runner.run(
+        QStringLiteral("systemctl"),
+        {QStringLiteral("--user"), QStringLiteral("stop"), QStringLiteral("kwispr-local-stt.service")});
+    if (result.exitCode != 0) {
+        QMessageBox::warning(nullptr,
+                             QStringLiteral("KDE Whisper"),
+                             result.stderrText.isEmpty() ? QStringLiteral("Failed to stop local STT.")
+                                                         : result.stderrText);
+    }
     m_controller->refreshState();
 }
 

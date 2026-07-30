@@ -9,6 +9,15 @@ set(CMAKE_AUTOMOC ON)
 include(CTest)
 include(GNUInstallDirs)
 
+foreach(install_dir IN ITEMS CMAKE_INSTALL_BINDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_DATADIR)
+    if(IS_ABSOLUTE "${${install_dir}}")
+        message(FATAL_ERROR "An absolute ${install_dir} is not supported by the relocatable launchers")
+    endif()
+endforeach()
+file(RELATIVE_PATH KWISPR_BINDIR_TO_PREFIX "/${CMAKE_INSTALL_BINDIR}" "/")
+configure_file(scripts/kwispr.in "${CMAKE_CURRENT_BINARY_DIR}/kwispr" @ONLY)
+configure_file(scripts/kde-whisper.in "${CMAKE_CURRENT_BINARY_DIR}/kde-whisper-launcher" @ONLY)
+
 find_package(ECM 6.0 REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
 
@@ -37,7 +46,21 @@ add_executable(kde-whisper
 )
 target_link_libraries(kde-whisper PRIVATE kde_whisper_core Qt6::Widgets KF6::CoreAddons)
 
-install(TARGETS kde-whisper RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS kde-whisper RUNTIME DESTINATION "${CMAKE_INSTALL_LIBDIR}/kwispr")
+install(PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/kwispr"
+    DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/kde-whisper-launcher"
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RENAME kde-whisper)
+install(PROGRAMS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr.sh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr-models.py"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/kwispr/runtime")
+install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../models/local-stt-catalog.json"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/kwispr/runtime/models")
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../sounds/"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/kwispr/runtime/sounds")
 install(FILES org.kwispr.KdeWhisper.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES org.kwispr.KdeWhisper.metainfo.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
 install(FILES icons/org.kwispr.KdeWhisper.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)

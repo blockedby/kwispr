@@ -6,10 +6,19 @@
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QStandardPaths>
+#include <QTimer>
 
 namespace {
-QString detectRepoRoot(const QString &executablePath)
+QString detectRuntimeRoot(const QString &executablePath)
 {
+    const QString configuredRoot = qEnvironmentVariable("KWISPR_RUNTIME_ROOT").trimmed();
+    if (!configuredRoot.isEmpty()
+        && QFileInfo::exists(QDir(configuredRoot).filePath(QStringLiteral("kwispr.sh")))
+        && QFileInfo::exists(QDir(configuredRoot).filePath(QStringLiteral("models/local-stt-catalog.json")))) {
+        return QDir(configuredRoot).canonicalPath();
+    }
+
     QDir dir(QFileInfo(executablePath).absoluteDir());
     for (int i = 0; i < 5; ++i) {
         if (QFileInfo::exists(dir.filePath(QStringLiteral("kwispr.sh")))
@@ -37,9 +46,17 @@ int main(int argc, char *argv[])
         KAboutLicense::GPL_V3);
     KAboutData::setApplicationData(aboutData);
 
-    const QString repoRoot = detectRepoRoot(QCoreApplication::applicationFilePath());
-    const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/kwispr");
-    TrayApp tray(repoRoot, cacheDir);
+    const QString runtimeRoot = detectRuntimeRoot(QCoreApplication::applicationFilePath());
+    const QString cacheDir = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
+                                 .filePath(QStringLiteral("kwispr"));
+    TrayApp tray(runtimeRoot, cacheDir);
+
+    if (app.arguments().contains(QStringLiteral("--settings"))) {
+        QTimer::singleShot(0, &tray, [&tray]() {
+            tray.openSettings();
+            qApp->quit();
+        });
+    }
 
     return app.exec();
 }

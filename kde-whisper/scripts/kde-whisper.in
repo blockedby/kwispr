@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+prefix=$(CDPATH= cd -- "$bin_dir/@KWISPR_BINDIR_TO_PREFIX@" && pwd)
+export KWISPR_RUNTIME_ROOT="$prefix/@CMAKE_INSTALL_DATADIR@/kwispr/runtime"
+exec "$prefix/@CMAKE_INSTALL_LIBDIR@/kwispr/kde-whisper" "$@"

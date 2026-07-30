@@ -17,7 +17,6 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 DEFAULT_CATALOG = Path(__file__).resolve().parent / "models" / "local-stt-catalog.json"
-DEFAULT_MODEL_DIR = Path(os.environ.get("KWISPR_MODEL_DIR", "~/.local/share/kwispr/models")).expanduser()
 HF_BASE_URL = "https://huggingface.co"
 DOWNLOAD_TIMEOUT_SECONDS = 60
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
@@ -31,6 +30,13 @@ class CatalogError(ValueError):
 
 class DownloadError(OSError):
     """Downloaded bytes do not match the catalog's declared size."""
+
+
+def default_model_dir() -> Path:
+    if os.environ.get("KWISPR_MODEL_DIR"):
+        return Path(os.environ["KWISPR_MODEL_DIR"]).expanduser()
+    data_home = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser()
+    return data_home / "kwispr" / "models"
 
 
 def load_catalog(path: Path) -> dict[str, Any]:
@@ -310,7 +316,7 @@ def cmd_download(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG, help=f"catalog JSON (default: {DEFAULT_CATALOG})")
-    parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR, help="model install directory (default: $KWISPR_MODEL_DIR or ~/.local/share/kwispr/models)")
+    parser.add_argument("--model-dir", type=Path, default=default_model_dir(), help="model install directory (default: $KWISPR_MODEL_DIR or $XDG_DATA_HOME/kwispr/models)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="list catalog models and install status").set_defaults(func=cmd_list)
     download = sub.add_parser("download", help="download and install a model's default GGUF quant")
