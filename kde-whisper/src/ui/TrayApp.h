@@ -3,6 +3,7 @@
 #include "ui/TrayController.h"
 
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <memory>
 
@@ -31,4 +32,5 @@ private:
     QString m_cacheDir;
     std::unique_ptr<TrayController> m_controller;
     KStatusNotifierItem *m_notifier = nullptr;
+    QPointer<SettingsDialog> m_settingsDialog;
 };
