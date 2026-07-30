@@ -78,10 +78,10 @@ class KwisprShellContractTest(unittest.TestCase):
             result = h.run("retry", str(wav))
 
             self.assertNotEqual(result.returncode, 0)
-            retry = (h.cache_dir / "last-failed.txt").read_text(encoding="utf-8")
-            self.assertIn("kwispr.sh retry", retry)
-            self.assertIn(str(wav), retry)
-            self.assertEqual(h.clipboard_text(), retry.rstrip("\n"))
+            retry_path = (h.cache_dir / "last-failed.txt").read_text(encoding="utf-8").rstrip("\n")
+            self.assertEqual(retry_path, str(wav))
+            self.assertIn("kwispr.sh retry", h.clipboard_text())
+            self.assertIn(str(wav), h.clipboard_text())
 
     def test_openai_compatible_request_fields_and_local_auth_omission(self) -> None:
         with KwisprScriptHarness() as h:
@@ -95,10 +95,13 @@ class KwisprShellContractTest(unittest.TestCase):
                 KWISPR_AUTOPASTE="0",
             )
             h.fake_curl_response(200, {"text": "привет"})
+            h.cache_dir.mkdir(parents=True)
+            (h.cache_dir / "last-failed.txt").write_text("stale.wav\n", encoding="utf-8")
 
             result = h.run("retry", str(wav))
 
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((h.cache_dir / "last-failed.txt").exists())
             args = h.curl_invocations()[0]
             self.assertIn("-F", args)
             self.assertIn("model=whisper-large-v3-turbo", args)

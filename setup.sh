@@ -23,6 +23,10 @@ install_runtime_packages() {
   fi
 }
 
+echo "==> Optional privileged dependency/integration setup"
+echo "    This helper uses sudo for packages and, if selected, /dev/uinput access."
+echo "    The application installer itself (./install.sh) remains rootless."
+echo ""
 install_runtime_packages
 
 # -----------------------------------------------------------------------------

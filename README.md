@@ -76,8 +76,8 @@ Or build in Podman so build dependencies do not pollute the host; see [Build loc
 ```bash
 git clone https://github.com/blockedby/kwispr.git
 cd kwispr
-./setup.sh       # runtime dependencies and optional ydotool setup
-./install.sh     # polished rootless install under ~/.local
+./setup.sh       # optional privileged dependencies and /dev/uinput integration
+./install.sh     # rootless application install under ~/.local
 ```
 
 The installer uses [Gum](https://github.com/charmbracelet/gum) when it is already available and falls back to portable terminal prompts otherwise. Useful unattended forms:

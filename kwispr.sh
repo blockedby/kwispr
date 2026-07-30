@@ -288,7 +288,7 @@ transcribe() {
 
   if [[ "$http_code" != "200" ]]; then
     local retry_cmd="$SCRIPT_DIR/kwispr.sh retry \"$wav\""
-    echo "$retry_cmd" > "$LAST_FAILED"
+    printf '%s\n' "$wav" > "$LAST_FAILED"
     echo -n "$retry_cmd" | copy_text || true
     local msg
     msg="$(cat "$response" 2>/dev/null || echo '')"
@@ -333,7 +333,7 @@ transcribe() {
       return 0
     fi
     local retry_cmd="$SCRIPT_DIR/kwispr.sh retry \"$wav\""
-    echo "$retry_cmd" > "$LAST_FAILED"
+    printf '%s\n' "$wav" > "$LAST_FAILED"
     echo -n "$retry_cmd" | copy_text || true
     status "❌ Empty transcript" 5000
     status_clear
@@ -341,6 +341,7 @@ transcribe() {
   fi
 
   printf '%s' "$text" > "$txt"
+  rm -f "$LAST_FAILED"
   if ! printf '%s' "$text" | copy_text; then
     status "❌ Clipboard unavailable" 5000
     status_clear

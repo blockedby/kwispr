@@ -7,12 +7,14 @@
 #include "runtime/KwisprController.h"
 #include "runtime/LocalSttClient.h"
 #include "runtime/ProcessRunner.h"
+#include "runtime/RetryState.h"
 #include "ui/SettingsDialog.h"
 
 #include <KStatusNotifierItem>
 
 #include <QApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QStandardPaths>
@@ -137,10 +139,18 @@ void TrayApp::stopLocalStt()
 
 void TrayApp::retryLastFailed()
 {
-    const QString path = m_cacheDir + QStringLiteral("/last-failed.txt");
+    const QString statePath = m_cacheDir + QStringLiteral("/last-failed.txt");
+    QFile stateFile(statePath);
+    if (!stateFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QMessageBox::warning(nullptr, QStringLiteral("KDE Whisper"), QStringLiteral("No failed recording is available to retry."));
+        return;
+    }
+
+    const QString wavPath = retryWavPathFromState(QString::fromUtf8(stateFile.readAll()));
+
     ProcessRunner runner;
     KwisprController controller(m_repoRoot, &runner);
-    const ProcessResult result = controller.retry(path);
+    const ProcessResult result = controller.retry(wavPath);
     if (result.exitCode != 0) {
         QMessageBox::warning(nullptr, QStringLiteral("KDE Whisper"), result.stderrText.isEmpty() ? QStringLiteral("Retry failed.") : result.stderrText);
     }

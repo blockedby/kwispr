@@ -3,6 +3,7 @@
 #include "runtime/KwisprController.h"
 #include "runtime/LocalSttProcess.h"
 #include "runtime/ProcessRunner.h"
+#include "runtime/RetryState.h"
 
 class RecordingProcessRunner final : public ProcessRunner
 {
@@ -32,6 +33,7 @@ class ProcessRunnerTest : public QObject
 private slots:
     void toggleRecordingUsesExistingScript();
     void retryPassesPathAsArgument();
+    void retryStateSupportsRawAndLegacyFormats();
     void localSttUsesReleaseBinaryCatalogAndModelDir();
     void failuresSurfaceExitCodeAndStderr();
 };
@@ -62,6 +64,15 @@ void ProcessRunnerTest::retryPassesPathAsArgument()
     QCOMPARE(runner.calls, 1);
     QCOMPARE(runner.lastProgram, QStringLiteral("/repo/kwispr.sh"));
     QCOMPARE(runner.lastArguments, (QStringList{QStringLiteral("retry"), retryPath}));
+}
+
+void ProcessRunnerTest::retryStateSupportsRawAndLegacyFormats()
+{
+    const QString wavPath = QStringLiteral("/tmp/kwispr failed/audio one.wav");
+    QCOMPARE(retryWavPathFromState(wavPath + QLatin1Char('\n')), wavPath);
+    QCOMPARE(retryWavPathFromState(
+                 QStringLiteral("/opt/kwispr/kwispr.sh retry \"/tmp/kwispr failed/audio one.wav\"\n")),
+             wavPath);
 }
 
 void ProcessRunnerTest::localSttUsesReleaseBinaryCatalogAndModelDir()
