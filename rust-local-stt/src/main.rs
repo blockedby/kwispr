@@ -9,7 +9,7 @@ use axum::{
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     io::Cursor,
     net::SocketAddr,
@@ -19,18 +19,10 @@ use std::{
     time::Duration,
 };
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
-use transcribe_rs::{
-    onnx::{
-        gigaam::GigaAMModel,
-        parakeet::{ParakeetModel, ParakeetParams, TimestampGranularity},
-        Quantization,
-    },
-    vad::{SileroVad, SmoothedVad, Vad},
-    whisper_cpp::{WhisperEngine, WhisperInferenceParams},
-    SpeechModel, TranscribeOptions,
-};
+use transcribe_cpp::{Backend, Model, ModelOptions, RunOptions, Session};
+use transcribe_rs::vad::{SileroVad, SmoothedVad, Vad};
 
-static ENGINE_CACHE: Lazy<Mutex<HashMap<String, LoadedEngine>>> =
+static SESSION_CACHE: Lazy<Mutex<HashMap<String, Session>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_FFMPEG_TIMEOUT_SECONDS: u64 = 30;
@@ -61,22 +53,31 @@ struct AppState {
 }
 #[derive(Clone, Deserialize)]
 struct Catalog {
+    catalog_version: u32,
     models: Vec<ModelInfo>,
 }
 #[derive(Clone, Debug, Deserialize)]
 struct ModelInfo {
     id: String,
+    revision: String,
+    slug: String,
     name: String,
-    engine_type: String,
-    artifact: Artifact,
-    #[serde(default)]
-    supports_language_selection: bool,
+    architecture: String,
+    languages: Vec<String>,
+    capabilities: ModelCapabilities,
+    files: Vec<QuantFile>,
+    default_quant: String,
 }
 #[derive(Clone, Debug, Deserialize)]
-struct Artifact {
+struct ModelCapabilities {
+    lang_detect: bool,
+}
+#[derive(Clone, Debug, Deserialize)]
+struct QuantFile {
     filename: String,
-    #[serde(default)]
-    is_directory: bool,
+    quant: String,
+    size_bytes: u64,
+    sha256: String,
 }
 #[derive(Serialize)]
 struct Health {
@@ -128,14 +129,11 @@ struct DecodedAudio {
     sample_rate: u32,
 }
 
-enum LoadedEngine {
-    GigaAM(GigaAMModel),
-    Parakeet(ParakeetModel),
-    Whisper(WhisperEngine),
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
+    transcribe_cpp::init_logging();
+    transcribe_cpp::init_backends_default()
+        .context("initialize transcribe-cpp dynamic backends")?;
     let host = arg("--host").unwrap_or_else(|| "127.0.0.1".into());
     let port: u16 = arg("--port").unwrap_or_else(|| "9000".into()).parse()?;
     let catalog_path =
@@ -148,6 +146,7 @@ async fn main() -> Result<()> {
         &std::fs::read(&catalog_path)
             .with_context(|| format!("read catalog {}", catalog_path.display()))?,
     )?;
+    validate_catalog(&catalog)?;
     let app_state = AppState {
         catalog,
         model_dir,
@@ -210,6 +209,7 @@ async fn transcribe(
     let bytes =
         file.ok_or_else(|| ApiError::bad_request(anyhow!("missing audio file field: file")))?;
     let info = resolve_model(&state.catalog, &model_id)?;
+    let language = effective_language(&info, lang.as_deref())?;
     let audio = decode_audio(&bytes).await.map_err(ApiError::bad_request)?;
     let preprocessed = preprocess_audio(audio, &state.vad).map_err(ApiError::bad_request)?;
     if preprocessed.decision == VadDecision::NoSpeech {
@@ -218,20 +218,124 @@ async fn transcribe(
         }));
     }
     let text = tokio::task::spawn_blocking(move || {
-        transcribe_blocking(&state.model_dir, &info, preprocessed.samples, lang)
+        transcribe_blocking(&state.model_dir, &info, preprocessed.samples, language)
     })
     .await
     .map_err(|e| ApiError::internal(anyhow!(e)))??;
     Ok(Json(Transcription { text }))
 }
 
-fn resolve_model(catalog: &Catalog, model_id: &str) -> std::result::Result<ModelInfo, ApiError> {
+fn validate_catalog(catalog: &Catalog) -> Result<()> {
+    if catalog.catalog_version != 2 {
+        return Err(anyhow!("catalog_version must be 2"));
+    }
+    if catalog.models.is_empty() {
+        return Err(anyhow!("catalog contains no models"));
+    }
+    let mut slugs = HashSet::new();
+    for model in &catalog.models {
+        if !slugs.insert(model.slug.as_str()) {
+            return Err(anyhow!("duplicate catalog slug: {}", model.slug));
+        }
+        if model.id.split('/').count() != 2 {
+            return Err(anyhow!("model {} has invalid Hugging Face id", model.slug));
+        }
+        if model.revision.len() != 40
+            || !model.revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(anyhow!("model {} has invalid revision", model.slug));
+        }
+        if model.architecture.is_empty() || model.languages.is_empty() {
+            return Err(anyhow!(
+                "model {} lacks architecture or languages",
+                model.slug
+            ));
+        }
+        let file = default_file(model)?;
+        if Path::new(&file.filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(file.filename.as_str())
+            || !file.filename.ends_with(".gguf")
+        {
+            return Err(anyhow!("model {} has unsafe default filename", model.slug));
+        }
+        if file.size_bytes == 0
+            || file.sha256.len() != 64
+            || !file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(anyhow!(
+                "model {} has invalid default file metadata",
+                model.slug
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn default_file(info: &ModelInfo) -> Result<&QuantFile> {
+    let mut matches = info
+        .files
+        .iter()
+        .filter(|file| file.quant == info.default_quant);
+    let file = matches.next().ok_or_else(|| {
+        anyhow!(
+            "model {} has no file for default quant {}",
+            info.slug,
+            info.default_quant
+        )
+    })?;
+    if matches.next().is_some() {
+        return Err(anyhow!(
+            "model {} has duplicate default quant files",
+            info.slug
+        ));
+    }
+    Ok(file)
+}
+
+fn resolve_model(catalog: &Catalog, model_slug: &str) -> std::result::Result<ModelInfo, ApiError> {
     catalog
         .models
         .iter()
-        .find(|m| m.id == model_id)
+        .find(|model| model.slug == model_slug)
         .cloned()
-        .ok_or_else(|| ApiError::not_found(anyhow!("unknown model: {model_id}")))
+        .ok_or_else(|| ApiError::not_found(anyhow!("unknown model: {model_slug}")))
+}
+
+fn effective_language(
+    info: &ModelInfo,
+    requested: Option<&str>,
+) -> std::result::Result<Option<String>, ApiError> {
+    let requested = requested.map(str::trim).filter(|value| !value.is_empty());
+    if requested.is_none_or(|value| value.eq_ignore_ascii_case("auto")) {
+        if info.capabilities.lang_detect {
+            return Ok(None);
+        }
+        let fallback = info
+            .languages
+            .iter()
+            .find(|language| base_language(language).eq_ignore_ascii_case("en"))
+            .or_else(|| info.languages.first())
+            .expect("validated catalog languages");
+        return Ok(Some(fallback.clone()));
+    }
+
+    let requested = requested.expect("non-auto language");
+    let matched = info.languages.iter().find(|language| {
+        language.eq_ignore_ascii_case(requested)
+            || base_language(language).eq_ignore_ascii_case(base_language(requested))
+    });
+    matched.cloned().map(Some).ok_or_else(|| {
+        ApiError::bad_request(anyhow!(
+            "language '{requested}' is not supported by model {}",
+            info.slug
+        ))
+    })
+}
+
+fn base_language(language: &str) -> &str {
+    language.split_once('-').map_or(language, |(base, _)| base)
 }
 
 fn transcribe_blocking(
@@ -240,84 +344,56 @@ fn transcribe_blocking(
     audio: Vec<f32>,
     language: Option<String>,
 ) -> std::result::Result<String, ApiError> {
-    let mut cache = ENGINE_CACHE
+    let mut cache = SESSION_CACHE
         .lock()
-        .map_err(|_| ApiError::internal(anyhow!("engine cache lock poisoned")))?;
-    if !cache.contains_key(&info.id) {
+        .map_err(|_| ApiError::internal(anyhow!("session cache lock poisoned")))?;
+    if !cache.contains_key(&info.slug) {
         cache.insert(
-            info.id.clone(),
-            load_engine(model_dir, info).map_err(ApiError::runtime)?,
+            info.slug.clone(),
+            load_session(model_dir, info).map_err(ApiError::runtime)?,
         );
     }
-    let engine = cache.get_mut(&info.id).unwrap();
-    let result = match engine {
-        LoadedEngine::GigaAM(e) => e
-            .transcribe(&audio, &TranscribeOptions::default())
-            .map_err(|e| ApiError::runtime(anyhow!("GigaAM transcription failed: {e}")))?,
-        LoadedEngine::Parakeet(e) => e
-            .transcribe_with(
-                &audio,
-                &ParakeetParams {
-                    timestamp_granularity: Some(TimestampGranularity::Segment),
-                    ..Default::default()
-                },
-            )
-            .map_err(|e| ApiError::runtime(anyhow!("Parakeet transcription failed: {e}")))?,
-        LoadedEngine::Whisper(e) => e
-            .transcribe_with(
-                &audio,
-                &WhisperInferenceParams {
-                    language: if info.supports_language_selection {
-                        language
-                    } else {
-                        None
-                    },
-                    ..Default::default()
-                },
-            )
-            .map_err(|e| ApiError::runtime(anyhow!("Whisper transcription failed: {e}")))?,
-    };
+    let session = cache.get_mut(&info.slug).expect("cached session");
+    let result = session
+        .run(&audio, &run_options(language))
+        .map_err(|error| {
+            ApiError::runtime(anyhow!("transcribe-cpp transcription failed: {error}"))
+        })?;
     Ok(result.text.trim().to_string())
 }
 
-fn load_engine(model_dir: &Path, info: &ModelInfo) -> Result<LoadedEngine> {
-    let path = model_path(model_dir, info);
-    if !path.exists() {
+fn run_options(language: Option<String>) -> RunOptions {
+    RunOptions {
+        language,
+        ..Default::default()
+    }
+}
+
+fn load_session(model_dir: &Path, info: &ModelInfo) -> Result<Session> {
+    let path = model_path(model_dir, info)?;
+    if !path.is_file() {
         return Err(anyhow!(
             "model '{}' ({}) is not installed at {}",
-            info.id,
+            info.slug,
             info.name,
             path.display()
         ));
     }
-    match info.engine_type.as_str() {
-        "gigaam" => Ok(LoadedEngine::GigaAM(GigaAMModel::load(
-            &path,
-            &Quantization::Int8,
-        )?)),
-        "parakeet" => Ok(LoadedEngine::Parakeet(ParakeetModel::load(
-            &path,
-            &Quantization::Int8,
-        )?)),
-        "whisper" => Ok(LoadedEngine::Whisper(WhisperEngine::load(&path)?)),
-        other => Err(anyhow!(
-            "unsupported engine_type '{other}' for model {}",
-            info.id
-        )),
-    }
+    let model = Model::load_with(
+        &path,
+        &ModelOptions {
+            backend: Backend::Auto,
+            gpu_device: 0,
+        },
+    )
+    .with_context(|| format!("load GGUF model {}", info.slug))?;
+    model
+        .session()
+        .with_context(|| format!("create session for {}", info.slug))
 }
 
-fn model_path(model_dir: &Path, info: &ModelInfo) -> PathBuf {
-    if !info.artifact.is_directory {
-        return model_dir.join(&info.artifact.filename);
-    }
-    let base = model_dir.join(&info.id);
-    let nested = base.join(&info.artifact.filename);
-    if nested.is_dir() {
-        nested
-    } else {
-        base
-    }
+fn model_path(model_dir: &Path, info: &ModelInfo) -> Result<PathBuf> {
+    Ok(model_dir.join(&default_file(info)?.filename))
 }
 
 async fn decode_audio(bytes: &[u8]) -> Result<DecodedAudio> {
@@ -722,8 +798,9 @@ mod tests {
             };
             let mut writer = hound::WavWriter::new(Cursor::new(&mut bytes), spec).unwrap();
             for i in 0..sample_count {
-                let sample = if i % 2 == 0 { 0 } else { 16384 };
-                writer.write_sample::<i16>(sample).unwrap();
+                writer
+                    .write_sample::<i16>(if i % 2 == 0 { 0 } else { 16384 })
+                    .unwrap();
             }
             writer.finalize().unwrap();
         }
@@ -775,6 +852,33 @@ mod tests {
         );
         assert!(looks_like_ogg(&output.stdout));
         output.stdout
+    }
+
+    fn test_model() -> ModelInfo {
+        ModelInfo {
+            id: "handy-computer/known-model-gguf".into(),
+            revision: "a".repeat(40),
+            slug: "known-model".into(),
+            name: "Known Model".into(),
+            architecture: "whisper".into(),
+            languages: vec!["en".into(), "ru".into()],
+            capabilities: ModelCapabilities { lang_detect: true },
+            files: vec![
+                QuantFile {
+                    filename: "known-Q4.gguf".into(),
+                    quant: "Q4".into(),
+                    size_bytes: 10,
+                    sha256: "a".repeat(64),
+                },
+                QuantFile {
+                    filename: "known-Q8.gguf".into(),
+                    quant: "Q8_0".into(),
+                    size_bytes: 20,
+                    sha256: "b".repeat(64),
+                },
+            ],
+            default_quant: "Q8_0".into(),
+        }
     }
 
     #[test]
@@ -839,25 +943,77 @@ mod tests {
     }
 
     #[test]
-    fn directory_model_path_uses_nested_artifact_directory_when_present() {
-        let tmp = std::env::temp_dir().join(format!("kwispr-model-path-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("model-id/model-artifact-dir")).unwrap();
-        let info = ModelInfo {
-            id: "model-id".into(),
-            name: "Model".into(),
-            engine_type: "parakeet".into(),
-            artifact: Artifact {
-                filename: "model-artifact-dir".into(),
-                is_directory: true,
-            },
-            supports_language_selection: false,
-        };
+    fn bundled_v2_catalog_resolves_existing_ids_by_slug() {
+        let catalog: Catalog =
+            serde_json::from_str(include_str!("../../models/local-stt-catalog.json")).unwrap();
+        validate_catalog(&catalog).unwrap();
+        assert_eq!(catalog.catalog_version, 2);
+        assert_eq!(catalog.models.len(), 67);
+        for slug in [
+            "gigaam-v3-e2e-ctc",
+            "parakeet-tdt-0.6b-v3",
+            "whisper-large-v3-turbo",
+        ] {
+            assert_eq!(resolve_model(&catalog, slug).unwrap().slug, slug);
+        }
+    }
+
+    #[test]
+    fn default_quant_selects_single_gguf_model_path() {
+        let info = test_model();
+        assert_eq!(default_file(&info).unwrap().quant, "Q8_0");
         assert_eq!(
-            model_path(&tmp, &info),
-            tmp.join("model-id/model-artifact-dir")
+            model_path(Path::new("/models"), &info).unwrap(),
+            Path::new("/models/known-Q8.gguf")
         );
-        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn language_request_uses_catalog_capabilities() {
+        let detecting = test_model();
+        assert_eq!(effective_language(&detecting, None).unwrap(), None);
+        assert_eq!(effective_language(&detecting, Some("auto")).unwrap(), None);
+        assert_eq!(
+            effective_language(&detecting, Some(" ru "))
+                .unwrap()
+                .as_deref(),
+            Some("ru")
+        );
+
+        let mut fixed = test_model();
+        fixed.capabilities.lang_detect = false;
+        assert_eq!(
+            effective_language(&fixed, None).unwrap().as_deref(),
+            Some("en")
+        );
+        assert_eq!(
+            effective_language(&fixed, Some("auto")).unwrap().as_deref(),
+            Some("en")
+        );
+
+        let error = effective_language(&fixed, Some("de")).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("language 'de' is not supported"));
+    }
+
+    #[test]
+    fn language_request_matches_catalog_bcp47_base_code() {
+        let mut info = test_model();
+        info.languages = vec!["en-US".into(), "zh".into()];
+        assert_eq!(
+            effective_language(&info, Some("en")).unwrap().as_deref(),
+            Some("en-US")
+        );
+        assert_eq!(
+            effective_language(&info, Some("zh-Hant"))
+                .unwrap()
+                .as_deref(),
+            Some("zh")
+        );
+        assert_eq!(
+            run_options(Some("zh".into())).language.as_deref(),
+            Some("zh")
+        );
     }
 
     #[test]
@@ -990,16 +1146,8 @@ mod tests {
     #[test]
     fn unknown_model_is_rejected_before_silent_vad_skip() {
         let catalog = Catalog {
-            models: vec![ModelInfo {
-                id: "known-model".into(),
-                name: "Known Model".into(),
-                engine_type: "whisper".into(),
-                artifact: Artifact {
-                    filename: "known.bin".into(),
-                    is_directory: false,
-                },
-                supports_language_selection: false,
-            }],
+            catalog_version: 2,
+            models: vec![test_model()],
         };
         let err = resolve_model(&catalog, "missing-model").unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
@@ -1019,19 +1167,11 @@ mod tests {
     #[test]
     fn silent_audio_with_valid_model_skips_before_model_load() {
         let catalog = Catalog {
-            models: vec![ModelInfo {
-                id: "known-model".into(),
-                name: "Known Model".into(),
-                engine_type: "whisper".into(),
-                artifact: Artifact {
-                    filename: "known.bin".into(),
-                    is_directory: false,
-                },
-                supports_language_selection: false,
-            }],
+            catalog_version: 2,
+            models: vec![test_model()],
         };
         let info = resolve_model(&catalog, "known-model").unwrap();
-        assert_eq!(info.id, "known-model");
+        assert_eq!(info.slug, "known-model");
 
         let silent = preprocess_audio(
             DecodedAudio {

@@ -16,7 +16,7 @@ TrayController::TrayController(ITrayActions *actions, QString cacheDir, QObject 
     m_menu->addSeparator();
     m_startLocalSttAction = addAction(QStringLiteral("Start Local STT"), &ITrayActions::startLocalStt);
     m_stopLocalSttAction = addAction(QStringLiteral("Stop Local STT"), &ITrayActions::stopLocalStt);
-    addAction(QStringLiteral("Download/Verify Models"), &ITrayActions::downloadVerifyModels);
+    addAction(QStringLiteral("Manage Local Models"), &ITrayActions::openSettings);
     m_retryLastFailedAction = addAction(QStringLiteral("Retry Last Failed"), &ITrayActions::retryLastFailed);
     m_menu->addSeparator();
     addAction(QStringLiteral("Quit"), &ITrayActions::quitApplication);

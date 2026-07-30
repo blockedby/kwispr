@@ -13,7 +13,6 @@ public:
     int settingsCalls = 0;
     int startCalls = 0;
     int stopCalls = 0;
-    int downloadVerifyCalls = 0;
     int retryCalls = 0;
     int quitCalls = 0;
     LocalSttState state = LocalSttState::Stopped;
@@ -22,7 +21,6 @@ public:
     void openSettings() override { ++settingsCalls; }
     void startLocalStt() override { ++startCalls; state = LocalSttState::Healthy; }
     void stopLocalStt() override { ++stopCalls; state = LocalSttState::Stopped; }
-    void downloadVerifyModels() override { ++downloadVerifyCalls; }
     void retryLastFailed() override { ++retryCalls; }
     void quitApplication() override { ++quitCalls; }
     LocalSttState localSttState() const override { return state; }
@@ -59,7 +57,8 @@ void TrayControllerTest::menuContainsRequiredActions()
     QVERIFY(actionByText(menu, QStringLiteral("Settings")));
     QVERIFY(actionByText(menu, QStringLiteral("Start Local STT")));
     QVERIFY(actionByText(menu, QStringLiteral("Stop Local STT")));
-    QVERIFY(actionByText(menu, QStringLiteral("Download/Verify Models")));
+    QVERIFY(actionByText(menu, QStringLiteral("Manage Local Models")));
+    QVERIFY(!actionByText(menu, QStringLiteral("Download/Verify Models")));
     QVERIFY(actionByText(menu, QStringLiteral("Retry Last Failed")));
     QVERIFY(actionByText(menu, QStringLiteral("Quit")));
 }
@@ -81,15 +80,14 @@ void TrayControllerTest::actionsCallInjectedServices()
     actionByText(menu, QStringLiteral("Settings"))->trigger();
     actionByText(menu, QStringLiteral("Start Local STT"))->trigger();
     actionByText(menu, QStringLiteral("Stop Local STT"))->trigger();
-    actionByText(menu, QStringLiteral("Download/Verify Models"))->trigger();
+    actionByText(menu, QStringLiteral("Manage Local Models"))->trigger();
     actionByText(menu, QStringLiteral("Retry Last Failed"))->trigger();
     actionByText(menu, QStringLiteral("Quit"))->trigger();
 
     QCOMPARE(actions.toggleCalls, 1);
-    QCOMPARE(actions.settingsCalls, 1);
+    QCOMPARE(actions.settingsCalls, 2);
     QCOMPARE(actions.startCalls, 1);
     QCOMPARE(actions.stopCalls, 1);
-    QCOMPARE(actions.downloadVerifyCalls, 1);
     QCOMPARE(actions.retryCalls, 1);
     QCOMPARE(actions.quitCalls, 1);
 }

@@ -11,9 +11,10 @@ RUN pacman -Syu --noconfirm --needed \
     vulkan-headers \
     vulkan-icd-loader \
     shaderc \
+    spirv-headers \
     ccache \
   && pacman -Scc --noconfirm
 
 WORKDIR /work/rust-local-stt
 ENV CARGO_TARGET_DIR=/work/rust-local-stt/target
-CMD ["cargo", "build", "--release"]
+CMD ["cargo", "build", "--release", "--locked"]

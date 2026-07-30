@@ -21,24 +21,43 @@ ModelCatalog ModelCatalog::load(const QString &path)
         return catalog;
     }
 
-    const QJsonArray models = doc.object().value(QStringLiteral("models")).toArray();
+    const QJsonObject root = doc.object();
+    const int catalogVersion = root.value(QStringLiteral("catalog_version")).toInt();
+    const int schemaVersion = root.value(QStringLiteral("schema_version")).toInt();
+    const bool isV2 = catalogVersion == 2;
+    if (!isV2 && schemaVersion != 1) {
+        catalog.error = QStringLiteral("unsupported model catalog version");
+        return catalog;
+    }
+    const QJsonArray models = root.value(QStringLiteral("models")).toArray();
+    if (models.isEmpty()) {
+        catalog.error = QStringLiteral("model catalog contains no models");
+        return catalog;
+    }
     for (const QJsonValue &value : models) {
         const QJsonObject object = value.toObject();
         const QJsonObject artifact = object.value(QStringLiteral("artifact")).toObject();
+        const QJsonObject capabilities = object.value(QStringLiteral("capabilities")).toObject();
         LocalModel model;
-        model.id = object.value(QStringLiteral("id")).toString();
+        model.id = isV2 ? object.value(QStringLiteral("slug")).toString() : object.value(QStringLiteral("id")).toString();
         model.name = object.value(QStringLiteral("name")).toString();
-        model.engineType = object.value(QStringLiteral("engine_type")).toString();
-        model.artifactIsDirectory = artifact.value(QStringLiteral("is_directory")).toBool(false);
-        model.supportsLanguageSelection = object.value(QStringLiteral("supports_language_selection")).toBool(false);
+        model.engineType = isV2 ? QStringLiteral("transcribe-cpp") : object.value(QStringLiteral("engine_type")).toString();
+        model.artifactIsDirectory = !isV2 && artifact.value(QStringLiteral("is_directory")).toBool(false);
         for (const QJsonValue &language : object.value(QStringLiteral("languages")).toArray()) {
             model.languages.append(language.toString());
         }
+        model.supportsLanguageSelection = isV2 ? model.languages.size() > 1
+                                               : object.value(QStringLiteral("supports_language_selection")).toBool(false);
+        model.supportsLanguageDetection = capabilities.value(QStringLiteral("lang_detect")).toBool(false);
         if (!model.id.isEmpty()) {
             catalog.models.append(model);
         }
     }
 
+    if (catalog.models.isEmpty()) {
+        catalog.error = QStringLiteral("model catalog contains no valid model entries");
+        return catalog;
+    }
     catalog.isValid = true;
     return catalog;
 }

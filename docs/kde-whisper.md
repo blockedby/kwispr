@@ -74,21 +74,24 @@ The tray action also delegates to `kwispr.sh toggle`, so both paths exercise the
 
 ## Local STT models
 
-Use the existing helper to download models:
+The **Local model** row in KDE Whisper settings shows catalog install state and provides asynchronous **Download** and confirmed **Delete** actions. Downloads report live percentage and compact ETA, then clearly show checksum verification. The same operations are available through the authoritative helper:
 
 ```bash
 ./kwispr-models.py download whisper-large-v3-turbo
+./kwispr-models.py delete whisper-large-v3-turbo
 ```
 
-Then select the model in the KDE Whisper settings dialog or set:
+Deletion removes only the slug's catalog-selected default GGUF from `KWISPR_MODEL_DIR`. Select the model in the KDE Whisper settings dialog or set:
 
 ```env
 KWISPR_MODEL=whisper-large-v3-turbo
 ```
 
+**Language** is a single optional hint. Catalog models offer only their supported language codes and offer **Auto detect** only when detection is supported. Choose Auto (an empty `KWISPR_LANGUAGE`) for mixed-language dictation such as Russian plus English. OpenAI accepts one editable hint; OpenRouter does not use this setting.
+
 ## Current limitations
 
 - This is an optional experimental KDE control surface.
 - It is not a replacement for the documented shell workflow yet.
-- Model install/verify behavior stays authoritative in `kwispr-models.py`.
+- Model install/delete/verify behavior stays authoritative in `kwispr-models.py`.
 - Local STT still requires a built `rust-local-stt/target/release/kwispr-local-stt` binary.

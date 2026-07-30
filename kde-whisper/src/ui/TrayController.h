@@ -17,7 +17,6 @@ public:
     virtual void openSettings() = 0;
     virtual void startLocalStt() = 0;
     virtual void stopLocalStt() = 0;
-    virtual void downloadVerifyModels() = 0;
     virtual void retryLastFailed() = 0;
     virtual void quitApplication() = 0;
     virtual LocalSttState localSttState() const = 0;

@@ -35,9 +35,9 @@ KDE hotkey
             ├─ OpenAI Whisper / compatible cloud endpoint
             ├─ OpenRouter audio-capable chat model
             └─ local Rust STT runtime on http://127.0.0.1:9000
-                 ├─ GigaAM
-                 ├─ Parakeet
-                 └─ Whisper Large v3 Turbo via whisper.cpp/Vulkan
+                 └─ Handy catalog v2 GGUF models via transcribe-cpp 0.1.3
+                      ├─ cached batch Sessions
+                      └─ dynamic CPU/Vulkan backends on Linux
 ```
 
 `kwispr.sh` itself stays simple and stateless. The long-running part, if you use local mode, is the local STT server.
@@ -65,7 +65,7 @@ sudo pacman -S --needed ffmpeg curl jq wl-clipboard libnotify pipewire-pulse ydo
 For local Rust STT builds on the host:
 
 ```bash
-sudo pacman -S --needed rust cmake clang vulkan-headers vulkan-icd-loader shaderc pkgconf
+sudo pacman -S --needed rust cmake clang vulkan-headers vulkan-icd-loader shaderc spirv-headers pkgconf
 ```
 
 Or build in Podman so build dependencies do not pollute the host; see [Build local STT in Podman](#build-local-stt-in-podman).
@@ -103,14 +103,21 @@ Press once to start recording, press again to stop and transcribe.
 
 ### Local/offline STT — recommended for this fork
 
-Download a model:
+Download a model. Model names are Handy `slug` values; the helper selects that model's catalog `default_quant`, downloads revision-pinned GGUF bytes (mirror first, then Hugging Face), and verifies SHA256:
 
 ```bash
 ./kwispr-models.py list
 ./kwispr-models.py download whisper-large-v3-turbo
 # or for Russian-only dictation:
 ./kwispr-models.py download gigaam-v3-e2e-ctc
+./kwispr-models.py verify gigaam-v3-e2e-ctc
+# remove only the catalog-managed default GGUF for a slug:
+./kwispr-models.py delete gigaam-v3-e2e-ctc
 ```
+
+The KDE settings dialog also provides nonblocking **Download** and **Delete** actions beside the Local model selector. Downloads show live percentage and compact ETA, followed by checksum verification. Deletion is confirmed and delegates to the same catalog-authoritative helper. Integrations can request the helper's JSONL protocol with `download SLUG --progress jsonl`; normal CLI output is unchanged.
+
+The full 67-model catalog is synced from Handy commit `ea3c20a3a67c7401d8b19198723760da9d40ac45`; provenance and immutable per-model revisions are recorded in `models/local-stt-catalog.json`.
 
 Build and run the Rust server:
 
@@ -143,13 +150,15 @@ KWISPR_SOUNDS=1
 KWISPR_PULSE_SOURCE=default
 ```
 
+`KWISPR_LANGUAGE` is one optional language hint, not a multi-select value. Leave it empty (choose **Auto detect** in KDE) for mixed-language dictation such as Russian plus English; detection is offered only for models whose catalog metadata supports it.
+
 Useful model choices:
 
 | Need | Model id |
 |---|---|
 | Russian dictation | `gigaam-v3-e2e-ctc` |
 | Mixed Russian/English | `whisper-large-v3-turbo` |
-| English / lighter multilingual experiments | `parakeet-tdt-0.6b-v3` |
+| European multilingual dictation | `parakeet-tdt-0.6b-v3` |
 
 ### Build local STT in Podman
 
@@ -168,7 +177,7 @@ podman run --rm \
   -v "$PWD":/work:Z \
   -w /work/rust-local-stt \
   docker.io/library/archlinux:latest \
-  bash -lc 'pacman -Syu --noconfirm --needed base-devel rust cmake clang vulkan-headers vulkan-icd-loader shaderc git pkgconf ccache && cargo build --release'
+  bash -lc 'pacman -Syu --noconfirm --needed base-devel rust cmake clang vulkan-headers vulkan-icd-loader shaderc spirv-headers git pkgconf ccache && cargo build --release'
 ```
 
 Or build a reusable build image:
@@ -178,11 +187,7 @@ podman build -t kwispr-local-stt-builder -f rust-local-stt/Containerfile rust-lo
 podman run --rm -v "$PWD":/work:Z kwispr-local-stt-builder
 ```
 
-The binary lands in:
-
-```text
-rust-local-stt/target/release/kwispr-local-stt
-```
+The binary and its required transcribe-cpp shared runtime/backend modules land together in `rust-local-stt/target/release/`. Keep the staged `libtranscribe.so*` and `libggml*.so*` files beside the binary when copying it elsewhere.
 
 Run it on the host so it can see your GPU/Vulkan driver stack and model directory.
 
