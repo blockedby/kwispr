@@ -30,7 +30,6 @@ add_library(kde_whisper_core STATIC
     src/config/KwisprSettings.cpp
     src/runtime/KwisprController.cpp
     src/runtime/LocalSttClient.cpp
-    src/runtime/LocalSttProcess.cpp
     src/runtime/ProcessRunner.cpp
     src/runtime/RetryState.cpp
     src/models/ModelCatalog.cpp

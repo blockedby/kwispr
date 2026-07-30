@@ -1,7 +1,6 @@
 #include <QtTest/QtTest>
 
 #include "runtime/KwisprController.h"
-#include "runtime/LocalSttProcess.h"
 #include "runtime/ProcessRunner.h"
 #include "runtime/RetryState.h"
 
@@ -34,7 +33,6 @@ private slots:
     void toggleRecordingUsesExistingScript();
     void retryPassesPathAsArgument();
     void retryStateSupportsRawAndLegacyFormats();
-    void localSttUsesReleaseBinaryCatalogAndModelDir();
     void failuresSurfaceExitCodeAndStderr();
 };
 
@@ -73,27 +71,6 @@ void ProcessRunnerTest::retryStateSupportsRawAndLegacyFormats()
     QCOMPARE(retryWavPathFromState(
                  QStringLiteral("/opt/kwispr/kwispr.sh retry \"/tmp/kwispr failed/audio one.wav\"\n")),
              wavPath);
-}
-
-void ProcessRunnerTest::localSttUsesReleaseBinaryCatalogAndModelDir()
-{
-    RecordingProcessRunner runner;
-    runner.nextResult = ProcessResult{0, QStringLiteral("listening"), QString()};
-
-    LocalSttProcess localStt(QStringLiteral("/repo"), &runner);
-    const ProcessResult result = localStt.start(QStringLiteral("/models"));
-
-    QCOMPARE(result.exitCode, 0);
-    QCOMPARE(runner.calls, 1);
-    QCOMPARE(runner.lastProgram, QStringLiteral("/repo/rust-local-stt/target/release/kwispr-local-stt"));
-    QCOMPARE(runner.lastArguments,
-             (QStringList{QStringLiteral("--host"),
-                          QStringLiteral("127.0.0.1"),
-                          QStringLiteral("--port"),
-                          QStringLiteral("9000"),
-                          QStringLiteral("--catalog"),
-                          QStringLiteral("/repo/models/local-stt-catalog.json")}));
-    QCOMPARE(runner.lastEnvironment.value(QStringLiteral("KWISPR_MODEL_DIR")), QStringLiteral("/models"));
 }
 
 void ProcessRunnerTest::failuresSurfaceExitCodeAndStderr()
