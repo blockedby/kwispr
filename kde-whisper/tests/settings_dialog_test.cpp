@@ -17,6 +17,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSignalSpy>
+#include <QSpinBox>
 #include <QTimer>
 
 class FakeModelManager : public ModelManager
@@ -88,6 +89,11 @@ class SettingsDialogTest : public QObject {
 private slots:
     void loadsCurrentSettingsIntoWidgets();
     void backendRowsAreContextSensitiveAndPreserveDrafts();
+    void lanOptInUpdatesListenAddress();
+    void invalidLoadedPortRequiresExplicitCorrection();
+    void firstLocalPresetUsesRetainedServerPort();
+    void remoteOnlyLocalSttUsesCatalogWithoutRuntimeArtifacts();
+    void invalidLocalEndpointDoesNotMutateEnv();
     void apiKeyIsPasswordAndValidationDoesNotLeakSecret();
     void localModelComboDrivesSavedModel();
     void unmatchedLocalModelRoundTripsButCannotBeManaged();
@@ -184,8 +190,9 @@ void SettingsDialogTest::backendRowsAreContextSensitiveAndPreserveDrafts()
     QVERIFY(visible("vadGroup"));
     QVERIFY(visible("pasteGroup"));
     auto *apiUrl = dialog.findChild<QLineEdit *>("apiUrlEdit");
-    QCOMPARE(apiUrl->text(), QStringLiteral("http://127.0.0.1:9000/v1/audio/transcriptions"));
-    QVERIFY(apiUrl->isReadOnly());
+    QCOMPARE(apiUrl->text(), QStringLiteral("http://127.0.0.1:19650/v1/audio/transcriptions"));
+    QVERIFY(!apiUrl->isReadOnly());
+    QCOMPARE(dialog.findChild<QLabel *>("resolvedLocalSttUrlLabel")->text(), apiUrl->text());
 
     localModels->setCurrentIndex(localModels->findData(QStringLiteral("parakeet-tdt")));
     verifyRow("languageEdit", "languageLabel", false);
@@ -220,6 +227,113 @@ void SettingsDialogTest::backendRowsAreContextSensitiveAndPreserveDrafts()
 
     backend->setCurrentText(QStringLiteral("OpenAI"));
     QCOMPARE(dialog.findChild<QLineEdit *>("modelEdit")->text(), QStringLiteral("custom-openai-model"));
+}
+
+void SettingsDialogTest::lanOptInUpdatesListenAddress()
+{
+    EnvFile env;
+    SettingsDialog dialog(localSettings(), sampleCatalog(), {}, &env);
+    dialog.show();
+    QTest::qWait(1);
+
+    auto *host = dialog.findChild<QLineEdit *>("localSttHostEdit");
+    auto *port = dialog.findChild<QSpinBox *>("localSttPortSpin");
+    auto *allowLan = dialog.findChild<QCheckBox *>("localSttAllowLanCheck");
+    QCOMPARE(host->text(), QStringLiteral("127.0.0.1"));
+    QCOMPARE(port->value(), 19650);
+    QVERIFY(!allowLan->isChecked());
+
+    host->setText(QStringLiteral("192.168.1.20"));
+    QVERIFY(allowLan->isChecked());
+    allowLan->setChecked(false);
+    QCOMPARE(host->text(), QStringLiteral("127.0.0.1"));
+    QVERIFY(!allowLan->isChecked());
+
+    allowLan->setChecked(true);
+    QCOMPARE(host->text(), QStringLiteral("0.0.0.0"));
+    port->setValue(24567);
+    QVERIFY(dialog.save());
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_HOST")), QStringLiteral("0.0.0.0"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")), QStringLiteral("24567"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_API_URL")), QStringLiteral("http://127.0.0.1:19650/v1/audio/transcriptions"));
+}
+
+void SettingsDialogTest::invalidLoadedPortRequiresExplicitCorrection()
+{
+    for (const QString &rawPort : {QStringLiteral("not-a-port"), QStringLiteral("70000"),
+                                   QStringLiteral(" 19650"), QStringLiteral("19650 ")}) {
+        EnvFile env;
+        env.setValue(QStringLiteral("KWISPR_BACKEND"), QStringLiteral("openai-transcriptions"));
+        env.setValue(QStringLiteral("KWISPR_API_URL"), QStringLiteral("http://127.0.0.1:19650/v1/audio/transcriptions"));
+        env.setValue(QStringLiteral("KWISPR_MODEL"), QStringLiteral("whisper-large-v3-turbo"));
+        env.setValue(QStringLiteral("KWISPR_LOCAL_STT_CONFIGURED"), QStringLiteral("1"));
+        env.setValue(QStringLiteral("KWISPR_LOCAL_STT_PORT"), rawPort);
+        const KwisprSettings settings = KwisprSettings::fromEnv(env);
+        QVERIFY(!settings.localSttPortValid);
+
+        SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+        QVERIFY(!dialog.save());
+        QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")), rawPort);
+
+        dialog.findChild<QSpinBox *>(QStringLiteral("localSttPortSpin"))->setValue(24567);
+        QVERIFY(dialog.save());
+        QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")), QStringLiteral("24567"));
+    }
+}
+
+void SettingsDialogTest::firstLocalPresetUsesRetainedServerPort()
+{
+    for (const int retainedPort : {9000, 24567}) {
+        KwisprSettings settings;
+        settings.localSttPort = retainedPort;
+        settings.apiKey = QStringLiteral("test-key");
+        EnvFile env;
+        SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+
+        dialog.findChild<QComboBox *>(QStringLiteral("backendCombo"))->setCurrentText(QStringLiteral("Local STT"));
+        QCOMPARE(dialog.findChild<QLineEdit *>(QStringLiteral("apiUrlEdit"))->text(),
+                 QStringLiteral("http://127.0.0.1:%1/v1/audio/transcriptions").arg(retainedPort));
+        QVERIFY(dialog.save());
+        QCOMPARE(env.value(QStringLiteral("KWISPR_API_URL")),
+                 QStringLiteral("http://127.0.0.1:%1/v1/audio/transcriptions").arg(retainedPort));
+    }
+}
+
+void SettingsDialogTest::remoteOnlyLocalSttUsesCatalogWithoutRuntimeArtifacts()
+{
+    KwisprSettings settings = localSettings();
+    settings.apiUrl = QStringLiteral("http://inference-box.lan:19650/v1/audio/transcriptions");
+    EnvFile env;
+    SettingsDialog dialog(settings, sampleCatalog(), {}, &env, nullptr, false);
+    dialog.show();
+    QTest::qWait(1);
+
+    QVERIFY(dialog.findChild<QLineEdit *>("localSttHostEdit")->isHidden());
+    QVERIFY(dialog.findChild<QSpinBox *>("localSttPortSpin")->isHidden());
+    QVERIFY(dialog.findChild<QCheckBox *>("localSttAllowLanCheck")->isHidden());
+    QVERIFY(dialog.findChild<QGroupBox *>("vadGroup")->isHidden());
+    auto *models = dialog.findChild<QComboBox *>("localModelCombo");
+    models->setCurrentIndex(models->findData(QStringLiteral("parakeet-tdt")));
+    QCOMPARE(dialog.findChild<QPushButton *>("localModelDownloadButton")->text(), QStringLiteral("Download here"));
+    QCOMPARE(dialog.findChild<QPushButton *>("localModelDeleteButton")->text(), QStringLiteral("Delete local"));
+    QVERIFY(dialog.save());
+    QCOMPARE(env.value(QStringLiteral("KWISPR_API_URL")), settings.apiUrl);
+    QCOMPARE(env.value(QStringLiteral("KWISPR_MODEL")), QStringLiteral("parakeet-tdt"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_CONFIGURED")), QStringLiteral("1"));
+}
+
+void SettingsDialogTest::invalidLocalEndpointDoesNotMutateEnv()
+{
+    KwisprSettings settings = localSettings();
+    EnvFile env;
+    env.setValue(QStringLiteral("KWISPR_API_URL"), settings.apiUrl);
+    SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+    dialog.findChild<QLineEdit *>("apiUrlEdit")->setText(QStringLiteral("http://0.0.0.0:19650/v1/audio/transcriptions"));
+
+    QVERIFY(!dialog.save());
+    QVERIFY(dialog.lastError().contains(QStringLiteral("client destinations")));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_API_URL")), settings.apiUrl);
+    QVERIFY(!env.contains(QStringLiteral("KWISPR_LOCAL_STT_PORT")));
 }
 
 void SettingsDialogTest::apiKeyIsPasswordAndValidationDoesNotLeakSecret()

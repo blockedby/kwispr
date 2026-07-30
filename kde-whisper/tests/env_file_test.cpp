@@ -44,6 +44,8 @@ void EnvFileTest::loadsEnvSyntaxAndDefaults() {
     const auto defaults = EnvFile::defaults();
     QCOMPARE(defaults.value("KWISPR_BACKEND"), QString("openai-transcriptions"));
     QCOMPARE(defaults.value("KWISPR_API_URL"), QString("https://api.openai.com/v1/audio/transcriptions"));
+    QCOMPARE(defaults.value("KWISPR_LOCAL_STT_HOST"), QString("127.0.0.1"));
+    QCOMPARE(defaults.value("KWISPR_LOCAL_STT_PORT"), QString("19650"));
     QCOMPARE(defaults.value("KWISPR_MODEL"), QString("whisper-1"));
     QCOMPARE(defaults.value("KWISPR_AUDIO_FORMAT"), QString("wav"));
     QCOMPARE(defaults.value("KWISPR_PULSE_SOURCE"), QString("default"));

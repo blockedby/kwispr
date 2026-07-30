@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 
 class EnvFile;
 
@@ -9,6 +10,11 @@ class KwisprSettings {
 public:
     QString backend = "openai-transcriptions";
     QString apiUrl = "https://api.openai.com/v1/audio/transcriptions";
+    QString localSttHost = "127.0.0.1";
+    int localSttPort = 19650;
+    bool localSttPortValid = true;
+    bool localSttAllowLan = false;
+    bool localSttConfigured = false;
     QString apiKey;
     QString model = "whisper-1";
     QString language;
@@ -37,6 +43,7 @@ public:
 
     static KwisprSettings fromEnv(const EnvFile &env);
     QString resolvedModelDir() const;
+    QUrl localSttHealthUrl() const;
     void writeTo(EnvFile &env) const;
     bool validate(QStringList *errors = nullptr) const;
 };

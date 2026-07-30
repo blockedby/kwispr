@@ -6,7 +6,7 @@ This fork is no longer “just a tiny Bash wrapper around OpenAI Whisper”. It 
 
 - cloud transcription through OpenAI `/v1/audio/transcriptions`;
 - OpenRouter chat/audio models;
-- local/offline OpenAI-compatible STT on `127.0.0.1:9000`;
+- local/offline OpenAI-compatible STT on `127.0.0.1:19650`;
 - a Rust local STT runtime with model catalog support;
 - optional VAD/no-speech handling;
 - Wayland clipboard + `ydotool` auto-paste;
@@ -34,7 +34,7 @@ KDE hotkey
        └─ stop recording gracefully, then POST the WAV to configured STT backend
             ├─ OpenAI Whisper / compatible cloud endpoint
             ├─ OpenRouter audio-capable chat model
-            └─ local Rust STT runtime on http://127.0.0.1:9000
+            └─ local Rust STT runtime on http://127.0.0.1:19650
                  └─ Handy catalog v2 GGUF models via transcribe-cpp 0.1.3
                       ├─ cached batch Sessions
                       └─ dynamic CPU/Vulkan backends on Linux
@@ -79,6 +79,13 @@ The installer uses [Gum](https://github.com/charmbracelet/gum) when it is alread
 ```bash
 ./install.sh --yes --build-backend host --allow-package-install --autostart --without-local-stt
 ./install.sh --yes --build-backend host --allow-package-install --autostart --with-local-stt --local-stt-autostart
+# Headless LAN inference server (LAN exposure is explicit):
+./install.sh --yes --build-backend host --allow-package-install --with-local-stt \
+  --local-stt-host 0.0.0.0 --local-stt-port 19650
+# Lightweight client; no local runtime, model download, Rust, or Podman required:
+./install.sh --yes --build-backend host --allow-package-install --without-local-stt \
+  --local-stt-url http://192.168.1.20:19650/v1/audio/transcriptions \
+  --local-stt-model whisper-large-v3-turbo
 ./install.sh --build-backend host       # native Arch build
 ./install.sh --build-backend podman     # require an existing Podman installation
 ./install.sh --build-backend existing   # use existing/override artifacts
@@ -149,17 +156,21 @@ cargo build --release
 KWISPR_MODEL_DIR=~/.local/share/kwispr/models \
   ./target/release/kwispr-local-stt \
   --host 127.0.0.1 \
-  --port 9000 \
+  --port 19650 \
   --catalog ../models/local-stt-catalog.json
 ```
 
-A successful start prints `kwispr local STT runtime listening on http://127.0.0.1:9000`; at that point the server is ready to receive OpenAI-compatible STT requests at `/v1/audio/transcriptions`.
+A successful start prints `kwispr local STT runtime listening on http://127.0.0.1:19650`; at that point the server is ready to receive OpenAI-compatible STT requests at `/v1/audio/transcriptions`.
 
 Equivalent UI-managed configuration (`$XDG_CONFIG_HOME/kwispr/config.env`):
 
 ```ini
 KWISPR_BACKEND=openai-transcriptions
-KWISPR_API_URL=http://127.0.0.1:9000/v1/audio/transcriptions
+KWISPR_API_URL=http://127.0.0.1:19650/v1/audio/transcriptions
+# Server-side listen settings are independent from the client URL above.
+KWISPR_LOCAL_STT_HOST=127.0.0.1
+KWISPR_LOCAL_STT_PORT=19650
+KWISPR_LOCAL_STT_CONFIGURED=1
 KWISPR_MODEL=whisper-large-v3-turbo
 KWISPR_API_KEY=
 KWISPR_LANGUAGE=
@@ -171,6 +182,10 @@ KWISPR_PULSE_SOURCE=default
 ```
 
 `KWISPR_LANGUAGE` is one optional language hint, not a multi-select value. Leave it empty (choose **Auto detect** in KDE) for mixed-language dictation such as Russian plus English; detection is offered only for models whose catalog metadata supports it.
+
+The listen address remains `127.0.0.1` by default. Enable **Allow LAN clients** in KDE Settings or explicitly set `KWISPR_LOCAL_STT_HOST=0.0.0.0` only on the inference computer. `0.0.0.0` is never a client destination: remote clients use the server's real hostname/IP in `KWISPR_API_URL`. LAN mode has no built-in authentication or TLS and does not change firewall rules; expose it only on a trusted network.
+
+Upgrades preserve the old generated `127.0.0.1:9000` client/server pairing by writing an explicit server port. Custom existing endpoints and ports are left unchanged, and installer reruns are idempotent.
 
 Useful model choices:
 
@@ -302,7 +317,7 @@ The local Rust server accepts larger uploads than Axum's small default body limi
 If long recordings fail, check:
 
 ```bash
-curl http://127.0.0.1:9000/health
+curl http://127.0.0.1:19650/health
 ```
 
 and make sure you are running a freshly rebuilt `kwispr-local-stt` binary from this fork.

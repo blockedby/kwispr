@@ -107,6 +107,7 @@ load_env() {
 
   : "${KWISPR_BACKEND:=openai-transcriptions}"
   : "${KWISPR_API_URL:=https://api.openai.com/v1/audio/transcriptions}"
+  : "${KWISPR_LOCAL_STT_CONFIGURED:=0}"
   : "${KWISPR_MODEL:=whisper-1}"
   : "${KWISPR_AUDIO_FORMAT:=wav}"
   : "${KWISPR_PULSE_SOURCE:=default}"
@@ -326,7 +327,10 @@ transcribe() {
     # Local VAD servers may intentionally return an empty transcript for
     # silence/no-speech audio. Treat that as a clean skip instead of an API
     # failure that pollutes last-failed.txt and the clipboard.
-    if [[ "$KWISPR_BACKEND" == "openai-transcriptions" && "$KWISPR_API_URL" == http://127.0.0.1:* ]]; then
+    if [[ "$KWISPR_BACKEND" == "openai-transcriptions" \
+          && ( "$KWISPR_LOCAL_STT_CONFIGURED" == "1" \
+               || "$KWISPR_API_URL" == http://127.0.0.1:* \
+               || "$KWISPR_API_URL" == http://localhost:* ) ]]; then
       rm -f "$txt"
       status "⚠ No speech" 2000
       status_clear

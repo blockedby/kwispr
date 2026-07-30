@@ -9,7 +9,10 @@ Cloud and OpenRouter behavior is unchanged. Local mode remains opt-in:
 
 ```env
 KWISPR_BACKEND=openai-transcriptions
-KWISPR_API_URL=http://127.0.0.1:9000/v1/audio/transcriptions
+KWISPR_API_URL=http://127.0.0.1:19650/v1/audio/transcriptions
+KWISPR_LOCAL_STT_HOST=127.0.0.1
+KWISPR_LOCAL_STT_PORT=19650
+KWISPR_LOCAL_STT_CONFIGURED=1
 KWISPR_MODEL=gigaam-v3-e2e-ctc
 KWISPR_API_KEY=
 KWISPR_LANGUAGE=ru
@@ -73,11 +76,37 @@ Start the server from the repository root:
 ```bash
 KWISPR_MODEL_DIR=~/.local/share/kwispr/models \
   ./rust-local-stt/target/release/kwispr-local-stt \
-  --host 127.0.0.1 --port 9000 \
+  --host 127.0.0.1 --port 19650 \
   --catalog models/local-stt-catalog.json
 ```
 
-A successful start prints `kwispr local STT runtime listening on http://127.0.0.1:9000`; the server is then ready at `/v1/audio/transcriptions`.
+A successful start prints `kwispr local STT runtime listening on http://127.0.0.1:19650`; the server is then ready at `/v1/audio/transcriptions`.
+
+## LAN server and remote client
+
+Binding beyond loopback is always opt-in. A headless inference computer can be installed noninteractively with:
+
+```bash
+./install.sh --yes --build-backend host --allow-package-install --with-local-stt \
+  --local-stt-host 0.0.0.0 --local-stt-port 19650 \
+  --local-stt-autostart
+```
+
+A recording-only computer can use it without installing the Rust runtime or downloading a local model:
+
+```bash
+./install.sh --yes --build-backend host --allow-package-install --without-local-stt \
+  --local-stt-url http://192.168.1.20:19650/v1/audio/transcriptions \
+  --local-stt-model whisper-large-v3-turbo
+```
+
+The bind address and client destination are independent. `0.0.0.0` listens on interfaces but is never a valid `KWISPR_API_URL` host. KDE Settings exposes the endpoint on every client and the listen/LAN controls only where the local service is installed; applying a changed listen address or port restarts that user service. Download/Delete controls always manage model files on the current computer, not a remote server.
+
+There is no authentication, TLS, reverse-proxy configuration, or firewall automation. Use LAN binding only on a trusted network and configure those layers separately if needed.
+
+### Upgrade compatibility
+
+Fresh installs default to port `19650`. If an older generated configuration still uses `http://127.0.0.1:9000/v1/audio/transcriptions` and has no dedicated server port, the installer records `KWISPR_LOCAL_STT_PORT=9000` so the existing client/server pairing continues to work. It preserves custom URLs and ports exactly on upgrade and rerun.
 
 The server is batch-only; catalog streaming capability metadata does not enable streaming endpoints. Every model architecture uses `transcribe_cpp::Session`. Sessions are cached by slug for the process lifetime. An optional multipart `language` value is trimmed and checked against the model's catalog languages before it reaches `RunOptions`. Omit it or use `auto` for detection-capable models; models without detection fall back to English when supported, otherwise their first catalog language. Unsupported explicit languages return `400`.
 
@@ -86,7 +115,7 @@ Uploads may be WAV or OGG/Opus. OGG/Opus decoding requires `ffmpeg` in `PATH`; t
 ## API contract
 
 ```bash
-curl -sS http://127.0.0.1:9000/v1/audio/transcriptions \
+curl -sS http://127.0.0.1:19650/v1/audio/transcriptions \
   -F model=gigaam-v3-e2e-ctc \
   -F response_format=json \
   -F language=ru \
@@ -141,7 +170,7 @@ Use `./kwispr-models.py list` for the complete current catalog.
 
 | Symptom | Fix |
 |---|---|
-| `curl: (7) Failed to connect` | Start the Rust runtime and check `curl http://127.0.0.1:9000/health`. |
+| `curl: (7) Failed to connect` | Start the Rust runtime and check `curl http://127.0.0.1:19650/health`. |
 | `[stub transcript]` | Stop the legacy Python stub and run the Rust runtime. |
 | `unknown model` | Use an exact slug from `./kwispr-models.py list`. |
 | `model ... is not installed` | Download the slug and ensure helper/server use the same `KWISPR_MODEL_DIR`. |

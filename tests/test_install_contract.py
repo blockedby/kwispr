@@ -22,6 +22,22 @@ class InstallerContractTest(unittest.TestCase):
         self.assertIn('run_step "Building KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-build.sh"', installer)
         self.assertIn('if [[ "$RUN_TESTS" == 1 ]]', installer)
 
+    def test_native_dependency_setup_precedes_python_option_validation(self) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        main_flow = installer[installer.index("resolve_build_backend\nprepare_native_arch_packages") :]
+        self.assertLess(
+            main_flow.index("prepare_native_arch_packages"),
+            main_flow.index('validate_local_stt_options || fail "Invalid Local STT option"'),
+        )
+
+    def test_tray_uses_configured_health_endpoint_and_restarts_changed_service(self) -> None:
+        tray_app = (REPO_ROOT / "kde-whisper" / "src" / "ui" / "TrayApp.cpp").read_text(encoding="utf-8")
+        self.assertIn("settings.localSttHealthUrl()", tray_app)
+        self.assertIn("savedSettings.localSttHost != previousLocalSttHost", tray_app)
+        self.assertIn("savedSettings.localSttPort != previousLocalSttPort", tray_app)
+        self.assertIn('QStringLiteral("restart")', tray_app)
+        self.assertNotIn("127.0.0.1:19650", tray_app)
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -142,7 +158,9 @@ class InstallerContractTest(unittest.TestCase):
         release.mkdir()
         binary = release / "kwispr-local-stt"
         binary.write_text(
-            "#!/usr/bin/env bash\nenv | grep '^KWISPR_' > \"${KWISPR_CAPTURE_PATH:-/dev/null}\"\n",
+            "#!/usr/bin/env bash\n"
+            "env | grep '^KWISPR_' > \"${KWISPR_CAPTURE_PATH:-/dev/null}\"\n"
+            "printf '%s\\n' \"$@\" > \"${KWISPR_CAPTURE_PATH:-/dev/null}.args\"\n",
             encoding="utf-8",
         )
         binary.chmod(0o755)
@@ -206,6 +224,9 @@ class InstallerContractTest(unittest.TestCase):
         child_environment = captured_env.read_text(encoding="utf-8")
         self.assertNotIn("KWISPR_API_KEY=", child_environment)
         self.assertIn(f"KWISPR_MODEL_DIR={self.home / '.local' / 'share' / 'kwispr' / 'models'}", child_environment)
+        launcher_args = Path(f"{captured_env}.args").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(launcher_args[launcher_args.index("--host") + 1], "127.0.0.1")
+        self.assertEqual(launcher_args[launcher_args.index("--port") + 1], "19650")
 
         if shutil.which("systemd-analyze"):
             verified = subprocess.run(
@@ -216,6 +237,152 @@ class InstallerContractTest(unittest.TestCase):
                 timeout=10,
             )
             self.assertEqual(verified.returncode, 0, verified.stderr)
+
+    def test_fresh_local_install_and_lan_options_use_19650_without_wildcard_client(self) -> None:
+        release = self.root / "fresh-release"
+        release.mkdir()
+        binary = release / "kwispr-local-stt"
+        binary.write_text(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"${KWISPR_CAPTURE_PATH:-/dev/null}.args\"\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        env = self.env()
+        env["KWISPR_LOCAL_STT_RELEASE_DIR"] = str(release)
+        env["KWISPR_LEGACY_CONFIG"] = str(self.root / "missing-legacy.env")
+        result = subprocess.run(
+            [
+                str(INSTALLER), "--prefix", str(self.prefix), "--skip-build", "--yes", "--plain",
+                "--with-local-stt", "--local-stt-host", "0.0.0.0", "--local-stt-port", "19650",
+                "--no-local-stt-autostart", "--no-autostart", "--no-open-settings", "--no-systemd-actions",
+            ],
+            cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = (self.config_home / "kwispr" / "config.env").read_text(encoding="utf-8")
+        self.assertIn("KWISPR_LOCAL_STT_HOST=0.0.0.0\n", config)
+        self.assertIn("KWISPR_LOCAL_STT_PORT=19650\n", config)
+        self.assertIn("KWISPR_API_URL=http://127.0.0.1:19650/v1/audio/transcriptions\n", config)
+        self.assertNotIn("KWISPR_API_URL=http://0.0.0.0", config)
+
+        captured = self.root / "fresh-launch"
+        launch_env = env.copy()
+        launch_env["KWISPR_CAPTURE_PATH"] = str(captured)
+        launcher = self.prefix / "share" / "kwispr" / "runtime" / "start-local-stt.sh"
+        launched = subprocess.run([str(launcher)], env=launch_env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        args = Path(f"{captured}.args").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(args[args.index("--host") + 1], "0.0.0.0")
+        self.assertEqual(args[args.index("--port") + 1], "19650")
+
+    def test_remote_only_client_needs_no_local_runtime_artifact(self) -> None:
+        env = self.env()
+        env["KWISPR_LEGACY_CONFIG"] = str(self.root / "missing-legacy.env")
+        result = subprocess.run(
+            [
+                str(INSTALLER), "--prefix", str(self.prefix), "--skip-build", "--yes", "--plain",
+                "--without-local-stt", "--local-stt-url",
+                "http://inference-box.lan:19650/v1/audio/transcriptions",
+                "--local-stt-model", "parakeet-tdt", "--no-autostart", "--no-open-settings",
+                "--no-systemd-actions",
+            ],
+            cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = (self.config_home / "kwispr" / "config.env").read_text(encoding="utf-8")
+        self.assertIn("KWISPR_API_URL=http://inference-box.lan:19650/v1/audio/transcriptions\n", config)
+        self.assertIn("KWISPR_MODEL=parakeet-tdt\n", config)
+        self.assertIn("KWISPR_LOCAL_STT_CONFIGURED=1\n", config)
+        self.assertFalse((self.prefix / "share" / "kwispr" / "runtime" / "rust-local-stt").exists())
+        self.assertFalse((self.config_home / "systemd" / "user" / "kwispr-local-stt.service").exists())
+
+    def test_legacy_generated_9000_config_keeps_matched_server_port(self) -> None:
+        self.legacy_config.write_text(
+            "KWISPR_BACKEND=openai-transcriptions\n"
+            "KWISPR_API_URL=http://127.0.0.1:9000/v1/audio/transcriptions\n"
+            "KWISPR_MODEL=whisper-large-v3-turbo\n",
+            encoding="utf-8",
+        )
+        release = self.root / "legacy-release"
+        release.mkdir()
+        binary = release / "kwispr-local-stt"
+        binary.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o755)
+        env = self.env()
+        env["KWISPR_LOCAL_STT_RELEASE_DIR"] = str(release)
+        result = subprocess.run(
+            [
+                str(INSTALLER), "--prefix", str(self.prefix), "--skip-build", "--yes", "--plain",
+                "--with-local-stt", "--no-local-stt-autostart", "--no-autostart",
+                "--no-open-settings", "--no-systemd-actions",
+            ],
+            cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config_path = self.config_home / "kwispr" / "config.env"
+        config = config_path.read_text(encoding="utf-8")
+        self.assertIn("KWISPR_API_URL=http://127.0.0.1:9000/v1/audio/transcriptions\n", config)
+        self.assertIn("KWISPR_LOCAL_STT_PORT=9000\n", config)
+
+        rerun = subprocess.run(
+            [
+                str(INSTALLER), "--prefix", str(self.prefix), "--skip-build", "--yes", "--plain",
+                "--with-local-stt", "--no-local-stt-autostart", "--no-autostart",
+                "--no-open-settings", "--no-systemd-actions",
+            ],
+            cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+        self.assertEqual(config_path.read_text(encoding="utf-8"), config)
+
+    def test_installer_rerun_preserves_custom_client_endpoint_and_bind_port(self) -> None:
+        env = self.env()
+        env["KWISPR_LEGACY_CONFIG"] = str(self.root / "missing-legacy.env")
+        first = subprocess.run(
+            [
+                str(INSTALLER), "--prefix", str(self.prefix), "--skip-build", "--yes", "--plain",
+                "--without-local-stt", "--local-stt-url", "http://speech.lan:32100/v1/audio/transcriptions",
+                "--local-stt-port", "32101", "--no-autostart", "--no-open-settings", "--no-systemd-actions",
+            ],
+            cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        config_path = self.config_home / "kwispr" / "config.env"
+        expected = config_path.read_text(encoding="utf-8")
+        second = subprocess.run(
+            [
+                str(INSTALLER), "--prefix", str(self.prefix), "--skip-build", "--yes", "--plain",
+                "--without-local-stt", "--no-autostart", "--no-open-settings", "--no-systemd-actions",
+            ],
+            cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(config_path.read_text(encoding="utf-8"), expected)
+
+    def test_invalid_local_stt_options_do_not_corrupt_existing_config(self) -> None:
+        config_path = self.config_home / "kwispr" / "config.env"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("KWISPR_API_URL=http://custom.lan:23456/v1/audio/transcriptions\n", encoding="utf-8")
+        before = config_path.read_bytes()
+        invalid_options = (
+            ("--local-stt-port", "70000"),
+            ("--local-stt-port", " 19650"),
+            ("--local-stt-port", "1_000"),
+            ("--local-stt-url", "http://0.0.0.0:19650/v1/audio/transcriptions"),
+        )
+        for option, value in invalid_options:
+            with self.subTest(option=option, value=value):
+                result = self.install("--without-local-stt", option, value, "--no-autostart")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(config_path.read_bytes(), before)
+
+    def test_local_stt_port_option_is_persisted_as_canonical_decimal(self) -> None:
+        result = self.install(
+            "--without-local-stt", "--local-stt-port", "019650", "--no-autostart"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = (self.config_home / "kwispr" / "config.env").read_text(encoding="utf-8")
+        self.assertIn("KWISPR_LOCAL_STT_PORT=19650\n", config)
 
     def test_local_install_accepts_self_contained_binary(self) -> None:
         release = self.root / "static-release"

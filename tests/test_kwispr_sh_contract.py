@@ -21,7 +21,7 @@ class KwisprShellContractTest(unittest.TestCase):
             )
             h.write_config(
                 KWISPR_BACKEND="openai-transcriptions",
-                KWISPR_API_URL="http://127.0.0.1:9000/v1/audio/transcriptions",
+                KWISPR_API_URL="http://127.0.0.1:19650/v1/audio/transcriptions",
                 KWISPR_MODEL="xdg-model",
                 KWISPR_AUTOPASTE="0",
             )
@@ -31,7 +31,7 @@ class KwisprShellContractTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             args = h.curl_invocations()[0]
-            self.assertIn("http://127.0.0.1:9000/v1/audio/transcriptions", args)
+            self.assertIn("http://127.0.0.1:19650/v1/audio/transcriptions", args)
             self.assertIn("model=xdg-model", args)
             self.assertNotIn("model=legacy-model", args)
 
@@ -50,7 +50,7 @@ class KwisprShellContractTest(unittest.TestCase):
             wav = h.make_wav(size=40000)
             h.write_env(
                 KWISPR_BACKEND="openai-transcriptions",
-                KWISPR_API_URL="http://127.0.0.1:9000/v1/audio/transcriptions",
+                KWISPR_API_URL="http://127.0.0.1:19650/v1/audio/transcriptions",
                 KWISPR_API_KEY="",
                 KWISPR_MODEL="whisper-large-v3-turbo",
                 KWISPR_AUTOPASTE="0",
@@ -62,6 +62,26 @@ class KwisprShellContractTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((h.cache_dir / "last-failed.txt").exists())
             self.assertEqual(h.clipboard_text(), "")
+
+    def test_remote_local_stt_empty_transcript_is_clean_skip(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav(size=40000)
+            h.write_config(
+                KWISPR_BACKEND="openai-transcriptions",
+                KWISPR_API_URL="http://inference-box.lan:19650/v1/audio/transcriptions",
+                KWISPR_LOCAL_STT_CONFIGURED="1",
+                KWISPR_MODEL="remote-catalog-slug",
+                KWISPR_AUTOPASTE="0",
+            )
+            h.fake_curl_response(200, {"text": ""})
+
+            result = h.run("retry", str(wav))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = h.curl_invocations()[0]
+            self.assertIn("http://inference-box.lan:19650/v1/audio/transcriptions", args)
+            self.assertIn("model=remote-catalog-slug", args)
+            self.assertFalse((h.cache_dir / "last-failed.txt").exists())
 
     def test_non_local_empty_transcript_records_retry(self) -> None:
         with KwisprScriptHarness() as h:
@@ -88,7 +108,7 @@ class KwisprShellContractTest(unittest.TestCase):
             wav = h.make_wav(size=40000)
             h.write_env(
                 KWISPR_BACKEND="openai-transcriptions",
-                KWISPR_API_URL="http://127.0.0.1:9000/v1/audio/transcriptions",
+                KWISPR_API_URL="http://127.0.0.1:19650/v1/audio/transcriptions",
                 KWISPR_API_KEY="",
                 KWISPR_MODEL="whisper-large-v3-turbo",
                 KWISPR_LANGUAGE="ru",

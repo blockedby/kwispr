@@ -12,6 +12,9 @@ class SettingsModelTest : public QObject {
 
 private slots:
     void localPresetWritesLocalSttKeys();
+    void localSttConnectionRoundTripsAndHealthUsesClientEndpoint();
+    void legacyGeneratedPortStaysMatchedOnUpgrade();
+    void localSttValidationRejectsInvalidValues();
     void modelDirResolutionUsesExplicitPathsOrStandardDefault();
     void openAiPresetValidatesApiKeyForOfficialEndpoint();
     void openRouterPresetWritesChatBackendKeys();
@@ -31,11 +34,89 @@ void SettingsModelTest::localPresetWritesLocalSttKeys()
     settings.writeTo(env);
 
     QCOMPARE(env.value("KWISPR_BACKEND"), QString("openai-transcriptions"));
-    QCOMPARE(env.value("KWISPR_API_URL"), QString("http://127.0.0.1:9000/v1/audio/transcriptions"));
+    QCOMPARE(env.value("KWISPR_API_URL"), QString("http://127.0.0.1:19650/v1/audio/transcriptions"));
+    QCOMPARE(env.value("KWISPR_LOCAL_STT_HOST"), QString("127.0.0.1"));
+    QCOMPARE(env.value("KWISPR_LOCAL_STT_PORT"), QString("19650"));
+    QCOMPARE(env.value("KWISPR_LOCAL_STT_CONFIGURED"), QString("1"));
     QCOMPARE(env.value("KWISPR_API_KEY"), QString(""));
     QCOMPARE(env.value("KWISPR_MODEL"), QString("whisper-large-v3-turbo"));
     QCOMPARE(env.value("KWISPR_LANGUAGE"), QString("ru"));
     QCOMPARE(env.value("KWISPR_MODEL_DIR"), QString("/models"));
+}
+
+void SettingsModelTest::localSttConnectionRoundTripsAndHealthUsesClientEndpoint()
+{
+    KwisprSettings settings;
+    settings.applyLocalPreset(QStringLiteral("remote/catalog-slug"), QString(), QString());
+    settings.apiUrl = QStringLiteral("http://stt-box.lan:24567/v1/audio/transcriptions");
+    settings.localSttHost = QStringLiteral("0.0.0.0");
+    settings.localSttPort = 23456;
+    settings.localSttAllowLan = true;
+
+    EnvFile env;
+    settings.writeTo(env);
+    const KwisprSettings loaded = KwisprSettings::fromEnv(env);
+    QCOMPARE(loaded.apiUrl, settings.apiUrl);
+    QCOMPARE(loaded.localSttHost, QStringLiteral("0.0.0.0"));
+    QCOMPARE(loaded.localSttPort, 23456);
+    QVERIFY(loaded.localSttAllowLan);
+    QVERIFY(loaded.localSttConfigured);
+    QCOMPARE(loaded.model, QStringLiteral("remote/catalog-slug"));
+    QCOMPARE(loaded.localSttHealthUrl(), QUrl(QStringLiteral("http://stt-box.lan:24567/health")));
+
+    loaded.writeTo(env);
+    QCOMPARE(env.value(QStringLiteral("KWISPR_API_URL")), settings.apiUrl);
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_HOST")), QStringLiteral("0.0.0.0"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")), QStringLiteral("23456"));
+}
+
+void SettingsModelTest::legacyGeneratedPortStaysMatchedOnUpgrade()
+{
+    EnvFile env;
+    env.setValue(QStringLiteral("KWISPR_BACKEND"), QStringLiteral("openai-transcriptions"));
+    env.setValue(QStringLiteral("KWISPR_API_URL"), QStringLiteral("http://127.0.0.1:9000/v1/audio/transcriptions"));
+
+    const KwisprSettings settings = KwisprSettings::fromEnv(env);
+    QCOMPARE(settings.apiUrl, QStringLiteral("http://127.0.0.1:9000/v1/audio/transcriptions"));
+    QCOMPARE(settings.localSttHost, QStringLiteral("127.0.0.1"));
+    QCOMPARE(settings.localSttPort, 9000);
+    QVERIFY(settings.localSttConfigured);
+
+    settings.writeTo(env);
+    QCOMPARE(env.value(QStringLiteral("KWISPR_API_URL")), QStringLiteral("http://127.0.0.1:9000/v1/audio/transcriptions"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")), QStringLiteral("9000"));
+}
+
+void SettingsModelTest::localSttValidationRejectsInvalidValues()
+{
+    KwisprSettings settings;
+    settings.applyLocalPreset(QStringLiteral("remote-slug"), QString(), QString());
+    settings.apiUrl = QStringLiteral("not a URL");
+    settings.localSttHost = QStringLiteral("not-an-address");
+    settings.localSttPort = 70000;
+    QStringList errors;
+    QVERIFY(!settings.validate(&errors));
+    QVERIFY(errors.join('\n').contains(QStringLiteral("API URL")));
+    QVERIFY(errors.join('\n').contains(QStringLiteral("bind address")));
+    QVERIFY(errors.join('\n').contains(QStringLiteral("bind port")));
+
+    settings.apiUrl = QStringLiteral("http://0.0.0.0:19650/v1/audio/transcriptions");
+    settings.localSttHost = QStringLiteral("0.0.0.0");
+    settings.localSttPort = 19650;
+    errors.clear();
+    QVERIFY(!settings.validate(&errors));
+    QVERIFY(errors.join('\n').contains(QStringLiteral("client destinations")));
+
+    settings.apiUrl = QStringLiteral("http://remote-box.lan:19650/v1/audio/transcriptions");
+    errors.clear();
+    QVERIFY2(settings.validate(&errors), qPrintable(errors.join('\n')));
+
+    EnvFile invalidPortEnv;
+    invalidPortEnv.setValue(QStringLiteral("KWISPR_LOCAL_STT_PORT"), QStringLiteral("not-a-port"));
+    const KwisprSettings invalidPort = KwisprSettings::fromEnv(invalidPortEnv);
+    errors.clear();
+    QVERIFY(!invalidPort.validate(&errors));
+    QCOMPARE(invalidPortEnv.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")), QStringLiteral("not-a-port"));
 }
 
 void SettingsModelTest::modelDirResolutionUsesExplicitPathsOrStandardDefault()
@@ -85,7 +166,7 @@ void SettingsModelTest::openAiPresetValidatesApiKeyForOfficialEndpoint()
     errors.clear();
     QVERIFY(settings.validate(&errors));
 
-    settings.apiUrl = "http://127.0.0.1:9000/v1/audio/transcriptions";
+    settings.apiUrl = "http://127.0.0.1:19650/v1/audio/transcriptions";
     settings.apiKey.clear();
     errors.clear();
     QVERIFY(settings.validate(&errors));

@@ -8,9 +8,11 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QFont>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QGridLayout>
+#include <QHostAddress>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
@@ -19,11 +21,13 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSpinBox>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QtMath>
 
 namespace {
-constexpr const char *LocalUrl = "http://127.0.0.1:9000/v1/audio/transcriptions";
+constexpr const char *LocalUrl = "http://127.0.0.1:19650/v1/audio/transcriptions";
 constexpr const char *OpenAiUrl = "https://api.openai.com/v1/audio/transcriptions";
 constexpr const char *OpenRouterUrl = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -91,12 +95,14 @@ SettingsDialog::SettingsDialog(const KwisprSettings &settings,
                                const QStringList &installedModelIds,
                                EnvFile *env,
                                ModelManager *modelManager,
+                               bool localRuntimeInstalled,
                                QWidget *parent)
     : QDialog(parent)
     , m_catalog(catalog)
     , m_installedModelIds(installedModelIds.begin(), installedModelIds.end())
     , m_env(env)
     , m_modelManager(modelManager)
+    , m_localRuntimeInstalled(localRuntimeInstalled)
     , m_settings(settings)
 {
     buildUi();
@@ -171,6 +177,7 @@ bool SettingsDialog::save()
     QStringList errors;
     if (!settings.validate(&errors)) {
         m_lastError = errors.join(QStringLiteral("\n"));
+        m_modelStatusLabel->setText(m_lastError);
         return false;
     }
 
@@ -225,10 +232,37 @@ void SettingsDialog::buildUi()
     auto *backendLabel = formLabel(QStringLiteral("Backend"), QStringLiteral("backendLabel"), backendGroup);
     m_backendForm->addRow(backendLabel, m_backendCombo);
 
+    m_localSttSectionLabel = new QLabel(QStringLiteral("Local STT connection / server"), backendGroup);
+    m_localSttSectionLabel->setObjectName(QStringLiteral("localSttSectionLabel"));
+    QFont sectionFont = m_localSttSectionLabel->font();
+    sectionFont.setBold(true);
+    m_localSttSectionLabel->setFont(sectionFont);
+    m_backendForm->addRow(m_localSttSectionLabel);
+
     m_apiUrlEdit = new QLineEdit(backendGroup);
     m_apiUrlEdit->setObjectName(QStringLiteral("apiUrlEdit"));
     m_apiUrlLabel = formLabel(QStringLiteral("API URL"), QStringLiteral("apiUrlLabel"), backendGroup);
     m_backendForm->addRow(m_apiUrlLabel, m_apiUrlEdit);
+
+    m_resolvedUrlLabel = new QLabel(backendGroup);
+    m_resolvedUrlLabel->setObjectName(QStringLiteral("resolvedLocalSttUrlLabel"));
+    m_resolvedUrlLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_resolvedUrlLabel->setWordWrap(true);
+    m_resolvedUrlFieldLabel = formLabel(QStringLiteral("Resolved API URL"), QStringLiteral("resolvedLocalSttUrlFieldLabel"), backendGroup);
+    m_backendForm->addRow(m_resolvedUrlFieldLabel, m_resolvedUrlLabel);
+
+    m_localSttHostEdit = new QLineEdit(backendGroup);
+    m_localSttHostEdit->setObjectName(QStringLiteral("localSttHostEdit"));
+    m_localSttHostLabel = formLabel(QStringLiteral("Listen address"), QStringLiteral("localSttHostLabel"), backendGroup);
+    m_backendForm->addRow(m_localSttHostLabel, m_localSttHostEdit);
+    m_localSttPortSpin = new QSpinBox(backendGroup);
+    m_localSttPortSpin->setObjectName(QStringLiteral("localSttPortSpin"));
+    m_localSttPortSpin->setRange(1, 65535);
+    m_localSttPortLabel = formLabel(QStringLiteral("Listen port"), QStringLiteral("localSttPortLabel"), backendGroup);
+    m_backendForm->addRow(m_localSttPortLabel, m_localSttPortSpin);
+    m_localSttAllowLanCheck = new QCheckBox(QStringLiteral("Allow LAN access (bind 0.0.0.0)"), backendGroup);
+    m_localSttAllowLanCheck->setObjectName(QStringLiteral("localSttAllowLanCheck"));
+    m_backendForm->addRow(QString(), m_localSttAllowLanCheck);
 
     m_apiKeyEdit = new QLineEdit(backendGroup);
     m_apiKeyEdit->setObjectName(QStringLiteral("apiKeyEdit"));
@@ -252,9 +286,9 @@ void SettingsDialog::buildUi()
     m_localModelCombo->setObjectName(QStringLiteral("localModelCombo"));
     m_localModelCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_localModelCombo->setMinimumContentsLength(24);
-    m_downloadButton = new QPushButton(QStringLiteral("Download"), m_localModelRow);
+    m_downloadButton = new QPushButton(QStringLiteral("Download here"), m_localModelRow);
     m_downloadButton->setObjectName(QStringLiteral("localModelDownloadButton"));
-    m_deleteButton = new QPushButton(QStringLiteral("Delete"), m_localModelRow);
+    m_deleteButton = new QPushButton(QStringLiteral("Delete local"), m_localModelRow);
     m_deleteButton->setObjectName(QStringLiteral("localModelDeleteButton"));
     modelGrid->addWidget(m_localModelCombo, 0, 0);
     modelGrid->addWidget(m_downloadButton, 0, 1);
@@ -268,7 +302,7 @@ void SettingsDialog::buildUi()
     m_modelBusyIndicator->setObjectName(QStringLiteral("localModelBusyIndicator"));
     m_modelBusyIndicator->setRange(0, 0);
     m_modelBusyIndicator->setTextVisible(false);
-    m_modelStatusLabel = new QLabel(progressStatus);
+    m_modelStatusLabel = new QLabel(QStringLiteral("Download/Delete manages model files on this computer only."), progressStatus);
     m_modelStatusLabel->setObjectName(QStringLiteral("modelOperationStatusLabel"));
     m_modelStatusLabel->setWordWrap(true);
     progressStatusLayout->addWidget(m_modelBusyIndicator);
@@ -367,6 +401,32 @@ void SettingsDialog::buildUi()
     connect(m_vadProviderCombo, &QComboBox::currentTextChanged, this, [this]() {
         updateVadControls();
     });
+    connect(m_localSttHostEdit, &QLineEdit::textChanged, this, [this](const QString &host) {
+        QHostAddress address;
+        const bool lanAddress = address.setAddress(host.trimmed()) && !address.isLoopback();
+        const QSignalBlocker blocker(m_localSttAllowLanCheck);
+        m_localSttAllowLanCheck->setChecked(lanAddress);
+    });
+    connect(m_localSttPortSpin, qOverload<int>(&QSpinBox::valueChanged), this, [this]() {
+        m_localSttPortNeedsCorrection = false;
+    });
+    connect(m_localSttPortSpin, &QSpinBox::editingFinished, this, [this]() {
+        m_localSttPortNeedsCorrection = false;
+    });
+    connect(m_localSttAllowLanCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (enabled) {
+            m_localSttHostEdit->setText(QStringLiteral("0.0.0.0"));
+        } else {
+            QHostAddress address;
+            if (address.setAddress(m_localSttHostEdit->text().trimmed()) && !address.isLoopback()) {
+                m_localSttHostEdit->setText(QStringLiteral("127.0.0.1"));
+            }
+        }
+        updateBackendVisibility();
+    });
+    connect(m_apiUrlEdit, &QLineEdit::textChanged, this, [this](const QString &url) {
+        m_resolvedUrlLabel->setText(url.trimmed());
+    });
     connect(m_downloadButton, &QPushButton::clicked, this, &SettingsDialog::startModelDownload);
     connect(m_deleteButton, &QPushButton::clicked, this, &SettingsDialog::confirmAndDeleteModel);
     connect(m_buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, this, &SettingsDialog::save);
@@ -384,6 +444,16 @@ void SettingsDialog::loadFromSettings(const KwisprSettings &settings)
     const QSignalBlocker blocker(m_backendCombo);
     m_backendCombo->setCurrentText(backendLabel);
     m_apiUrlEdit->setText(settings.apiUrl);
+    m_localSttHostEdit->setText(settings.localSttHost);
+    {
+        const QSignalBlocker portBlocker(m_localSttPortSpin);
+        m_localSttPortSpin->setValue(settings.localSttPort);
+    }
+    m_localSttPortNeedsCorrection = !settings.localSttPortValid
+        || settings.localSttPort < 1 || settings.localSttPort > 65535;
+    const QSignalBlocker allowLanBlocker(m_localSttAllowLanCheck);
+    m_localSttAllowLanCheck->setChecked(settings.localSttAllowLan);
+    m_resolvedUrlLabel->setText(settings.apiUrl);
     QString apiKey = settings.apiKey;
     if (backendLabel == QLatin1String("Local STT") && apiKey.isEmpty() && m_env
         && m_env->contains(QStringLiteral("KWISPR_API_KEY"))) {
@@ -550,14 +620,22 @@ void SettingsDialog::updateBackendVisibility()
     const bool localLanguageVisible = !localModel || !localModel->languages.isEmpty()
         || localModel->supportsLanguageSelection || localModel->supportsLanguageDetection;
 
+    m_localSttSectionLabel->setVisible(local);
     setBackendRowVisible(m_apiUrlEdit, m_apiUrlLabel, true);
-    m_apiUrlEdit->setReadOnly(local);
+    m_apiUrlEdit->setReadOnly(false);
+    m_resolvedUrlLabel->setVisible(local);
+    m_resolvedUrlFieldLabel->setVisible(local);
+    m_localSttHostEdit->setVisible(local && m_localRuntimeInstalled);
+    m_localSttHostLabel->setVisible(local && m_localRuntimeInstalled);
+    m_localSttPortSpin->setVisible(local && m_localRuntimeInstalled);
+    m_localSttPortLabel->setVisible(local && m_localRuntimeInstalled);
+    m_localSttAllowLanCheck->setVisible(local && m_localRuntimeInstalled);
     setBackendRowVisible(m_apiKeyEdit, m_apiKeyLabel, !local);
     setBackendRowVisible(m_modelEdit, m_modelLabel, !local);
     setBackendRowVisible(m_localModelRow, m_localModelLabel, local);
     setBackendRowVisible(m_languageCombo, m_languageLabel, openAi || (local && localLanguageVisible));
     setBackendRowVisible(m_promptEdit, m_promptLabel, openRouter);
-    m_vadGroup->setVisible(local);
+    m_vadGroup->setVisible(local && m_localRuntimeInstalled);
     updateVadControls();
     updateModelControls();
 }
@@ -626,7 +704,9 @@ void SettingsDialog::loadBackendDraft(const QString &backendLabel)
         draft.language = selectedLanguageCode();
         draft.prompt = m_promptEdit->toPlainText();
         if (backendLabel == QLatin1String("Local STT")) {
-            draft.apiUrl = QString::fromLatin1(LocalUrl);
+            QUrl localUrl(QString::fromLatin1(LocalUrl));
+            localUrl.setPort(m_localSttPortSpin->value());
+            draft.apiUrl = localUrl.toString();
             draft.model = !selectedModelId().isEmpty()
                 ? selectedModelId()
                 : (m_catalog.models.isEmpty() ? QString() : m_catalog.models.constFirst().id);
@@ -845,6 +925,11 @@ KwisprSettings SettingsDialog::settingsFromWidgets() const
     const bool local = m_backendCombo->currentText() == QLatin1String("Local STT");
     settings.backend = backendValueForLabel(m_backendCombo->currentText());
     settings.apiUrl = m_apiUrlEdit->text().trimmed();
+    settings.localSttHost = m_localSttHostEdit->text().trimmed();
+    settings.localSttPort = m_localSttPortNeedsCorrection ? 0 : m_localSttPortSpin->value();
+    settings.localSttPortValid = !m_localSttPortNeedsCorrection;
+    settings.localSttAllowLan = m_localSttAllowLanCheck->isChecked();
+    settings.localSttConfigured = local;
     settings.apiKey = m_apiKeyEdit->text();
     settings.model = local ? selectedModelId() : m_modelEdit->text().trimmed();
     settings.language = selectedLanguageCode();
@@ -867,7 +952,7 @@ QString SettingsDialog::backendLabelForSettings(const KwisprSettings &settings) 
     if (settings.backend == QLatin1String("openrouter-chat") || settings.apiUrl == QLatin1String(OpenRouterUrl)) {
         return QStringLiteral("OpenRouter");
     }
-    if (settings.apiUrl == QLatin1String(LocalUrl)) {
+    if (settings.localSttConfigured || settings.apiUrl == QLatin1String(LocalUrl)) {
         return QStringLiteral("Local STT");
     }
     return QStringLiteral("OpenAI");

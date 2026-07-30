@@ -121,7 +121,7 @@ def parse_multipart(content_type: str, body: bytes) -> tuple[dict[str, str], dic
 def main() -> None:
     parser = argparse.ArgumentParser(description="Kwispr local STT server skeleton")
     parser.add_argument("--host", default="127.0.0.1", help="bind host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=9000, help="bind port (default: 9000)")
+    parser.add_argument("--port", type=int, default=19650, help="bind port (default: 19650)")
     args = parser.parse_args()
 
     httpd = ThreadingHTTPServer((args.host, args.port), LocalSTTHandler)

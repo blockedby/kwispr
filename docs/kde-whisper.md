@@ -65,6 +65,12 @@ DESTDIR=/tmp/kde-whisper-install cmake --install kde-whisper/build --prefix /usr
 
 Configuration is saved with mode `0600` at `$XDG_CONFIG_HOME/kwispr/config.env`; users do not need to prepare `.env`.
 
+## Local STT connection and LAN service
+
+The Local STT backend accepts an editable OpenAI-compatible transcription URL, including a remote LAN hostname/IP and port. The resolved request URL remains visible. When this computer has the local user service installed, Settings also shows the independent listen address/port and **Allow LAN clients** control. Loopback (`127.0.0.1:19650`) is the fresh default; LAN binding is opt-in and applies by restarting `kwispr-local-stt.service` with visible success/failure feedback.
+
+A wildcard listen address such as `0.0.0.0` is never reused as the client destination. Remote-only clients may choose any catalog model slug even when no runtime or model file is installed locally. **Download here** and **Delete local** affect only the current computer, never the remote server.
+
 ## Hotkey behavior
 
 The app deliberately does not hijack the existing KDE global shortcut. Keep your current KDE shortcut pointed at:
@@ -99,4 +105,5 @@ KWISPR_MODEL=whisper-large-v3-turbo
 - This is an optional experimental KDE control surface.
 - It is not a replacement for the documented shell workflow yet.
 - Model install/delete/verify behavior stays authoritative in `kwispr-models.py`.
-- Local STT still requires a built `rust-local-stt/target/release/kwispr-local-stt` binary.
+- Hosting Local STT still requires the installed Rust runtime; connecting to a remote Local STT server does not.
+- LAN mode does not provide authentication, TLS, reverse-proxy setup, or firewall automation.

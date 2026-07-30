@@ -109,6 +109,8 @@ QMap<QString, QString> EnvFile::defaults() {
     return {
         {QStringLiteral("KWISPR_BACKEND"), QStringLiteral("openai-transcriptions")},
         {QStringLiteral("KWISPR_API_URL"), QStringLiteral("https://api.openai.com/v1/audio/transcriptions")},
+        {QStringLiteral("KWISPR_LOCAL_STT_HOST"), QStringLiteral("127.0.0.1")},
+        {QStringLiteral("KWISPR_LOCAL_STT_PORT"), QStringLiteral("19650")},
         {QStringLiteral("KWISPR_API_KEY"), QString()},
         {QStringLiteral("KWISPR_MODEL"), QStringLiteral("whisper-1")},
         {QStringLiteral("KWISPR_AUDIO_FORMAT"), QStringLiteral("wav")},
