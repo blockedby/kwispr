@@ -82,6 +82,11 @@ if(BUILD_TESTING)
     add_test(NAME TrayControllerTest COMMAND TrayControllerTest)
     set_tests_properties(TrayControllerTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    add_executable(TrayAppTest tests/tray_app_test.cpp)
+    target_link_libraries(TrayAppTest PRIVATE kde_whisper_core Qt6::Test Qt6::Widgets)
+    add_test(NAME TrayAppTest COMMAND TrayAppTest)
+    set_tests_properties(TrayAppTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(SettingsDialogTest tests/settings_dialog_test.cpp)
     target_link_libraries(SettingsDialogTest PRIVATE kde_whisper_core Qt6::Test Qt6::Widgets)
     add_test(NAME SettingsDialogTest COMMAND SettingsDialogTest)

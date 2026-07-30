@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -21,6 +22,12 @@ class InstallerContractTest(unittest.TestCase):
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn('run_step "Building KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-build.sh"', installer)
         self.assertIn('if [[ "$RUN_TESTS" == 1 ]]', installer)
+
+    def test_tray_shutdown_uses_pidfds_instead_of_reusable_numeric_pids(self) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("os.pidfd_open(pid)", installer)
+        self.assertIn("signal.pidfd_send_signal(pidfd, signal.SIGTERM)", installer)
+        self.assertIn("signal.pidfd_send_signal(pidfd, signal.SIGKILL)", installer)
 
     def test_native_dependency_setup_precedes_python_option_validation(self) -> None:
         installer = INSTALLER.read_text(encoding="utf-8")
@@ -99,9 +106,26 @@ class InstallerContractTest(unittest.TestCase):
             timeout=60,
         )
 
+    def start_stale_installed_tray(self) -> subprocess.Popen[bytes]:
+        installed_tray = self.prefix / "lib" / "kwispr" / "kde-whisper"
+        sleep_binary = shutil.which("sleep")
+        self.assertIsNotNone(sleep_binary)
+        shutil.copy2(sleep_binary, installed_tray)
+        tray_process = subprocess.Popen([str(installed_tray), "60"])
+        time.sleep(0.1)
+        self.assertIsNone(tray_process.poll())
+
+        replacement = self.root / f"replacement-{tray_process.pid}"
+        shutil.copy2(sleep_binary, replacement)
+        os.replace(replacement, installed_tray)
+        executable = os.readlink(f"/proc/{tray_process.pid}/exe")
+        self.assertTrue(executable.endswith("kde-whisper (deleted)"), executable)
+        return tray_process
+
     def test_cloud_install_is_self_contained_and_migrates_config(self) -> None:
         result = self.install("--without-local-stt", "--autostart")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Kwispr tray added to graphical-session autostart", result.stdout)
 
         runtime = self.prefix / "share" / "kwispr" / "runtime"
         cli = self.prefix / "bin" / "kwispr"
@@ -152,6 +176,84 @@ class InstallerContractTest(unittest.TestCase):
         )
         self.assertEqual(models.returncode, 0, models.stderr)
         self.assertIn("whisper-large-v3-turbo", models.stdout)
+
+    def test_autostart_install_starts_tray_in_active_graphical_session(self) -> None:
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        systemctl = fake_bin / "systemctl"
+        systemctl.write_text(
+            "#!/usr/bin/env bash\n"
+            "[[ \"$*\" == *\"is-active graphical-session.target\"* ]]\n",
+            encoding="utf-8",
+        )
+        systemctl.chmod(0o755)
+        systemd_run_log = self.root / "systemd-run.log"
+        systemd_run = fake_bin / "systemd-run"
+        systemd_run.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$@\" > \"$KWISPR_SYSTEMD_RUN_LOG\"\n"
+            "command=\"${!#}\"\n"
+            "\"$command\"\n",
+            encoding="utf-8",
+        )
+        systemd_run.chmod(0o755)
+
+        fake_kde_log = self.root / "started-kde.log"
+        env = self.env()
+        env.update(
+            {
+                "KWISPR_INSTALL_NO_SYSTEMD": "0",
+                "KWISPR_SYSTEMD_RUN_LOG": str(systemd_run_log),
+                "KWISPR_FAKE_LOG": str(fake_kde_log),
+                "PATH": f"{fake_bin}:{env['PATH']}",
+            }
+        )
+        result = subprocess.run(
+            [
+                str(INSTALLER), "--prefix", str(self.prefix), "--skip-build", "--yes", "--plain",
+                "--without-local-stt", "--autostart", "--no-open-settings",
+            ],
+            cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Kwispr tray started in the current graphical session", result.stdout)
+        self.assertTrue(fake_kde_log.exists())
+        run_arguments = systemd_run_log.read_text(encoding="utf-8")
+        self.assertIn("--collect\n", run_arguments)
+        self.assertIn("--service-type=exec\n", run_arguments)
+        self.assertIn("PartOf=graphical-session.target", run_arguments)
+        self.assertIn(str(self.prefix / "bin" / "kde-whisper"), run_arguments)
+        self.assertTrue((self.config_home / "autostart" / "org.kwispr.KdeWhisper.desktop").exists())
+
+    def test_autostart_install_defers_without_active_graphical_session(self) -> None:
+        fake_bin = self.root / "inactive-session-bin"
+        fake_bin.mkdir()
+        systemctl = fake_bin / "systemctl"
+        systemctl.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+        systemctl.chmod(0o755)
+        unexpected_run = self.root / "unexpected-systemd-run"
+        systemd_run = fake_bin / "systemd-run"
+        systemd_run.write_text(
+            f"#!/usr/bin/env bash\ntouch {unexpected_run}\n",
+            encoding="utf-8",
+        )
+        systemd_run.chmod(0o755)
+
+        env = self.env()
+        env.update({"KWISPR_INSTALL_NO_SYSTEMD": "0", "PATH": f"{fake_bin}:{env['PATH']}"})
+        result = subprocess.run(
+            [
+                str(INSTALLER), "--prefix", str(self.prefix), "--skip-build", "--yes", "--plain",
+                "--without-local-stt", "--autostart", "--no-open-settings",
+            ],
+            cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no active graphical session was found", result.stdout)
+        self.assertFalse(unexpected_run.exists())
+        self.assertTrue((self.config_home / "autostart" / "org.kwispr.KdeWhisper.desktop").exists())
 
     def test_local_install_copies_runtime_and_writes_portable_service(self) -> None:
         release = self.root / "release"
@@ -448,33 +550,66 @@ class InstallerContractTest(unittest.TestCase):
         self.assertTrue((self.config_home / "kwispr" / "config.env").exists())
         self.assertTrue(model.exists())
 
-    def test_uninstall_preserves_user_config_and_models(self) -> None:
-        installed = self.install("--without-local-stt", "--no-autostart")
+    def test_no_autostart_upgrade_stops_stale_tray_and_preserves_config(self) -> None:
+        installed = self.install("--without-local-stt", "--autostart")
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        config = self.config_home / "kwispr" / "config.env"
+        original_config = config.read_bytes()
+        autostart = self.config_home / "autostart" / "org.kwispr.KdeWhisper.desktop"
+        tray_process = self.start_stale_installed_tray()
+
+        try:
+            upgraded = self.install("--without-local-stt", "--no-autostart")
+            self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+            tray_process.wait(timeout=5)
+            self.assertIn("Stopped the running Kwispr tray", upgraded.stdout)
+            self.assertFalse(autostart.exists())
+            self.assertEqual(config.read_bytes(), original_config)
+        finally:
+            if tray_process.poll() is None:
+                tray_process.kill()
+                tray_process.wait(timeout=5)
+
+    def test_uninstall_stops_tray_removes_autostart_and_preserves_user_data(self) -> None:
+        installed = self.install("--without-local-stt", "--autostart")
         self.assertEqual(installed.returncode, 0, installed.stderr)
         model = self.data_home / "kwispr" / "models" / "keep.gguf"
         model.write_bytes(b"model")
+        autostart = self.config_home / "autostart" / "org.kwispr.KdeWhisper.desktop"
+        self.assertTrue(autostart.exists())
 
-        removed = subprocess.run(
-            [
-                str(INSTALLER),
-                "--prefix",
-                str(self.prefix),
-                "--plain",
-                "--yes",
-                "--no-systemd-actions",
-                "--uninstall",
-            ],
-            cwd=REPO_ROOT,
-            env=self.env(),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-        )
-        self.assertEqual(removed.returncode, 0, removed.stderr)
-        self.assertFalse((self.prefix / "bin" / "kwispr").exists())
-        self.assertTrue((self.config_home / "kwispr" / "config.env").exists())
-        self.assertTrue(model.exists())
+        tray_process = self.start_stale_installed_tray()
+
+        try:
+            removed = subprocess.run(
+                [
+                    str(INSTALLER),
+                    "--prefix",
+                    str(self.prefix),
+                    "--plain",
+                    "--yes",
+                    "--no-systemd-actions",
+                    "--uninstall",
+                ],
+                cwd=REPO_ROOT,
+                env=self.env(),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            tray_process.wait(timeout=5)
+            self.assertIn("Stopped the running Kwispr tray", removed.stdout)
+            self.assertIn("Kwispr tray autostart entry removed", removed.stdout)
+            self.assertFalse((self.prefix / "bin" / "kwispr").exists())
+            self.assertFalse(autostart.exists())
+            self.assertTrue((self.config_home / "kwispr" / "config.env").exists())
+            self.assertTrue(model.exists())
+        finally:
+            if tray_process.poll() is None:
+                tray_process.kill()
+                tray_process.wait(timeout=5)
 
 
 if __name__ == "__main__":

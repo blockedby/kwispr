@@ -73,6 +73,16 @@ void TrayApp::toggleRecording()
 
 void TrayApp::openSettings()
 {
+    if (m_settingsDialog) {
+        if (m_settingsDialog->isMinimized()) {
+            m_settingsDialog->setWindowState(m_settingsDialog->windowState() & ~Qt::WindowMinimized);
+        }
+        m_settingsDialog->show();
+        m_settingsDialog->raise();
+        m_settingsDialog->activateWindow();
+        return;
+    }
+
     const QString envPath = configFilePath();
     EnvFile env;
     loadConfigWithLegacyMigration(&env, envPath, m_repoRoot + QStringLiteral("/.env"));
@@ -99,6 +109,7 @@ void TrayApp::openSettings()
     int previousLocalSttPort = settings.localSttPort;
     SettingsDialog dialog(settings, catalog, installedModelIds, &env, &modelManager,
                           localRuntimeInstalled);
+    m_settingsDialog = &dialog;
     connect(&dialog, &SettingsDialog::settingsSaved, this,
             [this, &env, envPath, localRuntimeInstalled, previousLocalSttHost, previousLocalSttPort](const KwisprSettings &savedSettings) mutable {
         QDir().mkpath(QFileInfo(envPath).absolutePath());
@@ -130,6 +141,7 @@ void TrayApp::openSettings()
         m_controller->refreshState();
     });
     dialog.exec();
+    m_settingsDialog.clear();
 }
 
 void TrayApp::startLocalStt()
