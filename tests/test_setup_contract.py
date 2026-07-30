@@ -30,6 +30,15 @@ class SetupContractTest(unittest.TestCase):
         self.assertIn("setfacl -m \"u:$USER:rw\" /dev/uinput", setup)
         self.assertIn("udevadm trigger", setup)
 
+    def test_setup_does_not_install_podman_implicitly(self) -> None:
+        setup = SETUP_SH.read_text(encoding="utf-8")
+
+        package_lines = "\n".join(
+            line for line in setup.splitlines() if "pacman -S" in line or "apt install" in line
+        )
+        self.assertNotIn("podman", package_lines)
+        self.assertIn("ffmpeg", package_lines)
+
 
 if __name__ == "__main__":
     unittest.main()
