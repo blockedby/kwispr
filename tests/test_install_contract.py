@@ -22,6 +22,14 @@ class InstallerContractTest(unittest.TestCase):
         self.assertIn('run_step "Building KDE Whisper in Podman" "$ROOT_DIR/kde-whisper/scripts/podman-build.sh"', installer)
         self.assertIn('if [[ "$RUN_TESTS" == 1 ]]', installer)
 
+    def test_native_dependency_setup_precedes_python_option_validation(self) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        main_flow = installer[installer.index("resolve_build_backend\nprepare_native_arch_packages") :]
+        self.assertLess(
+            main_flow.index("prepare_native_arch_packages"),
+            main_flow.index('validate_local_stt_options || fail "Invalid Local STT option"'),
+        )
+
     def test_tray_uses_configured_health_endpoint_and_restarts_changed_service(self) -> None:
         tray_app = (REPO_ROOT / "kde-whisper" / "src" / "ui" / "TrayApp.cpp").read_text(encoding="utf-8")
         self.assertIn("settings.localSttHealthUrl()", tray_app)
@@ -358,13 +366,23 @@ class InstallerContractTest(unittest.TestCase):
         before = config_path.read_bytes()
         invalid_options = (
             ("--local-stt-port", "70000"),
+            ("--local-stt-port", " 19650"),
+            ("--local-stt-port", "1_000"),
             ("--local-stt-url", "http://0.0.0.0:19650/v1/audio/transcriptions"),
         )
         for option, value in invalid_options:
-            with self.subTest(option=option):
+            with self.subTest(option=option, value=value):
                 result = self.install("--without-local-stt", option, value, "--no-autostart")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(config_path.read_bytes(), before)
+
+    def test_local_stt_port_option_is_persisted_as_canonical_decimal(self) -> None:
+        result = self.install(
+            "--without-local-stt", "--local-stt-port", "019650", "--no-autostart"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = (self.config_home / "kwispr" / "config.env").read_text(encoding="utf-8")
+        self.assertIn("KWISPR_LOCAL_STT_PORT=19650\n", config)
 
     def test_local_install_accepts_self_contained_binary(self) -> None:
         release = self.root / "static-release"

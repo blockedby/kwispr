@@ -90,6 +90,8 @@ private slots:
     void loadsCurrentSettingsIntoWidgets();
     void backendRowsAreContextSensitiveAndPreserveDrafts();
     void lanOptInUpdatesListenAddress();
+    void invalidLoadedPortRequiresExplicitCorrection();
+    void firstLocalPresetUsesRetainedServerPort();
     void remoteOnlyLocalSttUsesCatalogWithoutRuntimeArtifacts();
     void invalidLocalEndpointDoesNotMutateEnv();
     void apiKeyIsPasswordAndValidationDoesNotLeakSecret();
@@ -241,6 +243,12 @@ void SettingsDialogTest::lanOptInUpdatesListenAddress()
     QCOMPARE(port->value(), 19650);
     QVERIFY(!allowLan->isChecked());
 
+    host->setText(QStringLiteral("192.168.1.20"));
+    QVERIFY(allowLan->isChecked());
+    allowLan->setChecked(false);
+    QCOMPARE(host->text(), QStringLiteral("127.0.0.1"));
+    QVERIFY(!allowLan->isChecked());
+
     allowLan->setChecked(true);
     QCOMPARE(host->text(), QStringLiteral("0.0.0.0"));
     port->setValue(24567);
@@ -248,6 +256,47 @@ void SettingsDialogTest::lanOptInUpdatesListenAddress()
     QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_HOST")), QStringLiteral("0.0.0.0"));
     QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")), QStringLiteral("24567"));
     QCOMPARE(env.value(QStringLiteral("KWISPR_API_URL")), QStringLiteral("http://127.0.0.1:19650/v1/audio/transcriptions"));
+}
+
+void SettingsDialogTest::invalidLoadedPortRequiresExplicitCorrection()
+{
+    for (const QString &rawPort : {QStringLiteral("not-a-port"), QStringLiteral("70000"),
+                                   QStringLiteral(" 19650"), QStringLiteral("19650 ")}) {
+        EnvFile env;
+        env.setValue(QStringLiteral("KWISPR_BACKEND"), QStringLiteral("openai-transcriptions"));
+        env.setValue(QStringLiteral("KWISPR_API_URL"), QStringLiteral("http://127.0.0.1:19650/v1/audio/transcriptions"));
+        env.setValue(QStringLiteral("KWISPR_MODEL"), QStringLiteral("whisper-large-v3-turbo"));
+        env.setValue(QStringLiteral("KWISPR_LOCAL_STT_CONFIGURED"), QStringLiteral("1"));
+        env.setValue(QStringLiteral("KWISPR_LOCAL_STT_PORT"), rawPort);
+        const KwisprSettings settings = KwisprSettings::fromEnv(env);
+        QVERIFY(!settings.localSttPortValid);
+
+        SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+        QVERIFY(!dialog.save());
+        QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")), rawPort);
+
+        dialog.findChild<QSpinBox *>(QStringLiteral("localSttPortSpin"))->setValue(24567);
+        QVERIFY(dialog.save());
+        QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")), QStringLiteral("24567"));
+    }
+}
+
+void SettingsDialogTest::firstLocalPresetUsesRetainedServerPort()
+{
+    for (const int retainedPort : {9000, 24567}) {
+        KwisprSettings settings;
+        settings.localSttPort = retainedPort;
+        settings.apiKey = QStringLiteral("test-key");
+        EnvFile env;
+        SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+
+        dialog.findChild<QComboBox *>(QStringLiteral("backendCombo"))->setCurrentText(QStringLiteral("Local STT"));
+        QCOMPARE(dialog.findChild<QLineEdit *>(QStringLiteral("apiUrlEdit"))->text(),
+                 QStringLiteral("http://127.0.0.1:%1/v1/audio/transcriptions").arg(retainedPort));
+        QVERIFY(dialog.save());
+        QCOMPARE(env.value(QStringLiteral("KWISPR_API_URL")),
+                 QStringLiteral("http://127.0.0.1:%1/v1/audio/transcriptions").arg(retainedPort));
+    }
 }
 
 void SettingsDialogTest::remoteOnlyLocalSttUsesCatalogWithoutRuntimeArtifacts()

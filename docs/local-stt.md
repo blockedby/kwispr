@@ -87,7 +87,7 @@ A successful start prints `kwispr local STT runtime listening on http://127.0.0.
 Binding beyond loopback is always opt-in. A headless inference computer can be installed noninteractively with:
 
 ```bash
-./install.sh --yes --with-local-stt \
+./install.sh --yes --build-backend host --allow-package-install --with-local-stt \
   --local-stt-host 0.0.0.0 --local-stt-port 19650 \
   --local-stt-autostart
 ```
@@ -95,7 +95,7 @@ Binding beyond loopback is always opt-in. A headless inference computer can be i
 A recording-only computer can use it without installing the Rust runtime or downloading a local model:
 
 ```bash
-./install.sh --yes --without-local-stt \
+./install.sh --yes --build-backend host --allow-package-install --without-local-stt \
   --local-stt-url http://192.168.1.20:19650/v1/audio/transcriptions \
   --local-stt-model whisper-large-v3-turbo
 ```

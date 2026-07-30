@@ -489,6 +489,7 @@ systemd_escape() {
 validate_local_stt_options() {
   python3 - "$LOCAL_STT_HOST_OPTION" "$LOCAL_STT_PORT_OPTION" "$LOCAL_STT_URL_OPTION" "$LOCAL_STT_MODEL_OPTION" <<'PY'
 import ipaddress
+import re
 import sys
 from urllib.parse import urlsplit
 
@@ -499,10 +500,9 @@ if host:
     except ValueError as exc:
         raise SystemExit(f"invalid --local-stt-host: {exc}")
 if port:
-    try:
-        number = int(port)
-    except ValueError:
-        raise SystemExit("invalid --local-stt-port: expected an integer")
+    if not re.fullmatch(r"[0-9]+", port):
+        raise SystemExit("invalid --local-stt-port: expected ASCII decimal digits")
+    number = int(port, 10)
     if not 1 <= number <= 65535:
         raise SystemExit("invalid --local-stt-port: expected 1..65535")
 if url:
@@ -595,6 +595,7 @@ if with_runtime:
 if host_option:
     set_value("KWISPR_LOCAL_STT_HOST", host_option)
 if port_option:
+    port_option = str(int(port_option, 10))
     set_value("KWISPR_LOCAL_STT_PORT", port_option)
 
 if fresh_local:
@@ -744,10 +745,6 @@ info "Configuration: $CONFIG_FILE"
 if [[ "$ASSUME_YES" == 0 && ! -t 0 ]]; then
   fail "Interactive input is unavailable; rerun with --yes and explicit feature flags."
 fi
-if [[ -n "$LOCAL_STT_HOST_OPTION$LOCAL_STT_PORT_OPTION$LOCAL_STT_URL_OPTION$LOCAL_STT_MODEL_OPTION" ]]; then
-  command -v python3 >/dev/null 2>&1 || fail "python3 is required to validate Local STT options"
-  validate_local_stt_options || fail "Invalid Local STT option"
-fi
 if [[ "$ASSUME_YES" == 1 ]]; then
   TRAY_AUTOSTART="${TRAY_AUTOSTART:-1}"
   WITH_LOCAL_STT="${WITH_LOCAL_STT:-0}"
@@ -768,6 +765,10 @@ LOCAL_STT_AUTOSTART="${LOCAL_STT_AUTOSTART:-0}"
 
 resolve_build_backend
 prepare_native_arch_packages
+if [[ -n "$LOCAL_STT_HOST_OPTION$LOCAL_STT_PORT_OPTION$LOCAL_STT_URL_OPTION$LOCAL_STT_MODEL_OPTION" ]]; then
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required to validate Local STT options"
+  validate_local_stt_options || fail "Invalid Local STT option"
+fi
 
 missing_runtime=()
 for command_name in ffmpeg curl jq python3 notify-send wl-copy; do

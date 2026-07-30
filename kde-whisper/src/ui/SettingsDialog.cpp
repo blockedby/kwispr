@@ -22,6 +22,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QtMath>
 
@@ -406,11 +407,20 @@ void SettingsDialog::buildUi()
         const QSignalBlocker blocker(m_localSttAllowLanCheck);
         m_localSttAllowLanCheck->setChecked(lanAddress);
     });
+    connect(m_localSttPortSpin, qOverload<int>(&QSpinBox::valueChanged), this, [this]() {
+        m_localSttPortNeedsCorrection = false;
+    });
+    connect(m_localSttPortSpin, &QSpinBox::editingFinished, this, [this]() {
+        m_localSttPortNeedsCorrection = false;
+    });
     connect(m_localSttAllowLanCheck, &QCheckBox::toggled, this, [this](bool enabled) {
         if (enabled) {
             m_localSttHostEdit->setText(QStringLiteral("0.0.0.0"));
-        } else if (m_localSttHostEdit->text() == QLatin1String("0.0.0.0")) {
-            m_localSttHostEdit->setText(QStringLiteral("127.0.0.1"));
+        } else {
+            QHostAddress address;
+            if (address.setAddress(m_localSttHostEdit->text().trimmed()) && !address.isLoopback()) {
+                m_localSttHostEdit->setText(QStringLiteral("127.0.0.1"));
+            }
         }
         updateBackendVisibility();
     });
@@ -435,7 +445,12 @@ void SettingsDialog::loadFromSettings(const KwisprSettings &settings)
     m_backendCombo->setCurrentText(backendLabel);
     m_apiUrlEdit->setText(settings.apiUrl);
     m_localSttHostEdit->setText(settings.localSttHost);
-    m_localSttPortSpin->setValue(settings.localSttPort);
+    {
+        const QSignalBlocker portBlocker(m_localSttPortSpin);
+        m_localSttPortSpin->setValue(settings.localSttPort);
+    }
+    m_localSttPortNeedsCorrection = !settings.localSttPortValid
+        || settings.localSttPort < 1 || settings.localSttPort > 65535;
     const QSignalBlocker allowLanBlocker(m_localSttAllowLanCheck);
     m_localSttAllowLanCheck->setChecked(settings.localSttAllowLan);
     m_resolvedUrlLabel->setText(settings.apiUrl);
@@ -689,7 +704,9 @@ void SettingsDialog::loadBackendDraft(const QString &backendLabel)
         draft.language = selectedLanguageCode();
         draft.prompt = m_promptEdit->toPlainText();
         if (backendLabel == QLatin1String("Local STT")) {
-            draft.apiUrl = QString::fromLatin1(LocalUrl);
+            QUrl localUrl(QString::fromLatin1(LocalUrl));
+            localUrl.setPort(m_localSttPortSpin->value());
+            draft.apiUrl = localUrl.toString();
             draft.model = !selectedModelId().isEmpty()
                 ? selectedModelId()
                 : (m_catalog.models.isEmpty() ? QString() : m_catalog.models.constFirst().id);
@@ -909,7 +926,8 @@ KwisprSettings SettingsDialog::settingsFromWidgets() const
     settings.backend = backendValueForLabel(m_backendCombo->currentText());
     settings.apiUrl = m_apiUrlEdit->text().trimmed();
     settings.localSttHost = m_localSttHostEdit->text().trimmed();
-    settings.localSttPort = m_localSttPortSpin->value();
+    settings.localSttPort = m_localSttPortNeedsCorrection ? 0 : m_localSttPortSpin->value();
+    settings.localSttPortValid = !m_localSttPortNeedsCorrection;
     settings.localSttAllowLan = m_localSttAllowLanCheck->isChecked();
     settings.localSttConfigured = local;
     settings.apiKey = m_apiKeyEdit->text();

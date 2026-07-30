@@ -12,6 +12,7 @@ public:
     QString apiUrl = "https://api.openai.com/v1/audio/transcriptions";
     QString localSttHost = "127.0.0.1";
     int localSttPort = 19650;
+    bool localSttPortValid = true;
     bool localSttAllowLan = false;
     bool localSttConfigured = false;
     QString apiKey;

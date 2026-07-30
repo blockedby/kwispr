@@ -4,8 +4,9 @@
 
 #include <QDir>
 #include <QFileInfo>
-#include <QStandardPaths>
 #include <QHostAddress>
+#include <QRegularExpression>
+#include <QStandardPaths>
 
 #include <cmath>
 
@@ -92,7 +93,11 @@ KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
     settings.apiUrl = env.value(QStringLiteral("KWISPR_API_URL"), settings.apiUrl);
     settings.localSttHost = env.value(QStringLiteral("KWISPR_LOCAL_STT_HOST"), settings.localSttHost);
     if (env.contains(QStringLiteral("KWISPR_LOCAL_STT_PORT"))) {
-        settings.localSttPort = env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT")).toInt(&ok);
+        const QString rawPort = env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT"));
+        static const QRegularExpression decimalPort(QStringLiteral("^[0-9]+$"));
+        settings.localSttPort = rawPort.toInt(&ok);
+        settings.localSttPortValid = decimalPort.match(rawPort).hasMatch()
+            && ok && settings.localSttPort >= 1 && settings.localSttPort <= 65535;
         if (!ok) {
             settings.localSttPort = 0;
         }
@@ -260,7 +265,7 @@ bool KwisprSettings::validate(QStringList *errors) const
         ok = false;
         addError(errors, "Local STT bind address must be a valid IP address.");
     }
-    if (localSttPort < 1 || localSttPort > 65535) {
+    if (!localSttPortValid || localSttPort < 1 || localSttPort > 65535) {
         ok = false;
         addError(errors, "Local STT bind port must be between 1 and 65535.");
     }

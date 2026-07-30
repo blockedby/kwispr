@@ -122,6 +122,7 @@ private:
     QLabel *m_localSttHostLabel = nullptr;
     QSpinBox *m_localSttPortSpin = nullptr;
     QLabel *m_localSttPortLabel = nullptr;
+    bool m_localSttPortNeedsCorrection = false;
     QCheckBox *m_localSttAllowLanCheck = nullptr;
     QLineEdit *m_apiKeyEdit = nullptr;
     QLabel *m_apiKeyLabel = nullptr;
