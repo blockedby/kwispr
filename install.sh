@@ -264,7 +264,7 @@ cleanup_arch_build_packages() {
     done < "$ARCH_BUILD_PACKAGE_FILE"
   else
     # Last-resort recovery for an interrupted transaction before its plan was persisted.
-    mapfile -t introduced < <(comm -13 "$ARCH_BUILD_REFERENCE" "$current_file")
+    mapfile -t introduced < <(LC_ALL=C comm -13 "$ARCH_BUILD_REFERENCE" "$current_file")
   fi
   if ((${#introduced[@]} == 0)); then
     ARCH_BUILD_CLEANUP_PENDING=0
@@ -434,7 +434,7 @@ prepare_native_arch_packages() {
       run_step "Installing temporary native build packages as dependencies" \
         "${PACMAN_ROOT_COMMAND[@]}" -S --asdeps --needed --noconfirm -- "${missing_build_packages[@]}"
       snapshot_arch_packages "$ARCH_STATE_DIR/after-build-packages"
-      comm -13 "$ARCH_BUILD_REFERENCE" "$ARCH_STATE_DIR/after-build-packages" > "$ARCH_BUILD_PACKAGE_FILE"
+      LC_ALL=C comm -13 "$ARCH_BUILD_REFERENCE" "$ARCH_STATE_DIR/after-build-packages" > "$ARCH_BUILD_PACKAGE_FILE"
       mapfile -t cleanup_plan < "$ARCH_BUILD_PACKAGE_FILE"
       print_package_list "Exact build-only package set introduced by this run" "${cleanup_plan[@]}"
       if [[ "$KEEP_BUILD_DEPS" == 1 ]]; then

@@ -136,6 +136,16 @@ printf '%s\n' "$*" >> "$FAKE_SUDO_LOG"
 exec "$@"
 '''
 
+FAKE_COMM = r'''#!/usr/bin/env bash
+set -euo pipefail
+printf '%s|%s\n' "${LC_ALL:-}" "$*" >> "$FAKE_COMM_LOG"
+if [[ "${LC_ALL:-}" != C ]]; then
+  printf 'comm must run with LC_ALL=C (got %s)\n' "${LC_ALL:-<unset>}" >&2
+  exit 64
+fi
+exec "$REAL_COMM_BIN" "$@"
+'''
+
 FAKE_CMAKE = r'''#!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "--build" ]]; then
@@ -150,6 +160,9 @@ state = json.loads(path.read_text())
 state[sys.argv[2]] = "explicit"
 path.write_text(json.dumps(state, sort_keys=True))
 PY
+  fi
+  if [[ "${FAKE_DELETE_BUILD_PACKAGE_FILE:-0}" == 1 ]]; then
+    find "${TMPDIR:?}" -type f -name build-packages-introduced -delete
   fi
   if [[ "${FAKE_CMAKE_SLEEP:-0}" == 1 ]]; then sleep 30; fi
   if [[ "${FAKE_CMAKE_FAIL_BUILD:-0}" == 1 ]]; then exit 42; fi
@@ -192,13 +205,20 @@ class ArchBuildBackendContractTest(unittest.TestCase):
         self.pacman_log = self.root / "pacman.log"
         self.sudo_log = self.root / "sudo.log"
         self.cargo_log = self.root / "cargo.log"
+        self.comm_log = self.root / "comm.log"
         self.marker = self.root / "build-started"
         self.pacman_log.touch()
         self.sudo_log.touch()
         self.cargo_log.touch()
+        self.comm_log.touch()
 
+        real_comm = shutil.which("comm")
+        if real_comm is None:
+            self.fail("comm is required for the installer contract tests")
+        self.real_comm = real_comm
         self._write_executable(self.bin / "pacman", FAKE_PACMAN)
         self._write_executable(self.bin / "sudo", FAKE_SUDO)
+        self._write_executable(self.bin / "comm", FAKE_COMM)
         self._write_executable(self.bin / "cmake", FAKE_CMAKE)
         self._write_executable(self.bin / "ctest", "#!/usr/bin/env bash\nexit 0\n")
         self._write_executable(self.bin / "ninja", "#!/usr/bin/env bash\nexit 0\n")
@@ -234,6 +254,21 @@ class ArchBuildBackendContractTest(unittest.TestCase):
     def _operations(self) -> list[dict[str, object]]:
         return [json.loads(line) for line in self.pacman_log.read_text().splitlines() if line]
 
+    def _comm_invocations(self) -> list[str]:
+        return [line for line in self.comm_log.read_text().splitlines() if line]
+
+    def _non_c_locale(self) -> str:
+        for candidate in ("ru_RU.UTF-8", "ru_RU.utf8", "en_US.UTF-8", "C.UTF-8"):
+            result = subprocess.run(
+                ["locale", "charmap"],
+                env={**os.environ, "LC_ALL": candidate},
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if result.returncode == 0:
+                return candidate
+        self.skipTest("no non-C UTF-8 locale is available")
+
     def env(self) -> dict[str, str]:
         env = os.environ.copy()
         env.update(
@@ -252,7 +287,10 @@ class ArchBuildBackendContractTest(unittest.TestCase):
                 "FAKE_PACMAN_DEPS": json.dumps(self.dependencies),
                 "FAKE_SUDO_LOG": str(self.sudo_log),
                 "FAKE_CARGO_LOG": str(self.cargo_log),
+                "FAKE_COMM_LOG": str(self.comm_log),
                 "FAKE_BUILD_MARKER": str(self.marker),
+                "REAL_COMM_BIN": self.real_comm,
+                "TMPDIR": str(self.root),
             }
         )
         return env
@@ -307,6 +345,48 @@ class ArchBuildBackendContractTest(unittest.TestCase):
         self.assertIn("Exact build-only package set introduced by this run", result.stdout)
         self.assertIn("Removed temporary native build dependencies", result.stdout)
         self.assertFalse(stale_cache.exists())
+
+    def test_package_diff_pins_locale_and_completes_install_under_non_c_collation(self) -> None:
+        initial = dict(self.base_state)
+        initial.pop("cmake")
+        self._write_state(initial)
+        env = self.env()
+        env["LC_ALL"] = self._non_c_locale()
+        dependencies = dict(self.dependencies)
+        dependencies["cmake"] = [
+            "0-locale-helper",
+            "@locale-helper",
+            "_locale-helper",
+            "a-locale-helper",
+            "ä-locale-helper",
+        ]
+        env["FAKE_PACMAN_DEPS"] = json.dumps(dependencies)
+
+        result = self.run_installer("--without-local-stt", "--allow-package-install", env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.prefix / "bin" / "kwispr").exists())
+        self.assertEqual(self._read_state(), initial)
+        invocations = self._comm_invocations()
+        self.assertEqual(len(invocations), 1, invocations)
+        self.assertTrue(invocations[0].startswith("C|-13 "), invocations)
+
+    def test_fallback_cleanup_pins_locale_and_restores_package_state(self) -> None:
+        initial = dict(self.base_state)
+        initial.pop("cmake")
+        self._write_state(initial)
+        env = self.env()
+        env["LC_ALL"] = self._non_c_locale()
+        env["FAKE_DELETE_BUILD_PACKAGE_FILE"] = "1"
+        env["FAKE_CMAKE_FAIL_BUILD"] = "1"
+
+        result = self.run_installer("--without-local-stt", "--allow-package-install", env=env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self._read_state(), initial)
+        invocations = self._comm_invocations()
+        self.assertEqual(len(invocations), 2, invocations)
+        self.assertTrue(all(line.startswith("C|-13 ") for line in invocations), invocations)
 
     def test_host_build_cannot_delete_an_environment_selected_directory(self) -> None:
         self._write_state(dict(self.base_state))
