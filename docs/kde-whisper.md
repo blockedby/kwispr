@@ -7,6 +7,7 @@
 - shows a KDE tray entry through `KStatusNotifierItem`;
 - opens a Qt settings dialog for backend, model, prompt, paste, and VAD settings;
 - creates and manages the same XDG configuration used by `kwispr.sh`;
+- registers a configurable native KDE global dictation shortcut through KF6 `KGlobalAccel`;
 - delegates recording/retry to the existing `kwispr.sh toggle` and `kwispr.sh retry` commands;
 - reads the local STT model catalog and delegates downloads to `kwispr-models.py`.
 
@@ -71,15 +72,19 @@ The Local STT backend accepts an editable OpenAI-compatible transcription URL, i
 
 A wildcard listen address such as `0.0.0.0` is never reused as the client destination. Remote-only clients may choose any catalog model slug even when no runtime or model file is installed locally. **Download here** and **Delete local** affect only the current computer, never the remote server.
 
-## Hotkey behavior
+## Global dictation shortcut
 
-The app deliberately does not hijack the existing KDE global shortcut. Keep your current KDE shortcut pointed at:
+While the tray is running it owns a native `KGlobalAccel` action named **Toggle Dictation Recording**. A fresh registration requests **Ctrl+.** only when KDE reports it available. A saved custom shortcut or an explicitly cleared shortcut is autoloaded unchanged, so upgrades do not reset the user's KGlobalAccel choice.
+
+Open **Kwispr Settings → Global dictation shortcut** to record one key combination or clear it. **Apply** changes the running registration immediately and KGlobalAccel persists it; the XDG `config.env` deliberately contains no competing shortcut value. Conflicting sequences are rejected with a visible error and no other global action is reassigned.
+
+The action calls the same `kwispr.sh toggle` path as the tray menu. Keep this command-based shortcut as a fallback when the tray is not running:
 
 ```bash
 ~/.local/bin/kwispr toggle
 ```
 
-The tray action also delegates to `kwispr.sh toggle`, so both paths exercise the same tested CLI behavior.
+Avoid assigning the fallback command to the same sequence while the native tray shortcut is enabled.
 
 ## Local STT models
 

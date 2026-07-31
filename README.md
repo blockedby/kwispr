@@ -115,17 +115,17 @@ No `.env` preparation is required. Open the graphical configuration after instal
 
 Settings are created with mode `0600` at `$XDG_CONFIG_HOME/kwispr/config.env` (normally `~/.config/kwispr/config.env`). Existing repository `.env` settings are migrated automatically and remain supported as a development-only fallback.
 
-## Bind a hotkey in KDE
+## Dictation shortcut in KDE
 
-1. Open **System Settings → Shortcuts → Add New → Command/URL Shortcut**.
-2. Trigger: press your desired key/combo.
-3. Action: the stable installed command:
+The running KDE tray registers **Ctrl+.** as the fresh-install default through KF6 `KGlobalAccel`, when that sequence is available. Open **Kwispr Settings → Global dictation shortcut** to record another single key combination or clear it to disable the native shortcut. Apply takes effect immediately, conflicts are rejected without taking another action's shortcut, and KDE Global Shortcuts remains the sole persisted source of truth. Existing custom or explicitly cleared KGlobalAccel choices are preserved across tray restarts and upgrades.
+
+Press the shortcut once to start recording, then again to stop and transcribe. If the tray is not running, or if you prefer a command-based System Settings shortcut, keep this stable fallback:
 
 ```text
 /home/you/.local/bin/kwispr toggle
 ```
 
-Press once to start recording, press again to stop and transcribe.
+Do not bind the fallback command to the same sequence while the tray's native shortcut is enabled.
 
 ## Configuration
 

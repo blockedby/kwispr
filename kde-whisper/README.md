@@ -10,6 +10,7 @@ It is intentionally thin: recording, retry, clipboard, and backend calls remain 
 - Qt 6 Widgets
 - KDE Frameworks 6
 - `KStatusNotifierItem` tray integration
+- KF6 `KGlobalAccel` native global shortcuts
 - CMake/Ninja
 - Podman development container
 
@@ -37,13 +38,13 @@ After building:
 ./kde-whisper/build/kde-whisper
 ```
 
-Use your existing KDE global shortcut for dictation:
+The running tray registers **Ctrl+.** through `KGlobalAccel` on a fresh KDE registration when it is available. In **Settings → Global dictation shortcut**, record one key combination or clear it to disable the native shortcut. Apply updates KGlobalAccel immediately; existing saved/custom/cleared choices are preserved, and conflicts are rejected without stealing another action.
+
+The native action and tray **Toggle Recording** action both call the same `kwispr.sh toggle` workflow. Keep the installed command as a fallback when the tray is not running:
 
 ```bash
-/path/to/kwispr.sh toggle
+~/.local/bin/kwispr toggle
 ```
-
-The tray Toggle Recording action calls the same `kwispr.sh toggle` command.
 
 ## Model management
 

@@ -26,6 +26,7 @@ RUNTIME_PACKAGES = {
     "libnotify",
     "qt6-base",
     "kcoreaddons",
+    "kglobalaccel",
     "kstatusnotifieritem",
     "pipewire-pulse",
     "vulkan-icd-loader",
