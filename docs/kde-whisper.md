@@ -8,6 +8,8 @@
 - opens a Qt settings dialog for backend, model, prompt, paste, and VAD settings;
 - creates and manages the same XDG configuration used by `kwispr.sh`;
 - registers a configurable native KDE global dictation shortcut through KF6 `KGlobalAccel`;
+- uses KF6 `KDBusService::Unique` so repeated launches cannot duplicate the tray or shortcut;
+- routes repeated settings launches to the existing singleton settings dialog;
 - delegates recording/retry to the existing `kwispr.sh toggle` and `kwispr.sh retry` commands;
 - reads the local STT model catalog and delegates downloads to `kwispr-models.py`.
 
@@ -19,7 +21,7 @@ The top-level installer supports a native Arch build with temporary dependencies
 ./install.sh --build-backend host
 ```
 
-It snapshots pacman package state, installs only missing build packages as dependencies, and removes only packages introduced by that build. Use `--keep-build-deps` to retain a development environment. Podman remains an optional isolated backend:
+It snapshots pacman package state, installs only missing build packages as dependencies, and removes only packages introduced by that build. Required KDE runtime packages, including Arch's `kdbusaddons`, remain installed. Use `--keep-build-deps` to retain a development environment. Podman remains an optional isolated backend:
 
 ```bash
 ./kde-whisper/scripts/podman-test.sh
@@ -79,6 +81,8 @@ While the tray is running it owns a native `KGlobalAccel` action named **Toggle 
 Before first registering the native action, an upgrade checks for the former desktop-launcher action (`org.kwispr.KdeWhisper.desktop` / `_launch`). Its exact Ctrl+. or custom keys are moved only if every owner reported by KGlobalAccel is that legacy component/action. Mixed, foreign, or stale ownership is refused without changing those bindings. A pending journal at `$XDG_STATE_HOME/kwispr/global-shortcut-migration.ini` (normally `~/.local/state/kwispr/...`) is synced before the one-way steal, supports startup recovery, and is cleared into a completion marker only after the native keys match exactly and the legacy keys are empty. Existing native custom and explicitly-cleared choices take precedence, and completed/refused migrations are not repeated. Kwispr never edits `kglobalshortcutsrc` directly.
 
 Open **Kwispr Settings → Global dictation shortcut** to record one key combination or clear it. **Apply** changes the running registration immediately and KGlobalAccel persists it; the XDG `config.env` deliberately contains no competing shortcut value. Conflicting sequences are rejected with a visible error and no other global action is reassigned.
+
+The tray owns a unique session-bus service. A second ordinary `kde-whisper` activation exits without creating another tray or global shortcut. `kde-whisper --settings` and `kwispr settings` route to `TrayApp::openSettings`, restoring and focusing the already-open singleton dialog when necessary.
 
 The action calls the same `kwispr.sh toggle` path as the tray menu. Keep this command-based shortcut as a fallback when the tray is not running:
 
