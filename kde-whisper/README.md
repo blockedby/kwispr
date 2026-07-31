@@ -38,7 +38,7 @@ After building:
 ./kde-whisper/build/kde-whisper
 ```
 
-The running tray registers **Ctrl+.** through `KGlobalAccel` on a fresh KDE registration when it is available. In **Settings → Global dictation shortcut**, record one key combination or clear it to disable the native shortcut. Apply updates KGlobalAccel immediately; existing saved/custom/cleared choices are preserved, and conflicts are rejected without stealing another action.
+The running tray registers **Ctrl+.** through `KGlobalAccel` on a fresh KDE registration when it is available. In **Settings → Global dictation shortcut**, record one key combination or clear it to disable the native shortcut. Apply updates KGlobalAccel immediately; existing saved/custom/cleared choices are preserved, and conflicts are rejected without stealing another action. A one-time upgrade migration moves an exact legacy desktop-launcher binding (`org.kwispr.KdeWhisper.desktop` / `_launch`) only when all owners match that action. Mixed or foreign ownership is refused without changing it; a journal under `$XDG_STATE_HOME/kwispr` makes the one-way migration recoverable and non-repeating.
 
 The native action and tray **Toggle Recording** action both call the same `kwispr.sh toggle` workflow. Keep the installed command as a fallback when the tray is not running:
 

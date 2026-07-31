@@ -117,7 +117,7 @@ Settings are created with mode `0600` at `$XDG_CONFIG_HOME/kwispr/config.env` (n
 
 ## Dictation shortcut in KDE
 
-The running KDE tray registers **Ctrl+.** as the fresh-install default through KF6 `KGlobalAccel`, when that sequence is available. Open **Kwispr Settings → Global dictation shortcut** to record another single key combination or clear it to disable the native shortcut. Apply takes effect immediately, conflicts are rejected without taking another action's shortcut, and KDE Global Shortcuts remains the sole persisted source of truth. Existing custom or explicitly cleared KGlobalAccel choices are preserved across tray restarts and upgrades.
+The running KDE tray registers **Ctrl+.** as the fresh-install default through KF6 `KGlobalAccel`, when that sequence is available. Open **Kwispr Settings → Global dictation shortcut** to record another single key combination or clear it to disable the native shortcut. Apply takes effect immediately, conflicts are rejected without taking another action's shortcut, and KDE Global Shortcuts remains the sole persisted source of truth. Existing custom or explicitly cleared KGlobalAccel choices are preserved across tray restarts and upgrades. On the first upgrade from the old desktop-launcher action (`org.kwispr.KdeWhisper.desktop` / `_launch`), Kwispr moves its exact shortcut to the native toggle action only when every reported owner is that legacy action; foreign or mixed ownership is left untouched. The one-way operation is interruption-safe and is never retried after completion or a safe refusal.
 
 Press the shortcut once to start recording, then again to stop and transcribe. If the tray is not running, or if you prefer a command-based System Settings shortcut, keep this stable fallback:
 
