@@ -21,7 +21,7 @@ configure_file(scripts/kde-whisper.in "${CMAKE_CURRENT_BINARY_DIR}/kde-whisper-l
 find_package(ECM 6.0 REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
 
-find_package(Qt6 REQUIRED COMPONENTS Core DBus Widgets Test Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Test Network)
 find_package(KF6 REQUIRED COMPONENTS CoreAddons DBusAddons GlobalAccel StatusNotifierItem)
 
 add_library(kde_whisper_core STATIC
@@ -41,7 +41,7 @@ add_library(kde_whisper_core STATIC
     src/ui/TrayController.cpp
 )
 target_include_directories(kde_whisper_core PUBLIC src)
-target_link_libraries(kde_whisper_core PUBLIC Qt6::Core Qt6::DBus Qt6::Network Qt6::Widgets KF6::GlobalAccel KF6::StatusNotifierItem)
+target_link_libraries(kde_whisper_core PUBLIC Qt6::Core Qt6::Network Qt6::Widgets KF6::GlobalAccel KF6::StatusNotifierItem)
 
 add_executable(kde-whisper
     src/main.cpp

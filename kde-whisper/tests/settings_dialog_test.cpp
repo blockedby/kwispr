@@ -927,7 +927,9 @@ void SettingsDialogTest::globalShortcutDirtyExternalChangeRejects()
     auto *buttons = dialog.findChild<QDialogButtonBox *>(QStringLiteral("buttonBox"));
 
     edit->setKeySequence(edited);
-    fake->changeExternally(external);
+    // Change the backend on the manager's final authoritative read, after this
+    // dialog captured its baseline and immediately before conditional apply.
+    fake->changeExternallyBeforeNextRead(external);
     QTest::mouseClick(buttons->button(QDialogButtonBox::Ok), Qt::LeftButton);
 
     QVERIFY(dialog.isVisible());

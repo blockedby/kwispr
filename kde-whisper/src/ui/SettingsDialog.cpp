@@ -186,27 +186,15 @@ bool SettingsDialog::save()
     }
 
     if (m_globalShortcut) {
-        const QKeySequence current = m_globalShortcut->currentShortcut();
         if (!m_globalShortcutDirty) {
             // Other KDE tools may change the registration while this dialog is open.
             // A clean shortcut field follows that authoritative value without writing it.
-            setGlobalShortcutClean(current, false);
+            setGlobalShortcutClean(m_globalShortcut->currentShortcut(), false);
         } else {
-            if (current != m_globalShortcutBaseline) {
-                const QString currentText = current.isEmpty()
-                    ? QStringLiteral("disabled")
-                    : current.toString(QKeySequence::NativeText);
-                m_lastError = QStringLiteral(
-                    "The global shortcut changed in KDE while Settings was open (it is now %1). "
-                    "Your shortcut edit was not applied, and nothing was changed. Close and reopen Settings to review the current shortcut before trying again.")
-                                  .arg(currentText);
-                m_globalShortcutStatusLabel->setText(m_lastError);
-                m_globalShortcutEdit->setFocus(Qt::OtherFocusReason);
-                return false;
-            }
-
             QString shortcutError;
-            if (!m_globalShortcut->applyShortcut(m_globalShortcutEdit->keySequence(), &shortcutError)) {
+            if (!m_globalShortcut->applyShortcutIfCurrent(
+                    m_globalShortcutEdit->keySequence(), m_globalShortcutBaseline,
+                    &shortcutError)) {
                 m_lastError = shortcutError;
                 m_globalShortcutStatusLabel->setText(shortcutError);
                 m_globalShortcutEdit->setFocus(Qt::OtherFocusReason);
