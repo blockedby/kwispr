@@ -113,7 +113,10 @@ private slots:
     void localLanguageInitializationMatchesRuntime();
     void unsupportedLocalLanguageBlocksSave();
     void openAiCustomLanguageAndBackendDraftsRoundTrip();
-    void globalShortcutControlReflectsAppliesClearsAndRejectsConflicts();
+    void globalShortcutExternalChangeAndUnrelatedSaveDoesNotOverwrite();
+    void globalShortcutDirtyExternalChangeRejects();
+    void globalShortcutNormalEditAndClearSucceed();
+    void globalShortcutConflictRejectsWithoutMutation();
 };
 
 static ModelCatalog sampleCatalog()
@@ -874,17 +877,78 @@ void SettingsDialogTest::openAiCustomLanguageAndBackendDraftsRoundTrip()
     QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("uk"));
 }
 
-void SettingsDialogTest::globalShortcutControlReflectsAppliesClearsAndRejectsConflicts()
+void SettingsDialogTest::globalShortcutExternalChangeAndUnrelatedSaveDoesNotOverwrite()
 {
     const QKeySequence saved(QStringLiteral("Meta+D"));
-    const QKeySequence conflict(QStringLiteral("Ctrl+Alt+D"));
+    const QKeySequence external(QStringLiteral("Meta+Shift+D"));
+    QObject owner;
+    auto backend = std::make_unique<FakeGlobalShortcutBackend>();
+    auto *fake = backend.get();
+    fake->savedChoiceExists = true;
+    fake->savedChoice = {saved};
+    GlobalShortcutManager shortcut(&owner, std::move(backend));
+    EnvFile env;
+    SettingsDialog dialog(localSettings(), sampleCatalog(), {}, &env, nullptr, true, &shortcut);
+    auto *edit = dialog.findChild<QKeySequenceEdit *>(QStringLiteral("globalShortcutEdit"));
+    auto *status = dialog.findChild<QLabel *>(QStringLiteral("globalShortcutStatusLabel"));
+    QCOMPARE(edit->keySequence(), saved);
+
+    fake->changeExternally(external);
+    QVERIFY(dialog.save());
+
+    QCOMPARE(fake->userOverrideCalls, 0);
+    QCOMPARE(shortcut.currentShortcut(), external);
+    QCOMPARE(edit->keySequence(), external);
+    QVERIFY(status->text().contains(external.toString(QKeySequence::NativeText)));
+    QVERIFY(!env.contains(QStringLiteral("KWISPR_GLOBAL_SHORTCUT")));
+    QVERIFY(!env.contains(QStringLiteral("KWISPR_DICTATION_SHORTCUT")));
+
+    QVERIFY(dialog.save());
+    QCOMPARE(fake->userOverrideCalls, 0);
+}
+
+void SettingsDialogTest::globalShortcutDirtyExternalChangeRejects()
+{
+    const QKeySequence saved(QStringLiteral("Meta+D"));
+    const QKeySequence edited(QStringLiteral("Ctrl+Shift+D"));
+    const QKeySequence external(QStringLiteral("Meta+Shift+D"));
+    QObject owner;
+    auto backend = std::make_unique<FakeGlobalShortcutBackend>();
+    auto *fake = backend.get();
+    fake->savedChoiceExists = true;
+    fake->savedChoice = {saved};
+    GlobalShortcutManager shortcut(&owner, std::move(backend));
+    EnvFile env;
+    SettingsDialog dialog(localSettings(), sampleCatalog(), {}, &env, nullptr, true, &shortcut);
+    dialog.show();
+    QTest::qWait(1);
+    auto *edit = dialog.findChild<QKeySequenceEdit *>(QStringLiteral("globalShortcutEdit"));
+    auto *status = dialog.findChild<QLabel *>(QStringLiteral("globalShortcutStatusLabel"));
+    auto *buttons = dialog.findChild<QDialogButtonBox *>(QStringLiteral("buttonBox"));
+
+    edit->setKeySequence(edited);
+    fake->changeExternally(external);
+    QTest::mouseClick(buttons->button(QDialogButtonBox::Ok), Qt::LeftButton);
+
+    QVERIFY(dialog.isVisible());
+    QVERIFY(dialog.lastError().contains(QStringLiteral("changed in KDE")));
+    QVERIFY(dialog.lastError().contains(QStringLiteral("not applied")));
+    QCOMPARE(status->text(), dialog.lastError());
+    QCOMPARE(edit->keySequence(), edited);
+    QCOMPARE(shortcut.currentShortcut(), external);
+    QCOMPARE(fake->userOverrideCalls, 0);
+    QVERIFY(!env.contains(QStringLiteral("KWISPR_API_URL")));
+}
+
+void SettingsDialogTest::globalShortcutNormalEditAndClearSucceed()
+{
+    const QKeySequence saved(QStringLiteral("Meta+D"));
     const QKeySequence custom(QStringLiteral("Ctrl+Shift+D"));
     QObject owner;
     auto backend = std::make_unique<FakeGlobalShortcutBackend>();
     auto *fake = backend.get();
     fake->savedChoiceExists = true;
     fake->savedChoice = {saved};
-    fake->unavailableShortcut = conflict;
     GlobalShortcutManager shortcut(&owner, std::move(backend));
     EnvFile env;
     SettingsDialog dialog(localSettings(), sampleCatalog(), {}, &env, nullptr, true, &shortcut);
@@ -902,7 +966,37 @@ void SettingsDialogTest::globalShortcutControlReflectsAppliesClearsAndRejectsCon
     QCOMPARE(edit->accessibleName(), QStringLiteral("Global dictation shortcut"));
     QVERIFY(help->text().contains(QStringLiteral("never takes a conflicting shortcut")));
     QCOMPARE(edit->keySequence(), saved);
-    QVERIFY(status->text().contains(saved.toString(QKeySequence::NativeText)));
+
+    edit->setKeySequence(custom);
+    QVERIFY(dialog.save());
+    QCOMPARE(shortcut.currentShortcut(), custom);
+    QVERIFY(status->text().contains(QStringLiteral("Registered globally")));
+    QCOMPARE(fake->userOverrideCalls, 1);
+
+    edit->clear();
+    QVERIFY(dialog.save());
+    QVERIFY(shortcut.currentShortcut().isEmpty());
+    QVERIFY(status->text().contains(QStringLiteral("disabled")));
+    QCOMPARE(fake->userOverrideCalls, 2);
+    QVERIFY(!env.contains(QStringLiteral("KWISPR_GLOBAL_SHORTCUT")));
+    QVERIFY(!env.contains(QStringLiteral("KWISPR_DICTATION_SHORTCUT")));
+}
+
+void SettingsDialogTest::globalShortcutConflictRejectsWithoutMutation()
+{
+    const QKeySequence saved(QStringLiteral("Meta+D"));
+    const QKeySequence conflict(QStringLiteral("Ctrl+Alt+D"));
+    QObject owner;
+    auto backend = std::make_unique<FakeGlobalShortcutBackend>();
+    auto *fake = backend.get();
+    fake->savedChoiceExists = true;
+    fake->savedChoice = {saved};
+    fake->unavailableShortcut = conflict;
+    GlobalShortcutManager shortcut(&owner, std::move(backend));
+    EnvFile env;
+    SettingsDialog dialog(localSettings(), sampleCatalog(), {}, &env, nullptr, true, &shortcut);
+    auto *edit = dialog.findChild<QKeySequenceEdit *>(QStringLiteral("globalShortcutEdit"));
+    auto *status = dialog.findChild<QLabel *>(QStringLiteral("globalShortcutStatusLabel"));
 
     edit->setKeySequence(conflict);
     QVERIFY(!dialog.save());
@@ -912,19 +1006,6 @@ void SettingsDialogTest::globalShortcutControlReflectsAppliesClearsAndRejectsCon
     QCOMPARE(shortcut.currentShortcut(), saved);
     QCOMPARE(fake->userOverrideCalls, 0);
     QVERIFY(!env.contains(QStringLiteral("KWISPR_API_URL")));
-
-    edit->setKeySequence(custom);
-    QVERIFY(dialog.save());
-    QCOMPARE(shortcut.currentShortcut(), custom);
-    QVERIFY(status->text().contains(QStringLiteral("Registered globally")));
-    QVERIFY(!env.contains(QStringLiteral("KWISPR_GLOBAL_SHORTCUT")));
-    QVERIFY(!env.contains(QStringLiteral("KWISPR_DICTATION_SHORTCUT")));
-
-    edit->clear();
-    QVERIFY(dialog.save());
-    QVERIFY(shortcut.currentShortcut().isEmpty());
-    QVERIFY(status->text().contains(QStringLiteral("disabled")));
-    QCOMPARE(fake->userOverrideCalls, 2);
 }
 
 QTEST_MAIN(SettingsDialogTest)

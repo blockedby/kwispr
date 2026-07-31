@@ -62,4 +62,12 @@ public:
     {
         return unavailableShortcut.isEmpty() || shortcut != unavailableShortcut;
     }
+
+    void changeExternally(const QKeySequence &shortcut)
+    {
+        currentChoice = shortcut.isEmpty() ? QList<QKeySequence>{}
+                                           : QList<QKeySequence>{shortcut};
+        savedChoiceExists = true;
+        savedChoice = currentChoice;
+    }
 };

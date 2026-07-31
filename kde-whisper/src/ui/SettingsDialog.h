@@ -7,6 +7,7 @@
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QKeySequence>
 #include <QSet>
 
 class GlobalShortcutManager;
@@ -82,6 +83,7 @@ private:
 
     void buildUi();
     void loadFromSettings(const KwisprSettings &settings);
+    void setGlobalShortcutClean(const QKeySequence &shortcut, bool justApplied);
     void populateModels(const QString &selectedModelId);
     void populateLanguageChoices(const QString &languageCode);
     QString selectedLanguageCode() const;
@@ -109,6 +111,8 @@ private:
     QString m_lastError;
     QString m_activeBackend;
     QHash<QString, BackendDraft> m_backendDrafts;
+    QKeySequence m_globalShortcutBaseline;
+    bool m_globalShortcutDirty = false;
     bool m_modelOperationBusy = false;
     bool m_localRuntimeInstalled = false;
     QString m_activeModelOperation;
