@@ -7,8 +7,10 @@
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QKeySequence>
 #include <QSet>
 
+class GlobalShortcutManager;
 class ModelManager;
 class QCheckBox;
 class QCloseEvent;
@@ -18,6 +20,7 @@ class QDoubleSpinBox;
 class QFormLayout;
 class QGroupBox;
 class QLabel;
+class QKeySequenceEdit;
 class QLineEdit;
 class QPlainTextEdit;
 class QProgressBar;
@@ -34,6 +37,7 @@ public:
                             EnvFile *env = nullptr,
                             ModelManager *modelManager = nullptr,
                             bool localRuntimeInstalled = true,
+                            GlobalShortcutManager *globalShortcut = nullptr,
                             QWidget *parent = nullptr);
 
     bool save();
@@ -79,6 +83,7 @@ private:
 
     void buildUi();
     void loadFromSettings(const KwisprSettings &settings);
+    void setGlobalShortcutClean(const QKeySequence &shortcut, bool justApplied);
     void populateModels(const QString &selectedModelId);
     void populateLanguageChoices(const QString &languageCode);
     QString selectedLanguageCode() const;
@@ -101,10 +106,13 @@ private:
     QSet<QString> m_installedModelIds;
     EnvFile *m_env = nullptr;
     ModelManager *m_modelManager = nullptr;
+    GlobalShortcutManager *m_globalShortcut = nullptr;
     KwisprSettings m_settings;
     QString m_lastError;
     QString m_activeBackend;
     QHash<QString, BackendDraft> m_backendDrafts;
+    QKeySequence m_globalShortcutBaseline;
+    bool m_globalShortcutDirty = false;
     bool m_modelOperationBusy = false;
     bool m_localRuntimeInstalled = false;
     QString m_activeModelOperation;
@@ -142,6 +150,8 @@ private:
     QPlainTextEdit *m_promptEdit = nullptr;
     QLabel *m_promptLabel = nullptr;
     QGroupBox *m_vadGroup = nullptr;
+    QKeySequenceEdit *m_globalShortcutEdit = nullptr;
+    QLabel *m_globalShortcutStatusLabel = nullptr;
     QCheckBox *m_autopasteCheck = nullptr;
     QComboBox *m_pasteHotkeyCombo = nullptr;
     QDoubleSpinBox *m_autopasteDelaySpin = nullptr;

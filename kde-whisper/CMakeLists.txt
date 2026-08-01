@@ -22,9 +22,10 @@ find_package(ECM 6.0 REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
 
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Test Network)
-find_package(KF6 REQUIRED COMPONENTS CoreAddons StatusNotifierItem)
+find_package(KF6 REQUIRED COMPONENTS CoreAddons DBusAddons GlobalAccel StatusNotifierItem)
 
 add_library(kde_whisper_core STATIC
+    src/ActivationRouting.cpp
     src/AppMetadata.cpp
     src/config/EnvFile.cpp
     src/config/KwisprSettings.cpp
@@ -34,17 +35,18 @@ add_library(kde_whisper_core STATIC
     src/runtime/RetryState.cpp
     src/models/ModelCatalog.cpp
     src/models/ModelManager.cpp
+    src/ui/GlobalShortcut.cpp
     src/ui/SettingsDialog.cpp
     src/ui/TrayApp.cpp
     src/ui/TrayController.cpp
 )
 target_include_directories(kde_whisper_core PUBLIC src)
-target_link_libraries(kde_whisper_core PUBLIC Qt6::Core Qt6::Network Qt6::Widgets KF6::StatusNotifierItem)
+target_link_libraries(kde_whisper_core PUBLIC Qt6::Core Qt6::Network Qt6::Widgets KF6::GlobalAccel KF6::StatusNotifierItem)
 
 add_executable(kde-whisper
     src/main.cpp
 )
-target_link_libraries(kde-whisper PRIVATE kde_whisper_core Qt6::Widgets KF6::CoreAddons)
+target_link_libraries(kde-whisper PRIVATE kde_whisper_core Qt6::Widgets KF6::CoreAddons KF6::DBusAddons)
 
 install(TARGETS kde-whisper RUNTIME DESTINATION "${CMAKE_INSTALL_LIBDIR}/kwispr")
 install(PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/kwispr"
@@ -77,6 +79,15 @@ if(BUILD_TESTING)
             -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
             -DBUILD_DIR=${CMAKE_BINARY_DIR}
             -P ${CMAKE_SOURCE_DIR}/tests/install_metadata_test.cmake)
+    add_executable(ActivationRoutingTest tests/activation_routing_test.cpp)
+    target_link_libraries(ActivationRoutingTest PRIVATE kde_whisper_core Qt6::Test)
+    add_test(NAME ActivationRoutingTest COMMAND ActivationRoutingTest)
+
+    add_executable(GlobalShortcutTest tests/global_shortcut_test.cpp)
+    target_link_libraries(GlobalShortcutTest PRIVATE kde_whisper_core Qt6::Test Qt6::Widgets)
+    add_test(NAME GlobalShortcutTest COMMAND GlobalShortcutTest)
+    set_tests_properties(GlobalShortcutTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(TrayControllerTest tests/tray_controller_test.cpp)
     target_link_libraries(TrayControllerTest PRIVATE kde_whisper_core Qt6::Test Qt6::Widgets)
     add_test(NAME TrayControllerTest COMMAND TrayControllerTest)

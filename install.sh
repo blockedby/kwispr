@@ -349,7 +349,7 @@ prepare_native_arch_packages() {
 
   command -v "$PACMAN_BIN" >/dev/null 2>&1 || return 0
 
-  runtime_packages=(ffmpeg curl jq python wl-clipboard libnotify qt6-base kcoreaddons kstatusnotifieritem)
+  runtime_packages=(ffmpeg curl jq python wl-clipboard libnotify qt6-base kcoreaddons kdbusaddons kglobalaccel kstatusnotifieritem)
   command -v pactl >/dev/null 2>&1 || runtime_packages+=(pipewire-pulse)
   if [[ "$WITH_LOCAL_STT" == 1 ]]; then
     runtime_packages+=(vulkan-icd-loader)

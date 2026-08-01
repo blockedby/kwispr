@@ -1,7 +1,9 @@
+#include "ActivationRouting.h"
 #include "AppMetadata.h"
 #include "ui/TrayApp.h"
 
 #include <KAboutData>
+#include <KDBusService>
 
 #include <QApplication>
 #include <QDir>
@@ -46,12 +48,21 @@ int main(int argc, char *argv[])
         KAboutLicense::GPL_V3);
     KAboutData::setApplicationData(aboutData);
 
+    KDBusService dbusService(KDBusService::Unique);
+
     const QString runtimeRoot = detectRuntimeRoot(QCoreApplication::applicationFilePath());
     const QString cacheDir = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
                                  .filePath(QStringLiteral("kwispr"));
     TrayApp tray(runtimeRoot, cacheDir);
 
-    if (app.arguments().contains(QStringLiteral("--settings"))) {
+    QObject::connect(&dbusService, &KDBusService::activateRequested, &tray,
+                     [&tray](const QStringList &arguments, const QString &) {
+        if (ActivationRouting::actionForArguments(arguments) == ActivationRouting::Action::OpenSettings) {
+            tray.openSettings();
+        }
+    });
+
+    if (ActivationRouting::actionForArguments(app.arguments()) == ActivationRouting::Action::OpenSettings) {
         QTimer::singleShot(0, &tray, [&tray]() {
             tray.openSettings();
             qApp->quit();

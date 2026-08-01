@@ -8,10 +8,12 @@
 #include "runtime/LocalSttClient.h"
 #include "runtime/ProcessRunner.h"
 #include "runtime/RetryState.h"
+#include "ui/GlobalShortcut.h"
 #include "ui/SettingsDialog.h"
 
 #include <KStatusNotifierItem>
 
+#include <QAction>
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -45,10 +47,17 @@ void loadConfigWithLegacyMigration(EnvFile *env, const QString &configPath, cons
 }
 }
 
-TrayApp::TrayApp(QString repoRoot, QString cacheDir, QObject *parent)
+TrayApp::TrayApp(QString repoRoot,
+                 QString cacheDir,
+                 QObject *parent,
+                 std::unique_ptr<IGlobalShortcutBackend> shortcutBackend,
+                 std::unique_ptr<ProcessRunner> recordingRunner)
     : QObject(parent)
     , m_repoRoot(std::move(repoRoot))
     , m_cacheDir(std::move(cacheDir))
+    , m_recordingRunner(recordingRunner ? std::move(recordingRunner)
+                                        : std::make_unique<ProcessRunner>())
+    , m_globalShortcut(std::make_unique<GlobalShortcutManager>(this, std::move(shortcutBackend)))
     , m_controller(std::make_unique<TrayController>(this, m_cacheDir, this))
     , m_notifier(new KStatusNotifierItem(QStringLiteral("org.kwispr.KdeWhisper"), this))
 {
@@ -57,14 +66,16 @@ TrayApp::TrayApp(QString repoRoot, QString cacheDir, QObject *parent)
     m_notifier->setCategory(KStatusNotifierItem::ApplicationStatus);
     m_notifier->setContextMenu(m_controller->menu());
     m_notifier->setStatus(KStatusNotifierItem::Active);
+
+    connect(m_globalShortcut->action(), &QAction::triggered,
+            this, &TrayApp::toggleRecording);
 }
 
 TrayApp::~TrayApp() = default;
 
 void TrayApp::toggleRecording()
 {
-    ProcessRunner runner;
-    KwisprController controller(m_repoRoot, &runner);
+    KwisprController controller(m_repoRoot, m_recordingRunner.get());
     const ProcessResult result = controller.toggleRecording();
     if (result.exitCode != 0) {
         QMessageBox::warning(nullptr, QStringLiteral("KDE Whisper"), result.stderrText.isEmpty() ? QStringLiteral("Toggle recording failed.") : result.stderrText);
@@ -108,7 +119,7 @@ void TrayApp::openSettings()
     QString previousLocalSttHost = settings.localSttHost;
     int previousLocalSttPort = settings.localSttPort;
     SettingsDialog dialog(settings, catalog, installedModelIds, &env, &modelManager,
-                          localRuntimeInstalled);
+                          localRuntimeInstalled, m_globalShortcut.get());
     m_settingsDialog = &dialog;
     connect(&dialog, &SettingsDialog::settingsSaved, this,
             [this, &env, envPath, localRuntimeInstalled, previousLocalSttHost, previousLocalSttPort](const KwisprSettings &savedSettings) mutable {

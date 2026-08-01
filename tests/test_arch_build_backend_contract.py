@@ -26,6 +26,8 @@ RUNTIME_PACKAGES = {
     "libnotify",
     "qt6-base",
     "kcoreaddons",
+    "kdbusaddons",
+    "kglobalaccel",
     "kstatusnotifieritem",
     "pipewire-pulse",
     "vulkan-icd-loader",
@@ -404,6 +406,7 @@ class ArchBuildBackendContractTest(unittest.TestCase):
     def test_new_runtime_packages_and_dependencies_remain_installed(self) -> None:
         initial = dict(self.base_state)
         initial.pop("ffmpeg")
+        initial.pop("kdbusaddons")
         self._write_state(initial)
 
         result = self.run_installer("--without-local-stt", "--allow-package-install")
@@ -411,6 +414,7 @@ class ArchBuildBackendContractTest(unittest.TestCase):
         final = self._read_state()
         self.assertEqual(final["ffmpeg"], "explicit")
         self.assertEqual(final["ffmpeg-runtime-lib"], "dependency")
+        self.assertEqual(final["kdbusaddons"], "explicit")
         self.assertEqual(final["preexisting-dependency"], "dependency")
         self.assertFalse(any(operation["kind"] == "remove" for operation in self._operations()))
 

@@ -1,6 +1,7 @@
 #include "ui/SettingsDialog.h"
 
 #include "models/ModelManager.h"
+#include "ui/GlobalShortcut.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -14,6 +15,7 @@
 #include <QGridLayout>
 #include <QHostAddress>
 #include <QLabel>
+#include <QKeySequenceEdit>
 #include <QLineEdit>
 #include <QLocale>
 #include <QMessageBox>
@@ -96,14 +98,16 @@ SettingsDialog::SettingsDialog(const KwisprSettings &settings,
                                EnvFile *env,
                                ModelManager *modelManager,
                                bool localRuntimeInstalled,
+                               GlobalShortcutManager *globalShortcut,
                                QWidget *parent)
     : QDialog(parent)
     , m_catalog(catalog)
     , m_installedModelIds(installedModelIds.begin(), installedModelIds.end())
     , m_env(env)
     , m_modelManager(modelManager)
-    , m_localRuntimeInstalled(localRuntimeInstalled)
+    , m_globalShortcut(globalShortcut)
     , m_settings(settings)
+    , m_localRuntimeInstalled(localRuntimeInstalled)
 {
     buildUi();
     populateModels(QString());
@@ -179,6 +183,25 @@ bool SettingsDialog::save()
         m_lastError = errors.join(QStringLiteral("\n"));
         m_modelStatusLabel->setText(m_lastError);
         return false;
+    }
+
+    if (m_globalShortcut) {
+        if (!m_globalShortcutDirty) {
+            // Other KDE tools may change the registration while this dialog is open.
+            // A clean shortcut field follows that authoritative value without writing it.
+            setGlobalShortcutClean(m_globalShortcut->currentShortcut(), false);
+        } else {
+            QString shortcutError;
+            if (!m_globalShortcut->applyShortcutIfCurrent(
+                    m_globalShortcutEdit->keySequence(), m_globalShortcutBaseline,
+                    &shortcutError)) {
+                m_lastError = shortcutError;
+                m_globalShortcutStatusLabel->setText(shortcutError);
+                m_globalShortcutEdit->setFocus(Qt::OtherFocusReason);
+                return false;
+            }
+            setGlobalShortcutClean(m_globalShortcut->currentShortcut(), true);
+        }
     }
 
     if (m_env) {
@@ -357,6 +380,31 @@ void SettingsDialog::buildUi()
     pasteForm->addRow(QStringLiteral("Paste delay"), m_autopasteDelaySpin);
     root->addWidget(pasteGroup);
 
+    auto *shortcutGroup = new QGroupBox(QStringLiteral("Global dictation shortcut"), this);
+    shortcutGroup->setObjectName(QStringLiteral("globalShortcutGroup"));
+    auto *shortcutForm = new QFormLayout(shortcutGroup);
+    m_globalShortcutEdit = new QKeySequenceEdit(shortcutGroup);
+    m_globalShortcutEdit->setObjectName(QStringLiteral("globalShortcutEdit"));
+    m_globalShortcutEdit->setClearButtonEnabled(true);
+    m_globalShortcutEdit->setMaximumSequenceLength(1);
+    m_globalShortcutEdit->setAccessibleName(QStringLiteral("Global dictation shortcut"));
+    auto *shortcutLabel = formLabel(QStringLiteral("Shortcut"),
+                                    QStringLiteral("globalShortcutLabel"), shortcutGroup);
+    shortcutLabel->setBuddy(m_globalShortcutEdit);
+    shortcutForm->addRow(shortcutLabel, m_globalShortcutEdit);
+    auto *shortcutHelp = new QLabel(
+        QStringLiteral("Record one key combination, or clear it to disable the native shortcut. "
+                       "Apply saves it in KDE Global Shortcuts immediately; Kwispr never takes a conflicting shortcut."),
+        shortcutGroup);
+    shortcutHelp->setObjectName(QStringLiteral("globalShortcutHelpLabel"));
+    shortcutHelp->setWordWrap(true);
+    shortcutForm->addRow(QString(), shortcutHelp);
+    m_globalShortcutStatusLabel = new QLabel(shortcutGroup);
+    m_globalShortcutStatusLabel->setObjectName(QStringLiteral("globalShortcutStatusLabel"));
+    m_globalShortcutStatusLabel->setWordWrap(true);
+    shortcutForm->addRow(QString(), m_globalShortcutStatusLabel);
+    root->addWidget(shortcutGroup);
+
     m_vadGroup = new QGroupBox(QStringLiteral("Voice activity detection"), this);
     m_vadGroup->setObjectName(QStringLiteral("vadGroup"));
     auto *vadForm = new QFormLayout(m_vadGroup);
@@ -394,6 +442,15 @@ void SettingsDialog::buildUi()
     connect(m_localModelCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() {
         populateLanguageChoices(selectedLanguageCode());
         updateBackendVisibility();
+    });
+    connect(m_globalShortcutEdit, &QKeySequenceEdit::keySequenceChanged,
+            this, [this](const QKeySequence &sequence) {
+        m_globalShortcutDirty = true;
+        m_globalShortcutStatusLabel->setText(
+            sequence.isEmpty()
+                ? QStringLiteral("The global shortcut will be disabled when you apply settings.")
+                : QStringLiteral("Press Apply to register %1 globally.")
+                      .arg(sequence.toString(QKeySequence::NativeText)));
     });
     connect(m_vadEnabledCheck, &QCheckBox::toggled, this, [this]() {
         updateVadControls();
@@ -475,9 +532,36 @@ void SettingsDialog::loadFromSettings(const KwisprSettings &settings)
     m_vadThresholdSpin->setValue(settings.vadThreshold);
     m_vadFrameMsEdit->setText(QString::number(settings.vadFrameMs));
 
+    if (m_globalShortcut) {
+        setGlobalShortcutClean(m_globalShortcut->currentShortcut(), false);
+        m_globalShortcutEdit->setEnabled(true);
+    } else {
+        m_globalShortcutEdit->setEnabled(false);
+        m_globalShortcutStatusLabel->setText(QStringLiteral("Global shortcut management is available from the running tray."));
+    }
+
     m_activeBackend = backendLabel;
     saveActiveBackendDraft();
     updateBackendVisibility();
+}
+
+void SettingsDialog::setGlobalShortcutClean(const QKeySequence &shortcut, bool justApplied)
+{
+    m_globalShortcutBaseline = shortcut;
+    m_globalShortcutDirty = false;
+    const QSignalBlocker blocker(m_globalShortcutEdit);
+    m_globalShortcutEdit->setKeySequence(shortcut);
+    if (shortcut.isEmpty()) {
+        m_globalShortcutStatusLabel->setText(
+            justApplied
+                ? QStringLiteral("Global dictation shortcut disabled. Use ~/.local/bin/kwispr toggle as a fallback.")
+                : QStringLiteral("No native global shortcut is registered. ~/.local/bin/kwispr toggle remains available."));
+    } else {
+        m_globalShortcutStatusLabel->setText(
+            justApplied
+                ? QStringLiteral("Registered globally as %1.").arg(shortcut.toString(QKeySequence::NativeText))
+                : QStringLiteral("Currently registered globally as %1.").arg(shortcut.toString(QKeySequence::NativeText)));
+    }
 }
 
 void SettingsDialog::populateModels(const QString &selectedModelId)

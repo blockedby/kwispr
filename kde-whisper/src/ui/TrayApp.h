@@ -1,5 +1,7 @@
 #pragma once
 
+#include "runtime/ProcessRunner.h"
+#include "ui/GlobalShortcut.h"
 #include "ui/TrayController.h"
 
 #include <QObject>
@@ -16,7 +18,11 @@ class TrayApp : public QObject, public ITrayActions
 {
     Q_OBJECT
 public:
-    explicit TrayApp(QString repoRoot, QString cacheDir, QObject *parent = nullptr);
+    explicit TrayApp(QString repoRoot,
+                     QString cacheDir,
+                     QObject *parent = nullptr,
+                     std::unique_ptr<IGlobalShortcutBackend> shortcutBackend = {},
+                     std::unique_ptr<ProcessRunner> recordingRunner = {});
     ~TrayApp() override;
 
     void toggleRecording() override;
@@ -30,6 +36,8 @@ public:
 private:
     QString m_repoRoot;
     QString m_cacheDir;
+    std::unique_ptr<ProcessRunner> m_recordingRunner;
+    std::unique_ptr<GlobalShortcutManager> m_globalShortcut;
     std::unique_ptr<TrayController> m_controller;
     KStatusNotifierItem *m_notifier = nullptr;
     QPointer<SettingsDialog> m_settingsDialog;

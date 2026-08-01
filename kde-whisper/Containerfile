@@ -8,6 +8,8 @@ RUN pacman -Syu --noconfirm --needed \
     qt6-base \
     qt6-tools \
     kcoreaddons \
+    kdbusaddons \
+    kglobalaccel \
     kconfig \
     kconfigwidgets \
     knotifications \
