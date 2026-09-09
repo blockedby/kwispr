@@ -17,43 +17,30 @@
 ```bash
 git clone https://github.com/blockedby/kwispr.git
 cd kwispr
-cp .env.example .env
-./setup.sh
+./setup.sh    # системные зависимости
+./install.sh  # приложение в ~/.local
 ```
 
-Откройте `.env`, выберите backend и назначьте в KDE горячую клавишу на:
+Откройте **Kwispr Settings**, выберите backend и назначьте глобальную горячую клавишу. Первое нажатие начинает запись, второе — останавливает её и запускает распознавание.
 
-```text
-/полный/путь/до/kwispr/kwispr.sh toggle
-```
-
-Первое нажатие начинает запись, второе — останавливает её и запускает распознавание.
+Настройки хранятся в `~/.config/kwispr/config.env`. Для запуска напрямую из репозитория можно скопировать `.env.example` в `.env`.
 
 ## Локальное распознавание
 
-Для приватной офлайн-диктовки установите модель из встроенного проверяемого каталога:
+Для приватной офлайн-диктовки установите локальный runtime и модель из встроенного проверяемого каталога:
 
 ```bash
+./install.sh --with-local-stt
 ./kwispr-models.py list
 ./kwispr-models.py download whisper-large-v3-turbo
-./rust-local-stt/build-in-podman.sh
+systemctl --user enable --now kwispr-local-stt.service
 ```
 
-Запустите сервер:
-
-```bash
-KWISPR_MODEL_DIR=~/.local/share/kwispr/models \
-  ./rust-local-stt/target/release/kwispr-local-stt \
-  --host 127.0.0.1 \
-  --port 9000 \
-  --catalog models/local-stt-catalog.json
-```
-
-Настройте `.env`:
+Эквивалентная настройка через `~/.config/kwispr/config.env`:
 
 ```bash
 KWISPR_BACKEND=openai-transcriptions
-KWISPR_API_URL=http://127.0.0.1:9000/v1/audio/transcriptions
+KWISPR_API_URL=http://127.0.0.1:19650/v1/audio/transcriptions
 KWISPR_MODEL=whisper-large-v3-turbo
 KWISPR_API_KEY=
 KWISPR_AUTOPASTE=1
@@ -132,7 +119,7 @@ KDE-приложение использует тот же проверенный
 | Микрофон не записывается | `pactl list sources short` и `KWISPR_PULSE_SOURCE` |
 | Конец фразы обрезается | Увеличить `KWISPR_VAD_PADDING_MS`, например до `1500` |
 | Текст не вставляется | Запущен ли `ydotoold`; попробовать `shift-insert` |
-| Локальный сервер недоступен | `curl http://127.0.0.1:9000/health` |
+| Локальный сервер недоступен | `curl http://127.0.0.1:19650/health` |
 | Ошибка `unknown model` | Скачать модель через `kwispr-models.py download` |
 
 ## Разработка
