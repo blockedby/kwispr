@@ -1,33 +1,33 @@
 # Kwispr
 
-> Быстрая голосовая диктовка для Linux, Wayland и KDE.
+> Fast voice dictation for Linux, Wayland, and KDE.
 
-Нажмите горячую клавишу, произнесите текст и нажмите её снова — Kwispr распознает речь, скопирует результат в буфер обмена и при необходимости сразу вставит его в активное окно.
+Press a hotkey, speak, and press it again. Kwispr transcribes your speech, copies the result to the clipboard, and can paste it directly into the focused app.
 
-- локальное распознавание без облака;
-- OpenAI и OpenRouter;
-- русский, английский и смешанная речь;
-- KDE tray, уведомления и звуковые сигналы;
-- архив записей и повторная отправка при ошибке.
+- private local transcription;
+- OpenAI and OpenRouter support;
+- Russian, English, and mixed-language speech;
+- KDE tray, notifications, and sound cues;
+- recording archive with retry support.
 
 ![Kwispr demo](demo.gif)
 
-## Быстрый старт
+## Quick start
 
 ```bash
 git clone https://github.com/blockedby/kwispr.git
 cd kwispr
-./setup.sh    # системные зависимости
-./install.sh  # приложение в ~/.local
+./setup.sh    # system dependencies
+./install.sh  # install the app under ~/.local
 ```
 
-Откройте **Kwispr Settings**, выберите backend и назначьте глобальную горячую клавишу. Первое нажатие начинает запись, второе — останавливает её и запускает распознавание.
+Open **Kwispr Settings**, choose a backend, and assign a global hotkey. The first press starts recording; the second stops and transcribes it.
 
-Настройки хранятся в `~/.config/kwispr/config.env`. Для запуска напрямую из репозитория можно скопировать `.env.example` в `.env`.
+Settings are stored in `~/.config/kwispr/config.env`. To run directly from the repository, copy `.env.example` to `.env`.
 
-## Локальное распознавание
+## Local transcription
 
-Для приватной офлайн-диктовки установите локальный runtime и модель из встроенного проверяемого каталога:
+For private offline dictation, install the local runtime and a model from the built-in verified catalog:
 
 ```bash
 ./install.sh --with-local-stt
@@ -36,7 +36,7 @@ cd kwispr
 systemctl --user enable --now kwispr-local-stt.service
 ```
 
-Эквивалентная настройка через `~/.config/kwispr/config.env`:
+Equivalent settings in `~/.config/kwispr/config.env`:
 
 ```bash
 KWISPR_BACKEND=openai-transcriptions
@@ -46,22 +46,22 @@ KWISPR_API_KEY=
 KWISPR_AUTOPASTE=1
 KWISPR_PASTE_HOTKEY=shift-insert
 
-# Не обрезать тихий конец фразы слишком рано
+# Keep quiet phrase endings from being trimmed too early
 KWISPR_VAD_ENABLED=1
 KWISPR_VAD_PROVIDER=energy
 KWISPR_VAD_THRESHOLD=0.01
 KWISPR_VAD_PADDING_MS=1500
 ```
 
-Подходящие модели:
+Suggested models:
 
-| Задача | Модель |
+| Use case | Model |
 |---|---|
-| Русская речь | `gigaam-v3-e2e-ctc` |
-| Русский + English | `whisper-large-v3-turbo` |
-| Мультиязычная речь | `parakeet-tdt-0.6b-v3` |
+| Russian speech | `gigaam-v3-e2e-ctc` |
+| Mixed Russian and English | `whisper-large-v3-turbo` |
+| Multilingual speech | `parakeet-tdt-0.6b-v3` |
 
-## Облачные backend-ы
+## Cloud backends
 
 <details>
 <summary><strong>OpenAI Whisper</strong></summary>
@@ -88,41 +88,41 @@ KWISPR_AUDIO_FORMAT=wav
 
 </details>
 
-## Команды
+## Commands
 
 ```bash
-./kwispr.sh toggle          # начать или закончить диктовку
-./kwispr.sh retry file.wav  # повторить неудачное распознавание
-./kwispr-models.py list     # показать локальные модели
+./kwispr.sh toggle          # start or stop dictation
+./kwispr.sh retry file.wav  # retry a failed transcription
+./kwispr-models.py list     # list local models
 ```
 
-Записи и расшифровки хранятся в `~/.cache/kwispr/` и удаляются через 30 дней.
+Recordings and transcripts are stored in `~/.cache/kwispr/` and removed after 30 days.
 
-## Как это устроено
+## How it works
 
 ```text
-Горячая клавиша / KDE tray
+Global hotkey / KDE tray
           │
           ▼
       kwispr.sh ──► WAV ──► OpenAI / OpenRouter
-                         └─► локальный Rust STT ──► GGUF-модель
+                         └─► local Rust STT ──► GGUF model
           │
           └──────────────► clipboard + auto-paste
 ```
 
-KDE-приложение использует тот же проверенный `kwispr.sh`; CLI остаётся рабочим независимо от tray.
+The KDE app uses the same proven `kwispr.sh` path, so the CLI keeps working independently of the tray.
 
-## Если что-то не работает
+## Troubleshooting
 
-| Симптом | Что проверить |
+| Symptom | What to check |
 |---|---|
-| Микрофон не записывается | `pactl list sources short` и `KWISPR_PULSE_SOURCE` |
-| Конец фразы обрезается | Увеличить `KWISPR_VAD_PADDING_MS`, например до `1500` |
-| Текст не вставляется | Запущен ли `ydotoold`; попробовать `shift-insert` |
-| Локальный сервер недоступен | `curl http://127.0.0.1:19650/health` |
-| Ошибка `unknown model` | Скачать модель через `kwispr-models.py download` |
+| Microphone is not recording | `pactl list sources short` and `KWISPR_PULSE_SOURCE` |
+| The end of a phrase is clipped | Increase `KWISPR_VAD_PADDING_MS`, for example to `1500` |
+| Text is not pasted | Ensure `ydotoold` is running; try `shift-insert` |
+| Local server is unavailable | `curl http://127.0.0.1:19650/health` |
+| `unknown model` error | Download it with `kwispr-models.py download` |
 
-## Разработка
+## Development
 
 ```bash
 python3 -m unittest discover
@@ -130,8 +130,8 @@ python3 -m unittest discover
 ./rust-local-stt/build-in-podman.sh
 ```
 
-Подробнее: [локальный STT](docs/local-stt.md) · [KDE-приложение](docs/kde-whisper.md)
+Learn more: [local STT](docs/local-stt.md) · [KDE app](docs/kde-whisper.md)
 
-## Лицензия
+## License
 
 [MIT](LICENSE)
