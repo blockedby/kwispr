@@ -4,6 +4,7 @@
 
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -23,6 +24,8 @@
 #include <QShowEvent>
 #include <QSpinBox>
 #include <QStandardPaths>
+#include <QStyle>
+#include <QStyleOptionComboBox>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -48,7 +51,7 @@ QLabel *wrapLabel(const QString &text, QWidget *parent)
     return label;
 }
 
-void fillSources(QComboBox *combo, const QJsonArray &sources, const QString &selected)
+void fillSources(QComboBox *combo, const QJsonArray &sources, const QString &selected, const QString &systemDefault)
 {
     combo->clear();
     for (const auto &value : sources) {
@@ -58,8 +61,12 @@ void fillSources(QComboBox *combo, const QJsonArray &sources, const QString &sel
             continue;
         }
         const QString description = source.value(QStringLiteral("description")).toString(name);
-        combo->addItem(description, name);
+        const QString label = name == systemDefault
+            ? QCoreApplication::translate("MeetingDialog", "%1 (System default)").arg(description)
+            : description;
+        combo->addItem(label, name);
         combo->setItemData(combo->count() - 1, name, Qt::ToolTipRole);
+        combo->setItemData(combo->count() - 1, description, Qt::UserRole + 1);
     }
     const int selectedIndex = combo->findData(selected);
     // An unplugged preferred source must not silently select a different device.
@@ -132,6 +139,9 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     m_micCombo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     m_micCombo->setPlaceholderText(tr("Select a microphone"));
     form->addRow(tr("&Microphone — You"), m_micCombo);
+    m_micDetailsLabel = wrapLabel(QString(), body);
+    m_micDetailsLabel->setObjectName(QStringLiteral("meetingMicrophoneDetails"));
+    form->addRow(m_micDetailsLabel);
     m_monitorCombo = new QComboBox(body);
     m_monitorCombo->setObjectName(QStringLiteral("meetingMonitor"));
     m_monitorCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -139,6 +149,15 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     m_monitorCombo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     m_monitorCombo->setPlaceholderText(tr("Select the call's audio output"));
     form->addRow(tr("Call audio &output"), m_monitorCombo);
+    m_monitorDetailsLabel = wrapLabel(QString(), body);
+    m_monitorDetailsLabel->setObjectName(QStringLiteral("meetingMonitorDetails"));
+    form->addRow(m_monitorDetailsLabel);
+    for (auto *detail : {m_micDetailsLabel, m_monitorDetailsLabel}) {
+        auto policy = detail->sizePolicy();
+        policy.setHorizontalPolicy(QSizePolicy::Ignored);
+        detail->setSizePolicy(policy);
+        detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    }
     form->addRow(wrapLabel(tr("All sound played on this output is recorded. Use headphones to keep the call audio out of your microphone."), body));
     m_refreshButton = new QPushButton(tr("Refresh audio devices"), body);
     m_refreshButton->setObjectName(QStringLiteral("meetingRefresh"));
@@ -208,6 +227,8 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     connect(m_setupButton, &QPushButton::clicked, this, &MeetingDialog::setupModels);
     connect(m_micCombo, &QComboBox::currentIndexChanged, this, [this] { updateUi(); });
     connect(m_monitorCombo, &QComboBox::currentIndexChanged, this, [this] { updateUi(); });
+    m_micCombo->installEventFilter(this);
+    m_monitorCombo->installEventFilter(this);
     connect(m_outputEdit, &QLineEdit::textChanged, this, [this] { updateUi(); });
     connect(m_browseButton, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getExistingDirectory(this, tr("Save meetings in"), m_outputEdit->text());
@@ -296,8 +317,10 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
             const auto sources = doc.object();
             const QString mic = m_micCombo->currentData().toString();
             const QString monitor = m_monitorCombo->currentData().toString();
-            fillSources(m_micCombo, sources.value(QStringLiteral("microphones")).toArray(), mic.isEmpty() ? (m_savedMic.isEmpty() ? sources.value(QStringLiteral("default_microphone")).toString() : m_savedMic) : mic);
-            fillSources(m_monitorCombo, sources.value(QStringLiteral("monitors")).toArray(), monitor.isEmpty() ? (m_savedMonitor.isEmpty() ? sources.value(QStringLiteral("default_monitor")).toString() : m_savedMonitor) : monitor);
+            m_defaultMic = sources.value(QStringLiteral("default_microphone")).toString();
+            m_defaultMonitor = sources.value(QStringLiteral("default_monitor")).toString();
+            fillSources(m_micCombo, sources.value(QStringLiteral("microphones")).toArray(), mic.isEmpty() ? (m_savedMic.isEmpty() ? m_defaultMic : m_savedMic) : mic, m_defaultMic);
+            fillSources(m_monitorCombo, sources.value(QStringLiteral("monitors")).toArray(), monitor.isEmpty() ? (m_savedMonitor.isEmpty() ? m_defaultMonitor : m_savedMonitor) : monitor, m_defaultMonitor);
             m_sourcesLoaded = true;
             if (!m_micCombo->count() || !m_monitorCombo->count()) {
                 m_error = tr("A microphone and an audio output are required. Connect them, then refresh audio devices.");
@@ -382,6 +405,14 @@ void MeetingDialog::reject()
         return;
     }
     QDialog::reject();
+}
+
+bool MeetingDialog::eventFilter(QObject *watched, QEvent *event)
+{
+    if ((watched == m_micCombo || watched == m_monitorCombo) && event->type() == QEvent::Resize) {
+        updateDeviceDetails();
+    }
+    return QDialog::eventFilter(watched, event);
 }
 
 void MeetingDialog::loadSources()
@@ -520,6 +551,7 @@ void MeetingDialog::updatePolling()
 void MeetingDialog::updateUi()
 {
     updatePolling();
+    updateDeviceDetails();
     const bool capturing = captureActive();
     const bool processing = m_state == QStringLiteral("processing");
     const bool editable = !capturing && !processing && !m_commandBusy && !m_setupBusy;
@@ -560,4 +592,32 @@ void MeetingDialog::updateUi()
     const QString activeSources = tr("Microphone: %1\nCall audio: %2").arg(m_activeMic, m_activeMonitor);
     m_activeSourcesLabel->setText(activeSources);
     m_activeSourcesLabel->setVisible(capturing && (!m_activeMic.isEmpty() || !m_activeMonitor.isEmpty()));
+}
+
+void MeetingDialog::updateDeviceDetails()
+{
+    const auto update = [this](QComboBox *combo, QLabel *details, const QString &systemDefault) {
+        const QString selected = combo->currentText();
+        const QString source = combo->currentData().toString();
+        const int defaultIndex = combo->findData(systemDefault);
+        const QString defaultDescription = defaultIndex >= 0 ? combo->itemData(defaultIndex, Qt::UserRole + 1).toString() : systemDefault;
+        QStyleOptionComboBox option;
+        option.initFrom(combo);
+        option.currentText = selected;
+        option.frame = combo->hasFrame();
+        const QRect textRect = combo->style()->subControlRect(QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, combo);
+        QStringList lines;
+        if (!selected.isEmpty() && combo->fontMetrics().horizontalAdvance(selected) > textRect.width()) {
+            lines.append(tr("Selected: %1").arg(selected));
+        }
+        if (m_sourcesLoaded && !systemDefault.isEmpty() && source != systemDefault) {
+            lines.append(tr("System default: %1").arg(defaultDescription));
+        }
+        details->setText(lines.join(QLatin1Char('\n')));
+        details->setVisible(!lines.isEmpty());
+        combo->setToolTip(selected.isEmpty() ? QString() : selected + QLatin1Char('\n') + source);
+        combo->setAccessibleDescription(systemDefault.isEmpty() ? selected : tr("Selected: %1. System default: %2").arg(selected, defaultDescription));
+    };
+    update(m_micCombo, m_micDetailsLabel, m_defaultMic);
+    update(m_monitorCombo, m_monitorDetailsLabel, m_defaultMonitor);
 }

@@ -42,6 +42,9 @@ with (root / 'calls.jsonl').open('a') as f:
 state_file = root / 'state.json'
 state = json.loads(state_file.read_text()) if state_file.exists() else {'state': 'idle'}
 if args[0] == 'sources':
+    if (root / 'sources.json').exists():
+        print((root / 'sources.json').read_text())
+        sys.exit(0)
     if (root / 'sources-fail').exists():
         print(json.dumps({'state':'error', 'message':'PulseAudio unavailable'}), file=sys.stderr)
         sys.exit(1)
@@ -130,6 +133,8 @@ private slots:
     void failedTranscriptionCanRetry();
     void missingSourcesDisableStartAndCanRefresh();
     void unavailableSavedSourceNeedsExplicitSelection();
+    void deviceDefaultsAreAnnotatedWithoutChangingSavedSelections();
+    void longSelectedDeviceNamesRemainVisible();
     void disappearingWorkerDoesNotTrapWindowInStartingState();
     void modelSetupIsAsynchronousAndReportsFailure();
     void pollingDoesNotOverlapOrRunWhileHidden();
@@ -263,6 +268,97 @@ void MeetingDialogTest::unavailableSavedSourceNeedsExplicitSelection()
     QVERIFY(!control<QPushButton>(dialog, "meetingStart")->isEnabled());
     mic->setCurrentIndex(0);
     QTRY_VERIFY(control<QPushButton>(dialog, "meetingStart")->isEnabled());
+}
+
+void MeetingDialogTest::deviceDefaultsAreAnnotatedWithoutChangingSavedSelections()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    auto sources = QJsonObject{
+        {QStringLiteral("microphones"), QJsonArray{
+            QJsonObject{{QStringLiteral("name"), QStringLiteral("mic.default")}, {QStringLiteral("description"), QStringLiteral("USB headset")}},
+            QJsonObject{{QStringLiteral("name"), QStringLiteral("mic.saved")}, {QStringLiteral("description"), QStringLiteral("Desk mic")}}}},
+        {QStringLiteral("monitors"), QJsonArray{
+            QJsonObject{{QStringLiteral("name"), QStringLiteral("sink.default.monitor")}, {QStringLiteral("description"), QStringLiteral("Headphones")}},
+            QJsonObject{{QStringLiteral("name"), QStringLiteral("sink.saved.monitor")}, {QStringLiteral("description"), QStringLiteral("Desk speakers")}}}},
+        {QStringLiteral("default_microphone"), QStringLiteral("mic.default")},
+        {QStringLiteral("default_monitor"), QStringLiteral("sink.default.monitor")},
+    };
+    QVERIFY(writeFile(fixture.dir.filePath(QStringLiteral("sources.json")), QJsonDocument(sources).toJson()));
+    QVERIFY(writeFile(fixture.configPath(), "KWISPR_MEETING_MIC_SOURCE=mic.saved\nKWISPR_MEETING_MONITOR_SOURCE=sink.saved.monitor\n"));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    QTRY_VERIFY(control<QPushButton>(dialog, "meetingStart")->isEnabled());
+    auto *mic = control<QComboBox>(dialog, "meetingMicrophone");
+    auto *monitor = control<QComboBox>(dialog, "meetingMonitor");
+    QCOMPARE(mic->currentData().toString(), QStringLiteral("mic.saved"));
+    QCOMPARE(monitor->currentData().toString(), QStringLiteral("sink.saved.monitor"));
+    QCOMPARE(mic->itemText(mic->findData(QStringLiteral("mic.default"))), QStringLiteral("USB headset (System default)"));
+    QCOMPARE(monitor->itemText(monitor->findData(QStringLiteral("sink.default.monitor"))), QStringLiteral("Headphones (System default)"));
+    QCOMPARE(mic->currentText(), QStringLiteral("Desk mic"));
+    QCOMPARE(monitor->currentText(), QStringLiteral("Desk speakers"));
+    QCOMPARE(control<QLabel>(dialog, "meetingMicrophoneDetails")->text(), QStringLiteral("System default: USB headset"));
+    QCOMPARE(control<QLabel>(dialog, "meetingMonitorDetails")->text(), QStringLiteral("System default: Headphones"));
+    QVERIFY(mic->accessibleDescription().contains(QStringLiteral("System default: USB headset")));
+
+    // A system default change updates annotations without switching the selected device.
+    sources.insert(QStringLiteral("default_microphone"), QStringLiteral("mic.saved"));
+    sources.insert(QStringLiteral("default_monitor"), QStringLiteral("sink.saved.monitor"));
+    QVERIFY(writeFile(fixture.dir.filePath(QStringLiteral("sources.json")), QJsonDocument(sources).toJson()));
+    control<QPushButton>(dialog, "meetingRefresh")->click();
+    QTRY_COMPARE(mic->currentText(), QStringLiteral("Desk mic (System default)"));
+    QCOMPARE(monitor->currentText(), QStringLiteral("Desk speakers (System default)"));
+    QCOMPARE(mic->currentData().toString(), QStringLiteral("mic.saved"));
+    QCOMPARE(monitor->currentData().toString(), QStringLiteral("sink.saved.monitor"));
+    QCOMPARE(mic->itemText(mic->findData(QStringLiteral("mic.default"))), QStringLiteral("USB headset"));
+    QCOMPARE(monitor->itemText(monitor->findData(QStringLiteral("sink.default.monitor"))), QStringLiteral("Headphones"));
+    QVERIFY(!control<QLabel>(dialog, "meetingMicrophoneDetails")->isVisible());
+    QVERIFY(!control<QLabel>(dialog, "meetingMonitorDetails")->isVisible());
+}
+
+void MeetingDialogTest::longSelectedDeviceNamesRemainVisible()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    const QString microphone = QStringLiteral("Focusrite Scarlett Solo USB microphone connected through the desktop docking station — analog stereo input");
+    const QString output = QStringLiteral("Wireless Noise Cancelling Headphones connected over Bluetooth — High Fidelity Playback audio output");
+    const auto sources = QJsonObject{
+        {QStringLiteral("microphones"), QJsonArray{QJsonObject{{QStringLiteral("name"), QStringLiteral("mic.long")}, {QStringLiteral("description"), microphone}}}},
+        {QStringLiteral("monitors"), QJsonArray{QJsonObject{{QStringLiteral("name"), QStringLiteral("sink.long.monitor")}, {QStringLiteral("description"), output}}}},
+        {QStringLiteral("default_microphone"), QStringLiteral("mic.long")},
+        {QStringLiteral("default_monitor"), QStringLiteral("sink.long.monitor")},
+    };
+    QVERIFY(writeFile(fixture.dir.filePath(QStringLiteral("sources.json")), QJsonDocument(sources).toJson()));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    QTRY_VERIFY(control<QPushButton>(dialog, "meetingStart")->isEnabled());
+    for (const QSize size : {QSize(600, 660), QSize(400, 460)}) {
+        dialog.resize(size);
+        QTest::qWait(30);
+        auto *micDetails = control<QLabel>(dialog, "meetingMicrophoneDetails");
+        auto *monitorDetails = control<QLabel>(dialog, "meetingMonitorDetails");
+        QVERIFY(micDetails->isVisible());
+        QVERIFY(monitorDetails->isVisible());
+        QCOMPARE(micDetails->text(), QStringLiteral("Selected: %1 (System default)").arg(microphone));
+        QCOMPARE(monitorDetails->text(), QStringLiteral("Selected: %1 (System default)").arg(output));
+        auto *scroll = control<QScrollArea>(dialog, "meetingScroll");
+        QCOMPARE(scroll->horizontalScrollBar()->maximum(), 0);
+        QVERIFY(micDetails->height() >= micDetails->heightForWidth(micDetails->width()));
+        QVERIFY(monitorDetails->height() >= monitorDetails->heightForWidth(monitorDetails->width()));
+        const QString screenshotDir = qEnvironmentVariable("KWISPR_MEETING_SCREENSHOTS");
+        if (!screenshotDir.isEmpty()) {
+            QDir().mkpath(screenshotDir);
+            QVERIFY(dialog.grab().save(QDir(screenshotDir).filePath(QStringLiteral("meeting-long-devices-%1x%2.png").arg(size.width()).arg(size.height()))));
+        }
+    }
+    auto *mic = control<QComboBox>(dialog, "meetingMicrophone");
+    QVERIFY(mic->accessibleDescription().contains(microphone));
+    QVERIFY(mic->toolTip().contains(QStringLiteral("mic.long")));
+    // Opened picker exposes the same annotation through normal keyboard operation.
+    mic->setFocus();
+    QTest::keyClick(mic, Qt::Key_Down, Qt::AltModifier);
+    QTest::keyClick(mic, Qt::Key_Escape);
+    QCOMPARE(mic->currentData().toString(), QStringLiteral("mic.long"));
 }
 
 void MeetingDialogTest::modelSetupIsAsynchronousAndReportsFailure()
