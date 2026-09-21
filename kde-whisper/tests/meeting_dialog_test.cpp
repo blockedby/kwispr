@@ -133,6 +133,8 @@ private slots:
     void disappearingWorkerDoesNotTrapWindowInStartingState();
     void modelSetupIsAsynchronousAndReportsFailure();
     void pollingDoesNotOverlapOrRunWhileHidden();
+    void hiddenActiveMeetingKeepsPolling_data();
+    void hiddenActiveMeetingKeepsPolling();
     void narrowLayoutKeepsActionsReachable();
 };
 
@@ -313,6 +315,37 @@ void MeetingDialogTest::pollingDoesNotOverlapOrRunWhileHidden()
     QTRY_VERIFY(control<QPushButton>(dialog, "meetingStart")->isEnabled());
     dialog.hide();
     const auto count = fixture.calls(QStringLiteral("status")).size();
+    QTest::qWait(1200);
+    QCOMPARE(fixture.calls(QStringLiteral("status")).size(), count);
+}
+
+void MeetingDialogTest::hiddenActiveMeetingKeepsPolling_data()
+{
+    QTest::addColumn<QString>("initialState");
+    QTest::addColumn<QString>("terminalState");
+    QTest::newRow("recording-failure") << QStringLiteral("recording") << QStringLiteral("failed");
+    QTest::newRow("processing-completion") << QStringLiteral("processing") << QStringLiteral("complete");
+}
+
+void MeetingDialogTest::hiddenActiveMeetingKeepsPolling()
+{
+    QFETCH(QString, initialState);
+    QFETCH(QString, terminalState);
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    QVERIFY(fixture.setState(initialState));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    QSignalSpy stateSpy(&dialog, &MeetingDialog::meetingStateChanged);
+    dialog.show();
+    QTRY_VERIFY(!stateSpy.isEmpty());
+    QCOMPARE(stateSpy.last().first().toString(), initialState);
+    dialog.hide();
+    QVERIFY(!dialog.isVisible());
+    QVERIFY(fixture.setState(terminalState, QStringLiteral("Fixture terminal status")));
+    QTRY_COMPARE(stateSpy.last().first().toString(), terminalState);
+    QVERIFY(!dialog.recordingActive());
+    const auto count = fixture.calls(QStringLiteral("status")).size();
+    QVERIFY(count >= 2);
     QTest::qWait(1200);
     QCOMPARE(fixture.calls(QStringLiteral("status")).size(), count);
 }

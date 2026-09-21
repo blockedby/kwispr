@@ -359,8 +359,8 @@ void MeetingDialog::showEvent(QShowEvent *event)
 
 void MeetingDialog::hideEvent(QHideEvent *event)
 {
-    m_pollTimer->stop();
     QDialog::hideEvent(event);
+    updatePolling();
 }
 
 void MeetingDialog::closeEvent(QCloseEvent *event)
@@ -505,8 +505,21 @@ bool MeetingDialog::recordingActive() const
     return captureActive();
 }
 
+void MeetingDialog::updatePolling()
+{
+    const bool active = captureActive() || m_state == QStringLiteral("processing") || m_commandBusy || m_setupBusy;
+    if (isVisible() || active) {
+        if (!m_pollTimer->isActive()) {
+            m_pollTimer->start();
+        }
+    } else {
+        m_pollTimer->stop();
+    }
+}
+
 void MeetingDialog::updateUi()
 {
+    updatePolling();
     const bool capturing = captureActive();
     const bool processing = m_state == QStringLiteral("processing");
     const bool editable = !capturing && !processing && !m_commandBusy && !m_setupBusy;

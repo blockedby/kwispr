@@ -39,6 +39,7 @@ private:
     void setupModels();
     bool saveChoices();
     bool captureActive() const;
+    void updatePolling();
     void updateUi();
 
     QString m_runtimeRoot;
