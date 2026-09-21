@@ -29,6 +29,7 @@ protected:
     void hideEvent(QHideEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void reject() override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void loadSources();
@@ -40,6 +41,7 @@ private:
     bool saveChoices();
     bool captureActive() const;
     void updatePolling();
+    void updateDeviceDetails();
     void updateUi();
 
     QString m_runtimeRoot;
@@ -56,6 +58,8 @@ private:
     QString m_activeMonitor;
     QString m_savedMic;
     QString m_savedMonitor;
+    QString m_defaultMic;
+    QString m_defaultMonitor;
     bool m_statusKnown = false;
     bool m_sourcesLoaded = false;
     bool m_commandBusy = false;
@@ -82,6 +86,8 @@ private:
     QLineEdit *m_titleEdit;
     QComboBox *m_micCombo;
     QComboBox *m_monitorCombo;
+    QLabel *m_micDetailsLabel;
+    QLabel *m_monitorDetailsLabel;
     QLineEdit *m_outputEdit;
     QSpinBox *m_speakersSpin;
     QPushButton *m_browseButton;
