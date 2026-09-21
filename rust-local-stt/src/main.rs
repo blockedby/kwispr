@@ -20,7 +20,8 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 use transcribe_cpp::{
-    Backend, Model, ModelOptions, RunExtension, RunOptions, Session, WhisperRunOptions,
+    Backend, Model, ModelOptions, RunExtension, RunOptions, Session, WhisperPromptCondition,
+    WhisperRunOptions,
 };
 use transcribe_rs::vad::{SileroVad, SmoothedVad, Vad};
 
@@ -449,9 +450,10 @@ fn run_options(language: Option<String>, prompt: Option<String>) -> RunOptions {
         family: prompt.map(|prompt| {
             RunExtension::Whisper(WhisperRunOptions {
                 initial_prompt: Some(prompt),
-                // Preserve writing style across Whisper's 30-second windows.
-                // This remains opt-in together with the supplied prompt.
-                condition_on_prev_tokens: Some(true),
+                // Preserve the caller's vocabulary/style on every window,
+                // without feeding generated text back into later windows.
+                prompt_condition: Some(WhisperPromptCondition::AllSegments),
+                condition_on_prev_tokens: Some(false),
                 ..Default::default()
             })
         }),
@@ -1154,7 +1156,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_is_forwarded_as_whisper_initial_context() {
+    fn prompt_is_forwarded_to_every_window_without_generated_history() {
         let prompt = normalize_prompt("  Kwispr, Подман. Привет, друг!  ").unwrap();
         validate_prompt_support(&test_model(), prompt.as_deref()).unwrap();
         let options = run_options(Some("ru".into()), prompt);
@@ -1163,7 +1165,8 @@ mod tests {
             options.family,
             Some(RunExtension::Whisper(WhisperRunOptions {
                 initial_prompt: Some("Kwispr, Подман. Привет, друг!".into()),
-                condition_on_prev_tokens: Some(true),
+                prompt_condition: Some(WhisperPromptCondition::AllSegments),
+                condition_on_prev_tokens: Some(false),
                 ..Default::default()
             }))
         );
