@@ -58,7 +58,12 @@ install(PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/kde-whisper-launcher"
 install(PROGRAMS
     "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr.sh"
     "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr-models.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr-meetings.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr-meetings-setup.py"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/kwispr/runtime")
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr_meetings"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/kwispr/runtime"
+    FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)
 install(FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/../models/local-stt-catalog.json"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/kwispr/runtime/models")

@@ -6,9 +6,14 @@ import sys
 
 
 def main() -> int:
-    runtime = Path(os.environ.get("KWISPR_MEETING_RUNTIME_DIR") or
-                   str(Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser() /
-                       "kwispr/meeting-runtime")).expanduser()
+    from kwispr_meetings.config import ConfigError, load_config, runtime_dir
+    try:
+        config = load_config()
+    except (ConfigError, OSError):
+        # Control commands must still stop a running recorder if config was damaged.
+        # Start/process report the configuration error in the session CLI.
+        config = {}
+    runtime = runtime_dir(config)
     python = runtime / "venv/bin/python"
     # Compare prefixes, not resolved executable paths: a venv Python is a symlink.
     if python.is_file() and Path(sys.prefix).resolve() != (runtime / "venv").resolve():

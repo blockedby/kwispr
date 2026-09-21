@@ -76,6 +76,12 @@ def output_dir(config: dict[str, str]) -> Path:
     return Path(config.get("KWISPR_MEETING_OUTPUT_DIR") or "~/Documents/Kwispr/Meetings").expanduser().resolve()
 
 
+def runtime_dir(config=None):
+    config = config or {}
+    override = config.get("KWISPR_MEETING_RUNTIME_DIR") or os.environ.get("KWISPR_MEETING_RUNTIME_DIR")
+    return Path(override).expanduser() if override else Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "kwispr/meeting-runtime"
+
+
 def speaker_count(value: str | int) -> int:
     try:
         count = int(value)
