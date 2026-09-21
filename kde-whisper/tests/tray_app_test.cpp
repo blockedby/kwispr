@@ -1,5 +1,6 @@
 #include "ui/SettingsDialog.h"
 #include "ui/TrayApp.h"
+#include "ui/MeetingDialog.h"
 
 #include "fake_global_shortcut.h"
 
@@ -47,6 +48,7 @@ class TrayAppTest : public QObject
 private slots:
     void repeatedOpenSettingsReusesAndActivatesDialogDuringModalExec();
     void globalShortcutTriggerCallsTrayToggleRecording();
+    void repeatedOpenMeetingsReusesNonmodalDialog();
 };
 
 void TrayAppTest::repeatedOpenSettingsReusesAndActivatesDialogDuringModalExec()
@@ -136,6 +138,31 @@ void TrayAppTest::globalShortcutTriggerCallsTrayToggleRecording()
     QCOMPARE(runnerFake->lastProgram, tempDir.filePath(QStringLiteral("kwispr.sh")));
     QCOMPARE(runnerFake->lastArguments, QStringList{QStringLiteral("toggle")});
     Q_UNUSED(tray);
+}
+
+void TrayAppTest::repeatedOpenMeetingsReusesNonmodalDialog()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    auto *tray = new TrayApp(tempDir.path(), tempDir.path(), nullptr,
+                             std::make_unique<FakeGlobalShortcutBackend>());
+    tray->openMeetings();
+    QList<MeetingDialog *> dialogs;
+    for (QWidget *widget : QApplication::topLevelWidgets()) {
+        if (auto *dialog = qobject_cast<MeetingDialog *>(widget)) dialogs.append(dialog);
+    }
+    QCOMPARE(dialogs.size(), 1);
+    auto *dialog = dialogs.first();
+    QVERIFY(!dialog->isModal());
+    dialog->showMinimized();
+    tray->openMeetings();
+    QVERIFY(dialog->isVisible());
+    QVERIFY(!dialog->isMinimized());
+    dialog->hide();
+    tray->openMeetings();
+    QVERIFY(dialog->isVisible());
+    dialog->hide();
+    QCoreApplication::processEvents();
 }
 
 QTEST_MAIN(TrayAppTest)

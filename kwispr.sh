@@ -112,6 +112,24 @@ load_env() {
   : "${KWISPR_AUDIO_FORMAT:=wav}"
   : "${KWISPR_PULSE_SOURCE:=default}"
   : "${KWISPR_TRANSCRIPTION_PROMPT:=Transcribe this audio exactly as spoken. The speech may be Russian, English, or mixed. Do not translate. Return only the transcript.}"
+  : "${KWISPR_WHISPER_PROMPT:=}"
+  : "${KWISPR_VOCABULARY:=}"
+  : "${KWISPR_STOP_DELAY_MS:=0}"
+  : "${KWISPR_PRESERVE_AUDIO_TAIL:=0}"
+
+  # These settings are opt-in; keep the existing request/recording defaults.
+  [[ "$KWISPR_STOP_DELAY_MS" =~ ^[0-9]{1,4}$ ]] \
+    && (( 10#$KWISPR_STOP_DELAY_MS <= 2000 )) \
+    || die "KWISPR_STOP_DELAY_MS must be an integer from 0 to 2000"
+  KWISPR_STOP_DELAY_MS=$((10#$KWISPR_STOP_DELAY_MS))
+  [[ "$KWISPR_PRESERVE_AUDIO_TAIL" == "0" || "$KWISPR_PRESERVE_AUDIO_TAIL" == "1" ]] \
+    || die "KWISPR_PRESERVE_AUDIO_TAIL must be 0 or 1"
+  [[ "$KWISPR_VOCABULARY" != *$'\n'* && "$KWISPR_VOCABULARY" != *$'\r'* ]] \
+    || die "KWISPR_VOCABULARY must be a single line of comma-separated terms"
+  local whisper_context
+  whisper_context="$(transcription_context)"
+  [[ "$(printf '%s' "$whisper_context" | jq -Rs 'length')" -le 4096 ]] \
+    || die "KWISPR_WHISPER_PROMPT and KWISPR_VOCABULARY must total at most 4096 characters"
 
   # Backward compatibility: keep OPENAI_API_KEY working, but allow custom
   # OpenAI-compatible backends (OpenRouter, LocalAI, local Whisper servers)
@@ -124,6 +142,21 @@ load_env() {
     [[ -n "${KWISPR_API_KEY:-}" && "$KWISPR_API_KEY" != "sk-REPLACE_ME" ]] \
       || die "Open Kwispr Settings and configure an API key (config: $CONFIG_FILE)"
   fi
+}
+
+transcription_context() {
+  # Whisper prompts are example transcript/context, not chat instructions.
+  printf '%s' "$KWISPR_WHISPER_PROMPT"
+  if [[ -n "$KWISPR_VOCABULARY" ]]; then
+    [[ -z "$KWISPR_WHISPER_PROMPT" ]] || printf '\n'
+    printf '%s' "$KWISPR_VOCABULARY"
+  fi
+}
+
+is_local_stt() {
+  [[ "$KWISPR_LOCAL_STT_CONFIGURED" == "1" \
+     || "$KWISPR_API_URL" == http://127.0.0.1:* \
+     || "$KWISPR_API_URL" == http://localhost:* ]]
 }
 
 rotate_cache() {
@@ -177,8 +210,15 @@ stop_recording() {
   holder="$(sed -n 2p "$PID_FILE")"
   wav="$(cat "$WAV_POINTER")"
 
-  play_cue "$KWISPR_SOUND_STOP"
   status "⏳ Processing"
+
+  # Allow the microphone/server capture buffer to deliver the final syllable
+  # before closing the recording. The default remains an immediate stop.
+  if (( KWISPR_STOP_DELAY_MS > 0 )); then
+    local stop_delay
+    printf -v stop_delay '%d.%03d' "$((KWISPR_STOP_DELAY_MS / 1000))" "$((KWISPR_STOP_DELAY_MS % 1000))"
+    sleep "$stop_delay"
+  fi
 
   # Send 'q' to ffmpeg via the FIFO — this triggers its graceful shutdown
   # path which flushes the WAV header + data. Then kill the FIFO holder
@@ -199,6 +239,8 @@ stop_recording() {
     sleep 0.3
   fi
 
+  # Never record our own stop cue (including during the optional delay).
+  play_cue "$KWISPR_SOUND_STOP"
   rm -f "$PID_FILE" "$WAV_POINTER" "$FIFO_PATH"
   echo "$wav"
 }
@@ -245,9 +287,9 @@ transcribe() {
 
   case "$KWISPR_BACKEND" in
     openai-transcriptions)
-      # No prompt: a bilingual prompt was causing Whisper to *translate* speech
-      # into the language of the prompt instead of transcribing as-is. Subtitle
-      # hallucinations are scrubbed by the post-processing regex below.
+      # Keep prompts opt-in: bilingual instructions can cause Whisper to
+      # translate instead of transcribing. This context is separate from the
+      # chat instructions used by OpenRouter below.
       # temperature=0 for deterministic output.
       curl_args+=(
         -F "model=$KWISPR_MODEL"
@@ -255,19 +297,34 @@ transcribe() {
         -F temperature=0
         -F file=@"$wav"
       )
+      local whisper_context
+      whisper_context="$(transcription_context)"
+      if [[ -n "$whisper_context" ]] && { ! is_local_stt || [[ "$KWISPR_MODEL" == whisper* ]]; }; then
+        # --form-string prevents @, < and ;type= in user text from being
+        # interpreted by curl as file uploads or multipart attributes.
+        curl_args+=(--form-string "prompt=$whisper_context")
+      fi
+      if [[ "$KWISPR_PRESERVE_AUDIO_TAIL" == "1" ]] && is_local_stt; then
+        curl_args+=(--form-string preserve_audio_tail=1)
+      fi
       # Optional: force language if KWISPR_LANGUAGE is configured.
       if [[ -n "${KWISPR_LANGUAGE:-}" ]]; then
         curl_args+=(-F "language=$KWISPR_LANGUAGE")
       fi
       ;;
     openrouter-chat)
-      local request_json audio_b64
+      local request_json audio_b64 chat_prompt
+      chat_prompt="$KWISPR_TRANSCRIPTION_PROMPT"
+      if [[ -n "$KWISPR_VOCABULARY" ]]; then
+        chat_prompt+=$'\nVocabulary (use these spellings only when heard): '
+        chat_prompt+="$KWISPR_VOCABULARY"
+      fi
       request_json="$(mktemp)"
       audio_b64="$(mktemp)"
       base64 -w0 "$wav" > "$audio_b64"
       jq -n \
         --arg model "$KWISPR_MODEL" \
-        --arg prompt "$KWISPR_TRANSCRIPTION_PROMPT" \
+        --arg prompt "$chat_prompt" \
         --arg format "$KWISPR_AUDIO_FORMAT" \
         --rawfile audio "$audio_b64" \
         '{model:$model,messages:[{role:"user",content:[{type:"text",text:$prompt},{type:"input_audio",input_audio:{data:$audio,format:$format}}]}]}' \
@@ -308,12 +365,13 @@ transcribe() {
   rm -f "$response"
 
   # Strip known whisper hallucinations that leak from subtitle training data.
-  # These phrases never occur in real dictation; they're artifacts of training
+  # These phrases can leak into dictation; they're artifacts of training
   # on subtitles/credits. Match greedily to end of line since they're always
   # tacked on at the very end of the transcript.
+  # Use a character class: a Cyrillic [А-Я] range is invalid in some locales.
   text="$(printf '%s' "$text" | sed -E \
     -e 's/[[:space:]]*Редактор субтитров.*$//I' \
-    -e 's/[[:space:]]*Корректор[[:space:]]+[А-ЯЁA-Z]\.?[^[:space:]]*.*$//I' \
+    -e 's/[[:space:]]*Корректор[[:space:]]+[[:upper:]]\.?[^[:space:]]*.*$//I' \
     -e 's/[[:space:]]*Субтитры:?.*$//I' \
     -e 's/[[:space:]]*Продолжение следует\.?[[:space:]]*$//I' \
     -e 's/[[:space:]]*Thanks for watching[!.]?[[:space:]]*$//I' \
@@ -327,10 +385,7 @@ transcribe() {
     # Local VAD servers may intentionally return an empty transcript for
     # silence/no-speech audio. Treat that as a clean skip instead of an API
     # failure that pollutes last-failed.txt and the clipboard.
-    if [[ "$KWISPR_BACKEND" == "openai-transcriptions" \
-          && ( "$KWISPR_LOCAL_STT_CONFIGURED" == "1" \
-               || "$KWISPR_API_URL" == http://127.0.0.1:* \
-               || "$KWISPR_API_URL" == http://localhost:* ) ]]; then
+    if [[ "$KWISPR_BACKEND" == "openai-transcriptions" ]] && is_local_stt; then
       rm -f "$txt"
       status "⚠ No speech" 2000
       status_clear

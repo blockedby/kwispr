@@ -8,7 +8,8 @@ Press a hotkey, speak, and press it again. Kwispr transcribes your speech, copie
 - OpenAI and OpenRouter support;
 - Russian, English, and mixed-language speech;
 - KDE tray, notifications, and sound cues;
-- recording archive with retry support.
+- recording archive with retry support;
+- [meeting recordings with speaker-labelled transcripts saved to files](docs/meetings.md).
 
 ![Kwispr demo](demo.gif)
 
@@ -130,7 +131,7 @@ python3 -m unittest discover
 ./rust-local-stt/build-in-podman.sh
 ```
 
-Learn more: [local STT](docs/local-stt.md) · [KDE app](docs/kde-whisper.md)
+Learn more: [dictation quality and vocabulary](docs/dictation-quality.md) · [local STT](docs/local-stt.md) · [KDE app](docs/kde-whisper.md)
 
 ## License
 

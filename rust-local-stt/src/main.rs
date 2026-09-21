@@ -19,13 +19,17 @@ use std::{
     time::Duration,
 };
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
-use transcribe_cpp::{Backend, Model, ModelOptions, RunOptions, Session};
+use transcribe_cpp::{
+    Backend, Model, ModelOptions, RunExtension, RunOptions, Session, WhisperPromptCondition,
+    WhisperRunOptions,
+};
 use transcribe_rs::vad::{SileroVad, SmoothedVad, Vad};
 
 static SESSION_CACHE: Lazy<Mutex<HashMap<String, Session>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_FFMPEG_TIMEOUT_SECONDS: u64 = 30;
+const MAX_PROMPT_CHARS: usize = 4096;
 
 fn max_upload_bytes() -> usize {
     env::var("KWISPR_MAX_UPLOAD_BYTES")
@@ -83,6 +87,12 @@ struct QuantFile {
 struct Health {
     status: &'static str,
     vad: VadConfig,
+    capabilities: RuntimeCapabilities,
+}
+#[derive(Serialize)]
+struct RuntimeCapabilities {
+    whisper_prompt: bool,
+    preserve_audio_tail: bool,
 }
 #[derive(Serialize)]
 struct Transcription {
@@ -181,6 +191,10 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok",
         vad: state.vad.clone(),
+        capabilities: RuntimeCapabilities {
+            whisper_prompt: true,
+            preserve_audio_tail: true,
+        },
     })
 }
 
@@ -191,12 +205,22 @@ async fn transcribe(
     let mut mp = mp.map_err(ApiError::multipart_rejection)?;
     let mut model = None;
     let mut lang = None;
+    let mut prompt = None;
+    let mut preserve_audio_tail = false;
     let mut format = "json".to_string();
     let mut file = None;
     while let Some(field) = mp.next_field().await.map_err(ApiError::multipart_error)? {
         match field.name().unwrap_or("") {
             "model" => model = Some(field.text().await.map_err(ApiError::multipart_error)?),
             "language" => lang = Some(field.text().await.map_err(ApiError::multipart_error)?),
+            "prompt" => {
+                prompt = normalize_prompt(&field.text().await.map_err(ApiError::multipart_error)?)?;
+            }
+            "preserve_audio_tail" => {
+                preserve_audio_tail = parse_preserve_audio_tail(
+                    &field.text().await.map_err(ApiError::multipart_error)?,
+                )?;
+            }
             "response_format" => format = field.text().await.map_err(ApiError::multipart_error)?,
             "file" => {
                 file = Some(
@@ -220,15 +244,23 @@ async fn transcribe(
         file.ok_or_else(|| ApiError::bad_request(anyhow!("missing audio file field: file")))?;
     let info = resolve_model(&state.catalog, &model_id)?;
     let language = effective_language(&info, lang.as_deref())?;
+    validate_prompt_support(&info, prompt.as_deref())?;
     let audio = decode_audio(&bytes).await.map_err(ApiError::bad_request)?;
-    let preprocessed = preprocess_audio(audio, &state.vad).map_err(ApiError::bad_request)?;
+    let preprocessed =
+        preprocess_audio(audio, &state.vad, preserve_audio_tail).map_err(ApiError::bad_request)?;
     if preprocessed.decision == VadDecision::NoSpeech {
         return Ok(Json(Transcription {
             text: String::new(),
         }));
     }
     let text = tokio::task::spawn_blocking(move || {
-        transcribe_blocking(&state.model_dir, &info, preprocessed.samples, language)
+        transcribe_blocking(
+            &state.model_dir,
+            &info,
+            preprocessed.samples,
+            language,
+            prompt,
+        )
     })
     .await
     .map_err(|e| ApiError::internal(anyhow!(e)))??;
@@ -348,11 +380,51 @@ fn base_language(language: &str) -> &str {
     language.split_once('-').map_or(language, |(base, _)| base)
 }
 
+fn normalize_prompt(value: &str) -> std::result::Result<Option<String>, ApiError> {
+    if value.contains('\0') {
+        return Err(ApiError::bad_request(anyhow!(
+            "prompt must not contain NUL characters"
+        )));
+    }
+    if value.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(anyhow!(
+            "prompt must be at most {MAX_PROMPT_CHARS} characters"
+        )));
+    }
+    let value = value.trim();
+    Ok((!value.is_empty()).then(|| value.to_owned()))
+}
+
+fn validate_prompt_support(
+    info: &ModelInfo,
+    prompt: Option<&str>,
+) -> std::result::Result<(), ApiError> {
+    if prompt.is_some() && info.architecture != "whisper" {
+        return Err(ApiError::bad_request(anyhow!(
+            "prompt is only supported by Whisper models; model {} uses {}",
+            info.slug,
+            info.architecture
+        )));
+    }
+    Ok(())
+}
+
+fn parse_preserve_audio_tail(value: &str) -> std::result::Result<bool, ApiError> {
+    match value.trim() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(ApiError::bad_request(anyhow!(
+            "preserve_audio_tail must be true, false, 1, or 0"
+        ))),
+    }
+}
+
 fn transcribe_blocking(
     model_dir: &Path,
     info: &ModelInfo,
     audio: Vec<f32>,
     language: Option<String>,
+    prompt: Option<String>,
 ) -> std::result::Result<String, ApiError> {
     let mut cache = SESSION_CACHE
         .lock()
@@ -365,16 +437,26 @@ fn transcribe_blocking(
     }
     let session = cache.get_mut(&info.slug).expect("cached session");
     let result = session
-        .run(&audio, &run_options(language))
+        .run(&audio, &run_options(language, prompt))
         .map_err(|error| {
             ApiError::runtime(anyhow!("transcribe-cpp transcription failed: {error}"))
         })?;
     Ok(result.text.trim().to_string())
 }
 
-fn run_options(language: Option<String>) -> RunOptions {
+fn run_options(language: Option<String>, prompt: Option<String>) -> RunOptions {
     RunOptions {
         language,
+        family: prompt.map(|prompt| {
+            RunExtension::Whisper(WhisperRunOptions {
+                initial_prompt: Some(prompt),
+                // Preserve the caller's vocabulary/style on every window,
+                // without feeding generated text back into later windows.
+                prompt_condition: Some(WhisperPromptCondition::AllSegments),
+                condition_on_prev_tokens: Some(false),
+                ..Default::default()
+            })
+        }),
         ..Default::default()
     }
 }
@@ -548,7 +630,11 @@ fn decode_wav(bytes: &[u8]) -> Result<DecodedAudio> {
     })
 }
 
-fn preprocess_audio(audio: DecodedAudio, vad: &VadConfig) -> Result<PreprocessedAudio> {
+fn preprocess_audio(
+    audio: DecodedAudio,
+    vad: &VadConfig,
+    preserve_audio_tail: bool,
+) -> Result<PreprocessedAudio> {
     vad.validate()?;
     if !vad.enabled {
         return Ok(PreprocessedAudio {
@@ -557,12 +643,16 @@ fn preprocess_audio(audio: DecodedAudio, vad: &VadConfig) -> Result<Preprocessed
         });
     }
     match vad.provider {
-        VadProvider::Energy => preprocess_energy_audio(audio, vad),
-        VadProvider::Silero => preprocess_silero_audio(audio, vad),
+        VadProvider::Energy => preprocess_energy_audio(audio, vad, preserve_audio_tail),
+        VadProvider::Silero => preprocess_silero_audio(audio, vad, preserve_audio_tail),
     }
 }
 
-fn preprocess_energy_audio(audio: DecodedAudio, vad: &VadConfig) -> Result<PreprocessedAudio> {
+fn preprocess_energy_audio(
+    audio: DecodedAudio,
+    vad: &VadConfig,
+    preserve_audio_tail: bool,
+) -> Result<PreprocessedAudio> {
     let frame = samples_for_ms(audio.sample_rate, vad.frame_ms).max(1);
     let min_speech_frames = frames_for_ms(vad.min_speech_ms, vad.frame_ms).max(1);
     let padding = samples_for_ms(audio.sample_rate, vad.padding_ms);
@@ -573,10 +663,21 @@ fn preprocess_energy_audio(audio: DecodedAudio, vad: &VadConfig) -> Result<Prepr
             voiced.push(i);
         }
     }
-    trim_from_voiced_frames(audio.samples, frame, padding, min_speech_frames, voiced)
+    trim_from_voiced_frames(
+        audio.samples,
+        frame,
+        padding,
+        min_speech_frames,
+        voiced,
+        preserve_audio_tail,
+    )
 }
 
-fn preprocess_silero_audio(audio: DecodedAudio, vad: &VadConfig) -> Result<PreprocessedAudio> {
+fn preprocess_silero_audio(
+    audio: DecodedAudio,
+    vad: &VadConfig,
+    preserve_audio_tail: bool,
+) -> Result<PreprocessedAudio> {
     if audio.sample_rate != 16_000 {
         return Err(anyhow!(
             "Silero VAD requires 16 kHz WAV audio, got {} Hz",
@@ -596,16 +697,33 @@ fn preprocess_silero_audio(audio: DecodedAudio, vad: &VadConfig) -> Result<Prepr
         hangover,
         onset,
     );
+    let voiced = detect_complete_and_partial_frames(&audio.samples, frame, |chunk| {
+        Ok(detector.is_speech(chunk)?)
+    })?;
+    trim_from_voiced_frames(audio.samples, frame, 0, 1, voiced, preserve_audio_tail)
+}
+
+fn detect_complete_and_partial_frames(
+    samples: &[f32],
+    frame: usize,
+    mut is_speech: impl FnMut(&[f32]) -> Result<bool>,
+) -> Result<Vec<usize>> {
     let mut voiced = Vec::new();
-    for (i, chunk) in audio.samples.chunks(frame).enumerate() {
-        if chunk.len() != frame {
-            break;
-        }
-        if detector.is_speech(chunk)? {
+    for (i, chunk) in samples.chunks(frame).enumerate() {
+        // Silero needs a complete frame, but a recording rarely ends exactly
+        // on a frame boundary. Pad only the detector input, never the audio.
+        let speech = if chunk.len() == frame {
+            is_speech(chunk)?
+        } else {
+            let mut padded = vec![0.0; frame];
+            padded[..chunk.len()].copy_from_slice(chunk);
+            is_speech(&padded)?
+        };
+        if speech {
             voiced.push(i);
         }
     }
-    trim_from_voiced_frames(audio.samples, frame, 0, 1, voiced)
+    Ok(voiced)
 }
 
 fn trim_from_voiced_frames(
@@ -614,6 +732,7 @@ fn trim_from_voiced_frames(
     padding: usize,
     min_speech_frames: usize,
     voiced: Vec<usize>,
+    preserve_audio_tail: bool,
 ) -> Result<PreprocessedAudio> {
     if voiced.len() < min_speech_frames {
         return Ok(PreprocessedAudio {
@@ -624,7 +743,11 @@ fn trim_from_voiced_frames(
     let first = voiced[0] * frame;
     let last = ((voiced[voiced.len() - 1] + 1) * frame).min(samples.len());
     let start = first.saturating_sub(padding);
-    let end = (last + padding).min(samples.len());
+    let end = if preserve_audio_tail {
+        samples.len()
+    } else {
+        (last + padding).min(samples.len())
+    };
     Ok(PreprocessedAudio {
         samples: samples[start..end].to_vec(),
         decision: VadDecision::Trimmed { start, end },
@@ -1027,9 +1150,139 @@ mod tests {
             Some("zh")
         );
         assert_eq!(
-            run_options(Some("zh".into())).language.as_deref(),
+            run_options(Some("zh".into()), None).language.as_deref(),
             Some("zh")
         );
+    }
+
+    #[test]
+    fn prompt_is_forwarded_to_every_window_without_generated_history() {
+        let prompt = normalize_prompt("  Kwispr, Подман. Привет, друг!  ").unwrap();
+        validate_prompt_support(&test_model(), prompt.as_deref()).unwrap();
+        let options = run_options(Some("ru".into()), prompt);
+        assert_eq!(options.language.as_deref(), Some("ru"));
+        assert_eq!(
+            options.family,
+            Some(RunExtension::Whisper(WhisperRunOptions {
+                initial_prompt: Some("Kwispr, Подман. Привет, друг!".into()),
+                prompt_condition: Some(WhisperPromptCondition::AllSegments),
+                condition_on_prev_tokens: Some(false),
+                ..Default::default()
+            }))
+        );
+        // A later prompt-free request must not inherit context from the
+        // session cache or force family-specific defaults.
+        assert_eq!(run_options(None, None).family, None);
+        assert_eq!(normalize_prompt("  \n\t ").unwrap(), None);
+    }
+
+    #[test]
+    fn prompt_validation_counts_unicode_characters_and_rejects_nul() {
+        let unicode = "ё".repeat(MAX_PROMPT_CHARS);
+        assert_eq!(normalize_prompt(&unicode).unwrap(), Some(unicode));
+        for invalid in ["ё".repeat(MAX_PROMPT_CHARS + 1), "word\0ignored".into()] {
+            let error = normalize_prompt(&invalid).unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn unsupported_models_reject_prompt_instead_of_ignoring_it() {
+        let mut model = test_model();
+        model.architecture = "gigaam".into();
+        validate_prompt_support(&model, None).unwrap();
+        let error = validate_prompt_support(&model, Some("Kwispr")).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("only supported by Whisper"));
+    }
+
+    #[test]
+    fn preserve_audio_tail_flag_is_explicit_and_validated() {
+        for value in ["true", "1", " 1 "] {
+            assert!(parse_preserve_audio_tail(value).unwrap());
+        }
+        for value in ["false", "0"] {
+            assert!(!parse_preserve_audio_tail(value).unwrap());
+        }
+        assert_eq!(
+            parse_preserve_audio_tail("yes").unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn preserving_tail_keeps_quiet_ending_after_vad_speech_gate() {
+        let mut samples = vec![0.0; 3200];
+        samples[800..1600].fill(0.2);
+        samples[2400..].fill(0.005); // A quiet word below the energy threshold.
+        let trimmed = preprocess_audio(
+            DecodedAudio {
+                samples: samples.clone(),
+                sample_rate: 16_000,
+            },
+            &test_vad(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            trimmed.decision,
+            VadDecision::Trimmed {
+                start: 640,
+                end: 1760
+            }
+        );
+        let preserved = preprocess_audio(
+            DecodedAudio {
+                samples: samples.clone(),
+                sample_rate: 16_000,
+            },
+            &test_vad(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            preserved.decision,
+            VadDecision::Trimmed {
+                start: 640,
+                end: 3200
+            }
+        );
+        assert_eq!(preserved.samples, samples[640..]);
+        let silent = preprocess_audio(
+            DecodedAudio {
+                samples: vec![0.0; 3200],
+                sample_rate: 16_000,
+            },
+            &test_vad(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(silent.decision, VadDecision::NoSpeech);
+    }
+
+    #[test]
+    fn partial_detector_frame_preserves_original_tail_without_adding_audio() {
+        let mut samples = vec![0.0; 480];
+        samples.extend([0.5; 137]);
+        let mut seen = Vec::new();
+        let voiced = detect_complete_and_partial_frames(&samples, 480, |chunk| {
+            seen.push(chunk.to_vec());
+            Ok(chunk.iter().any(|sample| *sample > 0.1))
+        })
+        .unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].len(), 480);
+        assert_eq!(&seen[1][..137], &[0.5; 137]);
+        assert!(seen[1][137..].iter().all(|sample| *sample == 0.0));
+        let output = trim_from_voiced_frames(samples, 480, 0, 1, voiced, false).unwrap();
+        assert_eq!(
+            output.decision,
+            VadDecision::Trimmed {
+                start: 480,
+                end: 617
+            }
+        );
+        assert_eq!(output.samples, vec![0.5; 137]);
     }
 
     #[test]
@@ -1038,7 +1291,7 @@ mod tests {
             samples: vec![0.0; 1600],
             sample_rate: 16_000,
         };
-        let out = preprocess_audio(audio, &test_vad()).unwrap();
+        let out = preprocess_audio(audio, &test_vad(), false).unwrap();
         assert_eq!(out.decision, VadDecision::NoSpeech);
         assert!(out.samples.is_empty());
     }
@@ -1055,6 +1308,7 @@ mod tests {
                 sample_rate: 16_000,
             },
             &test_vad(),
+            false,
         )
         .unwrap();
         assert_eq!(out.decision, VadDecision::NoSpeech);
@@ -1072,6 +1326,7 @@ mod tests {
                 sample_rate: 16_000,
             },
             &test_vad(),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1096,6 +1351,7 @@ mod tests {
                 enabled: false,
                 ..test_vad()
             },
+            false,
         )
         .unwrap();
         assert_eq!(out.decision, VadDecision::Disabled);
@@ -1114,6 +1370,7 @@ mod tests {
                 frame_ms: 0,
                 ..test_vad()
             },
+            false,
         )
         .unwrap_err();
         assert!(err
@@ -1175,6 +1432,7 @@ mod tests {
                 sample_rate: 16_000,
             },
             &test_vad(),
+            false,
         )
         .unwrap();
         assert_eq!(silent.decision, VadDecision::NoSpeech);
@@ -1195,6 +1453,7 @@ mod tests {
                 sample_rate: 16_000,
             },
             &test_vad(),
+            false,
         )
         .unwrap();
         assert_eq!(silent.decision, VadDecision::NoSpeech);

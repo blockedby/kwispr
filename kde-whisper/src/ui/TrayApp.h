@@ -12,6 +12,7 @@
 class KStatusNotifierItem;
 class KwisprController;
 class SettingsDialog;
+class MeetingDialog;
 class ModelManager;
 
 class TrayApp : public QObject, public ITrayActions
@@ -27,6 +28,7 @@ public:
 
     void toggleRecording() override;
     void openSettings() override;
+    void openMeetings() override;
     void startLocalStt() override;
     void stopLocalStt() override;
     void retryLastFailed() override;
@@ -41,4 +43,5 @@ private:
     std::unique_ptr<TrayController> m_controller;
     KStatusNotifierItem *m_notifier = nullptr;
     QPointer<SettingsDialog> m_settingsDialog;
+    QPointer<MeetingDialog> m_meetingDialog;
 };

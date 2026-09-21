@@ -10,6 +10,7 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QDir>
 #include <QGroupBox>
 #include <QKeySequenceEdit>
 #include <QLabel>
@@ -19,9 +20,12 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSignalSpy>
 #include <QSpinBox>
 #include <QTimer>
+#include <QTemporaryDir>
 #include <memory>
 
 class FakeModelManager : public ModelManager
@@ -92,6 +96,10 @@ class SettingsDialogTest : public QObject {
     Q_OBJECT
 private slots:
     void loadsCurrentSettingsIntoWidgets();
+    void dictationSettingsSaveReloadAndClear();
+    void dictationHintsFollowModelCapabilitiesAndPreserveDrafts();
+    void invalidDictationSettingsKeepDraftAndEnv();
+    void dictationSettingsFitScrollableWindows();
     void backendRowsAreContextSensitiveAndPreserveDrafts();
     void lanOptInUpdatesListenAddress();
     void invalidLoadedPortRequiresExplicitCorrection();
@@ -136,6 +144,136 @@ static KwisprSettings localSettings()
     KwisprSettings settings;
     settings.applyLocalPreset(QStringLiteral("whisper-large-v3-turbo"), QStringLiteral("/tmp/models"), QStringLiteral("en"));
     return settings;
+}
+
+void SettingsDialogTest::dictationSettingsSaveReloadAndClear()
+{
+    EnvFile env;
+    SettingsDialog dialog(localSettings(), sampleCatalog(), {}, &env);
+    auto *vocabulary = dialog.findChild<QPlainTextEdit *>("vocabularyEdit");
+    auto *context = dialog.findChild<QPlainTextEdit *>("whisperPromptEdit");
+    vocabulary->setPlainText(QStringLiteral("Kwispr\nOpenRouter\nИмя проекта"));
+    dialog.findChild<QPushButton *>("punctuationPresetButton")->click();
+    QVERIFY(context->toPlainText().contains(QStringLiteral("Привет!")));
+    dialog.findChild<QSpinBox *>("stopDelaySpin")->setValue(400);
+    dialog.findChild<QCheckBox *>("vadEnabledCheck")->setChecked(true);
+    dialog.findChild<QCheckBox *>("preserveAudioTailCheck")->setChecked(true);
+    QVERIFY2(dialog.save(), qPrintable(dialog.lastError()));
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("settings.env"));
+    QVERIFY(env.save(path));
+    EnvFile reloaded;
+    QVERIFY(reloaded.load(path));
+    QCOMPARE(reloaded.value(QStringLiteral("KWISPR_VOCABULARY")), QStringLiteral("Kwispr, OpenRouter, Имя проекта"));
+    SettingsDialog restored(KwisprSettings::fromEnv(reloaded), sampleCatalog(), {}, &reloaded);
+    QCOMPARE(restored.findChild<QPlainTextEdit *>("vocabularyEdit")->toPlainText(), vocabulary->toPlainText());
+    QCOMPARE(restored.findChild<QPlainTextEdit *>("whisperPromptEdit")->toPlainText(), context->toPlainText());
+    QCOMPARE(restored.findChild<QSpinBox *>("stopDelaySpin")->value(), 400);
+    QVERIFY(restored.findChild<QCheckBox *>("preserveAudioTailCheck")->isChecked());
+    restored.findChild<QPlainTextEdit *>("vocabularyEdit")->clear();
+    restored.findChild<QPlainTextEdit *>("whisperPromptEdit")->clear();
+    QVERIFY(restored.save());
+    QVERIFY(reloaded.value(QStringLiteral("KWISPR_VOCABULARY")).isEmpty());
+    QVERIFY(reloaded.value(QStringLiteral("KWISPR_WHISPER_PROMPT")).isEmpty());
+}
+
+void SettingsDialogTest::dictationHintsFollowModelCapabilitiesAndPreserveDrafts()
+{
+    KwisprSettings settings = localSettings();
+    settings.whisperPrompt = QStringLiteral("Привет! Как дела?");
+    settings.vocabulary = QStringLiteral("Kwispr, Codex");
+    SettingsDialog dialog(settings, sampleCatalog(), {});
+    dialog.show();
+    auto *backend = dialog.findChild<QComboBox *>("backendCombo");
+    auto *models = dialog.findChild<QComboBox *>("localModelCombo");
+    auto *vocabulary = dialog.findChild<QPlainTextEdit *>("vocabularyEdit");
+    auto *context = dialog.findChild<QPlainTextEdit *>("whisperPromptEdit");
+    auto *preset = dialog.findChild<QPushButton *>("punctuationPresetButton");
+    auto *tail = dialog.findChild<QCheckBox *>("preserveAudioTailCheck");
+    QVERIFY(vocabulary->isEnabled());
+    QVERIFY(context->isEnabled());
+    QVERIFY(preset->isEnabled());
+    QVERIFY(!tail->isEnabled());
+    dialog.findChild<QCheckBox *>("vadEnabledCheck")->setChecked(true);
+    QVERIFY(tail->isEnabled());
+    models->setCurrentIndex(models->findData(QStringLiteral("parakeet-tdt")));
+    QVERIFY(!vocabulary->isEnabled());
+    QVERIFY(!context->isEnabled());
+    QVERIFY(!preset->isEnabled());
+    QVERIFY(dialog.findChild<QLabel *>("dictationHintsLabel")->text().contains(QStringLiteral("does not support")));
+    QVERIFY(dialog.save());
+    QCOMPARE(dialog.currentSettings().whisperPrompt, settings.whisperPrompt);
+    QCOMPARE(dialog.currentSettings().vocabulary, settings.vocabulary);
+    models->setCurrentIndex(models->findData(QStringLiteral("whisper-large-v3-turbo")));
+    QVERIFY(vocabulary->isEnabled());
+    QVERIFY(context->isEnabled());
+    backend->setCurrentText(QStringLiteral("OpenRouter"));
+    QVERIFY(vocabulary->isEnabled());
+    QVERIFY(!context->isEnabled());
+    QVERIFY(!preset->isEnabled());
+    QVERIFY(!tail->isVisible());
+    backend->setCurrentText(QStringLiteral("Local STT"));
+    QVERIFY(context->isEnabled());
+    QCOMPARE(context->toPlainText(), settings.whisperPrompt);
+    QCOMPARE(vocabulary->toPlainText(), QStringLiteral("Kwispr\nCodex"));
+}
+
+void SettingsDialogTest::invalidDictationSettingsKeepDraftAndEnv()
+{
+    EnvFile env;
+    env.setValue(QStringLiteral("KWISPR_VOCABULARY"), QStringLiteral("saved"));
+    SettingsDialog dialog(localSettings(), sampleCatalog(), {}, &env);
+    auto *context = dialog.findChild<QPlainTextEdit *>("whisperPromptEdit");
+    context->setPlainText(QString(4097, QLatin1Char('x')));
+    QVERIFY(!dialog.save());
+    QVERIFY(dialog.lastError().contains(QStringLiteral("4096")));
+    QCOMPARE(context->toPlainText().size(), 4097);
+    QCOMPARE(env.value(QStringLiteral("KWISPR_VOCABULARY")), QStringLiteral("saved"));
+    QVERIFY(!dialog.findChild<QLabel *>("dictationErrorLabel")->isHidden());
+    context->clear();
+    QVERIFY(dialog.save());
+    QVERIFY(dialog.findChild<QLabel *>("dictationErrorLabel")->isHidden());
+
+    KwisprSettings settings = localSettings();
+    settings.stopDelayMs = -1;
+    SettingsDialog invalidDelay(settings, sampleCatalog(), {}, &env);
+    QVERIFY(!invalidDelay.save());
+    QVERIFY(invalidDelay.lastError().contains(QStringLiteral("stop delay")));
+    invalidDelay.findChild<QSpinBox *>("stopDelaySpin")->setValue(200);
+    QVERIFY(invalidDelay.save());
+}
+
+void SettingsDialogTest::dictationSettingsFitScrollableWindows()
+{
+    KwisprSettings settings = localSettings();
+    settings.vocabulary = QStringLiteral("Kwispr, OpenRouter, Очень длинное название проекта с несколькими словами");
+    SettingsDialog dialog(settings, sampleCatalog(), {});
+    dialog.findChild<QPushButton *>("punctuationPresetButton")->click();
+    dialog.show();
+    auto *scroll = dialog.findChild<QScrollArea *>("settingsScrollArea");
+    auto *vocabulary = dialog.findChild<QPlainTextEdit *>("vocabularyEdit");
+    auto *buttons = dialog.findChild<QDialogButtonBox *>("buttonBox");
+    const QString snapshots = qEnvironmentVariable("KWISPR_TEST_SNAPSHOT_DIR");
+    for (const QSize &size : {QSize(520, 560), QSize(760, 720), QSize(960, 760)}) {
+        dialog.resize(size);
+        QTest::qWait(10);
+        QCOMPARE(dialog.size(), size);
+        QCOMPARE(scroll->horizontalScrollBar()->maximum(), 0);
+        QVERIFY(dialog.rect().contains(QRect(buttons->mapTo(&dialog, QPoint()), buttons->size())));
+        scroll->ensureWidgetVisible(vocabulary);
+        vocabulary->setFocus();
+        QTest::keyClick(vocabulary, Qt::Key_Tab);
+        QCOMPARE(QApplication::focusWidget(), dialog.findChild<QPlainTextEdit *>("whisperPromptEdit"));
+        scroll->verticalScrollBar()->setValue(dialog.findChild<QGroupBox *>("dictationGroup")->y());
+        QTest::qWait(1);
+        const auto *stopDelay = dialog.findChild<QSpinBox *>("stopDelaySpin");
+        QVERIFY(scroll->viewport()->rect().contains(QRect(stopDelay->mapTo(scroll->viewport(), QPoint()), stopDelay->size())));
+        if (!snapshots.isEmpty()) {
+            QVERIFY(QDir().mkpath(snapshots));
+            QVERIFY(dialog.grab().save(QDir(snapshots).filePath(QStringLiteral("settings-%1x%2.png").arg(size.width()).arg(size.height()))));
+        }
+    }
 }
 
 void SettingsDialogTest::loadsCurrentSettingsIntoWidgets()
@@ -458,10 +596,10 @@ void SettingsDialogTest::modelComboAndActionsReflectInstallState()
     auto *grid = qobject_cast<QGridLayout *>(row->layout());
     QVERIFY(grid);
     QCOMPARE(grid->itemAtPosition(0, 0)->widget(), models);
-    QCOMPARE(grid->itemAtPosition(0, 1)->widget(), download);
-    QCOMPARE(grid->itemAtPosition(0, 2)->widget(), remove);
-    QCOMPARE(grid->itemAtPosition(1, 1)->widget()->objectName(), QStringLiteral("modelDownloadPercentLabel"));
-    QCOMPARE(grid->itemAtPosition(1, 2)->widget()->objectName(), QStringLiteral("modelDownloadEtaLabel"));
+    QCOMPARE(grid->itemAtPosition(1, 1)->widget(), download);
+    QCOMPARE(grid->itemAtPosition(1, 2)->widget(), remove);
+    QCOMPARE(grid->itemAtPosition(3, 1)->widget()->objectName(), QStringLiteral("modelDownloadPercentLabel"));
+    QCOMPARE(grid->itemAtPosition(3, 2)->widget()->objectName(), QStringLiteral("modelDownloadEtaLabel"));
     QCOMPARE(models->count(), 5);
     QCOMPARE(models->itemText(0), QStringLiteral("Large v3 Turbo (installed)"));
     QCOMPARE(models->itemData(0).toString(), QStringLiteral("whisper-large-v3-turbo"));

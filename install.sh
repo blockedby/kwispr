@@ -642,6 +642,10 @@ case "\${1:-}" in
     shift
     exec $(printf '%q' "$RUNTIME_ROOT/kwispr-models.py") "\$@"
     ;;
+  meetings)
+    shift
+    exec $(printf '%q' "$RUNTIME_ROOT/kwispr-meetings.py") "\$@"
+    ;;
 esac
 exec $(printf '%q' "$RUNTIME_ROOT/kwispr.sh") "\$@"
 EOF
@@ -915,6 +919,9 @@ mkdir -p "$LIB_DIR" "$RUNTIME_ROOT/models" "$RUNTIME_ROOT/sounds" \
 install -m 0755 "$KDE_BINARY" "$LIB_DIR/kde-whisper"
 install -m 0755 "$ROOT_DIR/kwispr.sh" "$RUNTIME_ROOT/kwispr.sh"
 install -m 0755 "$ROOT_DIR/kwispr-models.py" "$RUNTIME_ROOT/kwispr-models.py"
+install -m 0755 "$ROOT_DIR/kwispr-meetings.py" "$ROOT_DIR/kwispr-meetings-setup.py" "$RUNTIME_ROOT/"
+mkdir -p "$RUNTIME_ROOT/kwispr_meetings"
+install -m 0644 "$ROOT_DIR"/kwispr_meetings/*.py "$RUNTIME_ROOT/kwispr_meetings/"
 install -m 0644 "$ROOT_DIR/models/local-stt-catalog.json" "$RUNTIME_ROOT/models/local-stt-catalog.json"
 install -m 0644 "$ROOT_DIR"/sounds/*.wav "$RUNTIME_ROOT/sounds/"
 install -m 0644 "$ROOT_DIR/kde-whisper/org.kwispr.KdeWhisper.metainfo.xml" "$METAINFO_DIR/"

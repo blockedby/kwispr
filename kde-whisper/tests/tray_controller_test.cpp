@@ -11,6 +11,7 @@ class FakeTrayActions : public ITrayActions {
 public:
     int toggleCalls = 0;
     int settingsCalls = 0;
+    int meetingCalls = 0;
     int startCalls = 0;
     int stopCalls = 0;
     int retryCalls = 0;
@@ -19,6 +20,7 @@ public:
 
     void toggleRecording() override { ++toggleCalls; }
     void openSettings() override { ++settingsCalls; }
+    void openMeetings() override { ++meetingCalls; }
     void startLocalStt() override { ++startCalls; state = LocalSttState::Healthy; }
     void stopLocalStt() override { ++stopCalls; state = LocalSttState::Stopped; }
     void retryLastFailed() override { ++retryCalls; }
@@ -33,6 +35,7 @@ private slots:
     void actionsCallInjectedServices();
     void retryEnabledOnlyWhenLastFailedExists();
     void localSttActionsReflectStatus();
+    void recordingMeetingHasVisibleTrayLabel();
 };
 
 static QAction *actionByText(QMenu *menu, const QString &text)
@@ -54,6 +57,7 @@ void TrayControllerTest::menuContainsRequiredActions()
     QMenu *menu = controller.menu();
 
     QVERIFY(actionByText(menu, QStringLiteral("Toggle Recording")));
+    QVERIFY(actionByText(menu, QStringLiteral("Meetings…")));
     QVERIFY(actionByText(menu, QStringLiteral("Settings")));
     QVERIFY(actionByText(menu, QStringLiteral("Start Local STT")));
     QVERIFY(actionByText(menu, QStringLiteral("Stop Local STT")));
@@ -77,6 +81,7 @@ void TrayControllerTest::actionsCallInjectedServices()
     QMenu *menu = controller.menu();
 
     actionByText(menu, QStringLiteral("Toggle Recording"))->trigger();
+    actionByText(menu, QStringLiteral("Meetings…"))->trigger();
     actionByText(menu, QStringLiteral("Settings"))->trigger();
     actionByText(menu, QStringLiteral("Start Local STT"))->trigger();
     actionByText(menu, QStringLiteral("Stop Local STT"))->trigger();
@@ -85,6 +90,7 @@ void TrayControllerTest::actionsCallInjectedServices()
     actionByText(menu, QStringLiteral("Quit"))->trigger();
 
     QCOMPARE(actions.toggleCalls, 1);
+    QCOMPARE(actions.meetingCalls, 1);
     QCOMPARE(actions.settingsCalls, 2);
     QCOMPARE(actions.startCalls, 1);
     QCOMPARE(actions.stopCalls, 1);
@@ -128,6 +134,20 @@ void TrayControllerTest::localSttActionsReflectStatus()
     controller.refreshState();
     QVERIFY(!start->isEnabled());
     QVERIFY(stop->isEnabled());
+}
+
+void TrayControllerTest::recordingMeetingHasVisibleTrayLabel()
+{
+    QTemporaryDir cacheDir;
+    FakeTrayActions actions;
+    TrayController controller(&actions, cacheDir.path());
+    controller.setMeetingState(QStringLiteral("recording"));
+    auto *meetingAction = actionByText(controller.menu(), QStringLiteral("Meetings — Recording…"));
+    QVERIFY(meetingAction);
+    meetingAction->trigger();
+    QCOMPARE(actions.meetingCalls, 1);
+    controller.setMeetingState(QStringLiteral("complete"));
+    QVERIFY(actionByText(controller.menu(), QStringLiteral("Meetings…")));
 }
 
 QTEST_MAIN(TrayControllerTest)

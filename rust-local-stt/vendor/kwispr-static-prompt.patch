@@ -1,0 +1,167 @@
+--- a/transcribe-cpp-0.1.3/src/family.rs
++++ b/transcribe-cpp-0.1.3/src/family.rs
+@@ -17,11 +17,34 @@
+ 
+ use crate::error::Result;
+ 
++/// Which windows receive the original Whisper prompt, independently of history.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum WhisperPromptCondition {
++    /// Prime only the first window (the upstream default).
++    FirstSegment,
++    /// Prime every window, including when generated-history conditioning is off.
++    AllSegments,
++}
++
++impl WhisperPromptCondition {
++    fn to_raw(self) -> sys::transcribe_whisper_prompt_condition {
++        match self {
++            Self::FirstSegment => {
++                sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT
++            }
++            Self::AllSegments => {
++                sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS
++            }
++        }
++    }
++}
++
+ /// Whisper run-extension knobs (run slot): initial prompt, temperature
+ /// fallback, and decode thresholds. `None` keeps the family default.
+ #[derive(Debug, Clone, Default, PartialEq)]
+ pub struct WhisperRunOptions {
+     pub initial_prompt: Option<String>,
++    pub prompt_condition: Option<WhisperPromptCondition>,
+     pub condition_on_prev_tokens: Option<bool>,
+     pub temperature: Option<f32>,
+     pub temperature_inc: Option<f32>,
+@@ -112,6 +135,10 @@
+                     ext.initial_prompt = c.as_ptr();
+                 }
+                 set(
++                    &mut ext.prompt_condition,
++                    o.prompt_condition.map(WhisperPromptCondition::to_raw),
++                );
++                set(
+                     &mut ext.condition_on_prev_tokens,
+                     o.condition_on_prev_tokens,
+                 );
+@@ -205,3 +232,52 @@
+         *slot = v;
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::ffi::CStr;
++
++    #[test]
++    fn static_prompt_materializes_without_generated_history() {
++        let raw = RunExtension::Whisper(WhisperRunOptions {
++            initial_prompt: Some("Kwispr. Привет, друг!".into()),
++            prompt_condition: Some(WhisperPromptCondition::AllSegments),
++            condition_on_prev_tokens: Some(false),
++            ..Default::default()
++        })
++        .materialize()
++        .unwrap();
++        let RunExtRaw::Whisper { ext, .. } = &raw;
++        assert_eq!(
++            ext.prompt_condition,
++            sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS
++        );
++        assert!(!ext.condition_on_prev_tokens);
++        assert_eq!(
++            unsafe { CStr::from_ptr(ext.initial_prompt) }
++                .to_str()
++                .unwrap(),
++            "Kwispr. Привет, друг!"
++        );
++        // Keep the native repetition/silence fallback recipe intact.
++        assert_eq!(ext.temperature_inc, 0.2);
++        assert_eq!(ext.compression_ratio_thold, 2.4);
++        assert_eq!(ext.logprob_thold, -1.0);
++        assert_eq!(ext.no_speech_thold, 0.6);
++    }
++
++    #[test]
++    fn omitted_prompt_options_keep_native_defaults() {
++        let raw = RunExtension::Whisper(WhisperRunOptions::default())
++            .materialize()
++            .unwrap();
++        let RunExtRaw::Whisper { ext, .. } = &raw;
++        assert_eq!(
++            ext.prompt_condition,
++            sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT
++        );
++        assert!(ext.initial_prompt.is_null());
++        assert!(!ext.condition_on_prev_tokens);
++    }
++}
+--- a/transcribe-cpp-0.1.3/src/lib.rs
++++ b/transcribe-cpp-0.1.3/src/lib.rs
+@@ -65,7 +65,7 @@
+ pub use error::{Error, Result};
+ pub use family::{
+     MoonshineStreamingOptions, ParakeetBufferedStreamOptions, ParakeetStreamOptions, RunExtension,
+-    StreamExtension, VoxtralRealtimeStreamOptions, WhisperRunOptions,
++    StreamExtension, VoxtralRealtimeStreamOptions, WhisperPromptCondition, WhisperRunOptions,
+ };
+ pub use logging::{disable_logging, init_logging};
+ pub use model::{Capabilities, Model, ModelOptions, SessionLimits, SessionOptions};
+--- a/transcribe-cpp-sys-0.1.3/src/arch/whisper/model.cpp
++++ b/transcribe-cpp-sys-0.1.3/src/arch/whisper/model.cpp
+@@ -1459,15 +1459,9 @@
+                                                 &default_wp;
+     std::mt19937                       rng(wp->seed != 0 ? wp->seed : std::random_device{}());
+ 
+-    // Prompt + condition_on_prev_tokens setup. HF raises ValueError when
+-    // prompt_condition_type=="all-segments" without condition_on_prev_tokens;
+-    // mirror as INVALID_ARG before any compute runs.
+-    if (wp->prompt_condition == TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS && !wp->condition_on_prev_tokens) {
+-        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+-                "whisper run: prompt_condition=ALL_SEGMENTS requires "
+-                "condition_on_prev_tokens=true (HF parity)");
+-        return TRANSCRIBE_ERR_INVALID_ARG;
+-    }
++    // Kwispr: ALL_SEGMENTS may carry only the caller's static prompt, without
++    // conditioning on generated text. The prefix selection below already
++    // handles this combination; allowing it avoids cross-window failure loops.
+ 
+     // Resolve <|startofprev|> id. The converter writes
+     // stt.whisper.prev_sot_token_id into the GGUF; tokenizer fallback
+@@ -2506,7 +2500,7 @@
+     // Segment timestamps, temperature>0 fallback, and initial_prompt are now
+     // all handled in-batch; what still peels the WHOLE call to serial is the
+     // device/topology constraints + word timestamps (unsupported) + the
+-    // ALL_SEGMENTS-without-condition error (let serial surface it).
++    // ALL_SEGMENTS without generated history (keep this mode on the serial path).
+     const bool                      primary_is_gpu = cm->plan.primary_kind != transcribe::BackendKind::Cpu &&
+                                                      cm->plan.primary_kind != transcribe::BackendKind::Accel &&
+                                                      cm->plan.primary_kind != transcribe::BackendKind::Unknown;
+@@ -3336,8 +3330,7 @@
+ // the prior transcript. whisper_run repeats this (defense in depth) before the
+ // cast.
+ //
+-// Validates SHAPE only. The run-ext VALUE checks (ALL_SEGMENTS without
+-// condition_on_prev_tokens, prompt_tokens re-including <|startofprev|>,
++// Validates SHAPE only. The run-ext VALUE checks (prompt_tokens re-including <|startofprev|>,
+ // disallowed specials in initial_prompt) live in whisper_run() and reject after
+ // the snapshot is cleared — an accepted gap, since run() is one-shot with no
+ // accumulating transcript to protect.
+--- a/transcribe-cpp-sys-0.1.3/include/transcribe/whisper.h
++++ b/transcribe-cpp-sys-0.1.3/include/transcribe/whisper.h
+@@ -60,9 +60,9 @@
+  *
+  *   ALL_SEGMENTS: the initial prompt replaces <|startofprev|> as the
+  *     persistent BOS of the prev-context window on EVERY chunk.
+- *     Requires condition_on_prev_tokens=true; passing this mode
+- *     without condition_on_prev_tokens returns
+- *     TRANSCRIBE_ERR_INVALID_ARG (mirrors HF's ValueError).
++ *     Kwispr extension: with condition_on_prev_tokens=false, only the
++ *     caller's initial prompt is repeated; generated history is never
++ *     included. This combination uses the serial decode path.
+  */
+ enum transcribe_whisper_prompt_condition {
+     TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT = 0,

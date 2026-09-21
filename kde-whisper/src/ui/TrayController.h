@@ -15,6 +15,7 @@ public:
 
     virtual void toggleRecording() = 0;
     virtual void openSettings() = 0;
+    virtual void openMeetings() = 0;
     virtual void startLocalStt() = 0;
     virtual void stopLocalStt() = 0;
     virtual void retryLastFailed() = 0;
@@ -31,6 +32,7 @@ public:
 
     QMenu *menu() const;
     void refreshState();
+    void setMeetingState(const QString &state);
 
 private:
     QAction *addAction(const QString &text, void (ITrayActions::*method)());
@@ -42,4 +44,5 @@ private:
     QAction *m_startLocalSttAction = nullptr;
     QAction *m_stopLocalSttAction = nullptr;
     QAction *m_retryLastFailedAction = nullptr;
+    QAction *m_meetingsAction = nullptr;
 };
