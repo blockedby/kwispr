@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +34,17 @@ class KwisprScriptHarness:
         self.bin.mkdir()
         shutil.copy2(REPO_ROOT / "kwispr.sh", self.repo / "kwispr.sh")
         (self.repo / "sounds").mkdir()
+        self._processes: list[subprocess.Popen[bytes]] = []
+        self._reapers: list[threading.Thread] = []
         self._write_fakes()
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        for process in self._processes:
+            if process.poll() is None:
+                process.terminate()
+        for reaper in self._reapers:
+            reaper.join(timeout=5)
         self._tmp.cleanup()
 
     def write_env(self, **values: str) -> Path:
@@ -62,8 +72,10 @@ class KwisprScriptHarness:
         (self.root / "curl_response.json").write_text(body, encoding="utf-8")
         (self.root / "curl_code.txt").write_text(str(http_code), encoding="utf-8")
 
-    def run(self, *args: str) -> subprocess.CompletedProcess[str]:
-        env = os.environ.copy()
+    def environment(self, **overrides: str) -> dict[str, str]:
+        # Real desktop settings/credentials must never affect the fake API.
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith("KWISPR_") and key != "OPENAI_API_KEY"}
         env.update(
             {
                 "HOME": str(self.home),
@@ -73,15 +85,50 @@ class KwisprScriptHarness:
                 "KWISPR_CONTRACT_ROOT": str(self.root),
             }
         )
+        env.update(overrides)
+        return env
+
+    def run(self, *args: str, env_overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(self.repo / "kwispr.sh"), *args],
             cwd=self.repo,
-            env=env,
+            env=self.environment(**(env_overrides or {})),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=30,
         )
+
+    def prepare_recording(self) -> Path:
+        """Own/reap a FIFO recorder to exercise the real shell stop path."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        wav = self.make_wav()
+        fifo = self.cache_dir / "ffmpeg.fifo"
+        os.mkfifo(fifo)
+        recorder = subprocess.Popen(
+            [str(self.bin / "fake-recorder"), str(fifo)],
+            env=self.environment(), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        holder = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        for process in (recorder, holder):
+            self._processes.append(process)
+            reaper = threading.Thread(target=process.wait, daemon=True)
+            reaper.start()
+            self._reapers.append(reaper)
+        (self.cache_dir / "current.pid").write_text(f"{recorder.pid}\n{holder.pid}\n")
+        (self.cache_dir / "current.path").write_text(f"{wav}\n")
+        (self.repo / "sounds" / "stop.wav").touch()
+        return wav
+
+    def recording_events(self) -> list[dict[str, Any]]:
+        path = self.root / "recording_events.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
 
     def clipboard_text(self) -> str:
         path = self.root / "clipboard.txt"
@@ -161,7 +208,37 @@ if "-p" in sys.argv[1:]:
 ''',
         )
         self._write_executable("ydotool", "#!/usr/bin/env bash\nexit 0\n")
-        self._write_executable("paplay", "#!/usr/bin/env bash\nexit 0\n")
+        self._write_executable(
+            "paplay",
+            r'''#!/usr/bin/env python3
+import json, os, sys, time
+with open(os.path.join(os.environ["KWISPR_CONTRACT_ROOT"], "recording_events.jsonl"), "a") as fh:
+    fh.write(json.dumps({"event": "cue", "file": sys.argv[1], "at": time.monotonic()}) + "\n")
+''',
+        )
+        self._write_executable(
+            "sleep",
+            r'''#!/usr/bin/env python3
+import json, os, sys, time
+with open(os.path.join(os.environ["KWISPR_CONTRACT_ROOT"], "recording_events.jsonl"), "a") as fh:
+    fh.write(json.dumps({"event": "sleep", "seconds": sys.argv[1], "at": time.monotonic()}) + "\n")
+time.sleep(float(sys.argv[1]))
+''',
+        )
+        self._write_executable(
+            "fake-recorder",
+            r'''#!/usr/bin/env python3
+import json, os, sys, time
+def record(event):
+    with open(os.path.join(os.environ["KWISPR_CONTRACT_ROOT"], "recording_events.jsonl"), "a") as fh:
+        fh.write(json.dumps({"event": event, "at": time.monotonic()}) + "\n")
+with open(sys.argv[1], "rb", buffering=0) as fifo:
+    assert fifo.read(1) == b"q"
+    record("stop-request")
+    time.sleep(0.05)
+    record("finalized")
+''',
+        )
 
     def _write_executable(self, name: str, content: str) -> None:
         path = self.bin / name
@@ -170,6 +247,4 @@ if "-p" in sys.argv[1:]:
 
     @staticmethod
     def _quote(value: str) -> str:
-        if value == "" or any(ch.isspace() for ch in value) or any(ch in value for ch in "'\"$`\\"):
-            return "'" + value.replace("'", "'\\''") + "'"
-        return value
+        return shlex.quote(value)

@@ -130,6 +130,8 @@ class KwisprShellContractTest(unittest.TestCase):
             self.assertIn("language=ru", args)
             self.assertTrue(any(arg == f"file=@{wav}" for arg in args))
             self.assertNotIn("Authorization: Bearer", "\n".join(args))
+            self.assertFalse(any(arg.startswith("prompt=") for arg in args))
+            self.assertNotIn("preserve_audio_tail=1", args)
 
     def test_openrouter_sends_input_audio_prompt_and_model(self) -> None:
         with KwisprScriptHarness() as h:
@@ -158,6 +160,176 @@ class KwisprShellContractTest(unittest.TestCase):
             self.assertEqual(content[1]["type"], "input_audio")
             self.assertEqual(content[1]["input_audio"]["format"], "wav")
             self.assertTrue(content[1]["input_audio"]["data"])
+
+    def test_whisper_context_and_vocabulary_are_literal_form_strings(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav()
+            prompt = '@/etc/passwd;type=text/plain\nЯ работаю над проектом.'
+            vocabulary = 'Kwispr, KDE, $(touch injected), "quote", `id`, <file'
+            h.write_config(
+                KWISPR_API_URL="http://127.0.0.1:19650/v1/audio/transcriptions",
+                KWISPR_LOCAL_STT_CONFIGURED="1",
+                KWISPR_MODEL="whisper-large-v3-turbo",
+                KWISPR_WHISPER_PROMPT=prompt,
+                KWISPR_VOCABULARY=vocabulary,
+                KWISPR_TRANSCRIPTION_PROMPT="CHAT INSTRUCTIONS MUST STAY OUT",
+                KWISPR_AUTOPASTE="0",
+            )
+            h.fake_curl_response(200, {"text": "Привет, Kwispr!"})
+
+            result = h.run("retry", str(wav))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = h.curl_invocations()[0]
+            index = args.index(f"prompt={prompt}\n{vocabulary}")
+            self.assertEqual(args[index - 1], "--form-string")
+            self.assertNotIn("CHAT INSTRUCTIONS MUST STAY OUT", "\n".join(args))
+            self.assertFalse((h.repo / "injected").exists())
+            self.assertEqual(h.clipboard_text(), "Привет, Kwispr!")
+
+    def test_vocabulary_without_whisper_context_is_sent_as_prompt(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav()
+            h.write_config(
+                KWISPR_API_URL="https://api.openai.com/v1/audio/transcriptions",
+                KWISPR_API_KEY="sk-test", KWISPR_VOCABULARY="Kwispr, PipeWire",
+                KWISPR_PRESERVE_AUDIO_TAIL="1",
+                KWISPR_AUTOPASTE="0",
+            )
+            h.fake_curl_response(200, {"text": "Kwispr"})
+            result = h.run("retry", str(wav))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("prompt=Kwispr, PipeWire", h.curl_invocations()[0])
+            self.assertNotIn("preserve_audio_tail=1", h.curl_invocations()[0])
+
+    def test_local_non_whisper_omits_retained_context_but_can_preserve_tail(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav()
+            h.write_config(
+                KWISPR_API_URL="http://inference-box.lan:19650/v1/audio/transcriptions",
+                KWISPR_LOCAL_STT_CONFIGURED="1", KWISPR_MODEL="parakeet-tdt-0.6b-v3",
+                KWISPR_WHISPER_PROMPT="Сохранённый контекст.", KWISPR_VOCABULARY="Kwispr",
+                KWISPR_PRESERVE_AUDIO_TAIL="1", KWISPR_AUTOPASTE="0",
+            )
+            h.fake_curl_response(200, {"text": "Kwispr"})
+            result = h.run("retry", str(wav))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = h.curl_invocations()[0]
+            self.assertFalse(any(arg.startswith("prompt=") for arg in args))
+            index = args.index("preserve_audio_tail=1")
+            self.assertEqual(args[index - 1], "--form-string")
+
+    def test_legacy_loopback_non_whisper_skips_context_and_preserve_tail_can_be_disabled(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav()
+            h.write_config(
+                KWISPR_API_URL="http://127.0.0.1:19650/v1/audio/transcriptions",
+                KWISPR_LOCAL_STT_CONFIGURED="0", KWISPR_MODEL="parakeet-tdt-0.6b-v3",
+                KWISPR_WHISPER_PROMPT="Сохранённый контекст.", KWISPR_VOCABULARY="Kwispr",
+                KWISPR_PRESERVE_AUDIO_TAIL="0", KWISPR_AUTOPASTE="0",
+            )
+            h.fake_curl_response(200, {"text": "Kwispr"})
+            result = h.run("retry", str(wav))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = h.curl_invocations()[0]
+            self.assertFalse(any(arg.startswith("prompt=") for arg in args))
+            self.assertNotIn("preserve_audio_tail=1", args)
+
+    def test_openrouter_adds_literal_vocabulary_to_chat_instructions_only(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav()
+            vocabulary = 'Kwispr, "quoted", $(touch injected); <file'
+            h.write_config(
+                KWISPR_BACKEND="openrouter-chat",
+                KWISPR_API_URL="https://openrouter.ai/api/v1/chat/completions",
+                KWISPR_TRANSCRIPTION_PROMPT="Transcribe exactly.",
+                KWISPR_WHISPER_PROMPT="WHISPER CONTEXT MUST STAY OUT",
+                KWISPR_VOCABULARY=vocabulary, KWISPR_PRESERVE_AUDIO_TAIL="1",
+                KWISPR_AUTOPASTE="0",
+            )
+            h.fake_curl_response(200, {"choices": [{"message": {"content": "Kwispr"}}]})
+            result = h.run("retry", str(wav))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = h.curl_invocations()[0]
+            payload = json.loads(h.data_binary_path(args).read_text())
+            prompt = payload["messages"][0]["content"][0]["text"]
+            self.assertEqual(prompt, "Transcribe exactly.\nVocabulary (use these spellings only when heard): " + vocabulary)
+            self.assertNotIn("preserve_audio_tail=1", args)
+            self.assertFalse((h.repo / "injected").exists())
+
+    def test_invalid_quality_settings_fail_before_request(self) -> None:
+        invalid_settings = [
+            ("KWISPR_STOP_DELAY_MS", value) for value in ("-1", "2001", "1.5", "00000", "1;id")
+        ] + [
+            ("KWISPR_PRESERVE_AUDIO_TAIL", "true"),
+            ("KWISPR_VOCABULARY", "one\ntwo"),
+            ("KWISPR_VOCABULARY", "one\rtwo"),
+            ("KWISPR_WHISPER_PROMPT", "я" * 4097),
+        ]
+        for key, value in invalid_settings:
+            with self.subTest(key=key, value=value[:30]), KwisprScriptHarness() as h:
+                wav = h.make_wav()
+                h.write_config(KWISPR_API_URL="http://localhost:19650/v1/audio/transcriptions", **{key: value})
+                result = h.run("retry", str(wav))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(key, result.stderr)
+                self.assertEqual(h.curl_invocations(), [])
+
+    def test_context_limit_counts_unicode_characters_and_joining_newline(self) -> None:
+        for prompt, vocabulary, accepted in (("я" * 4096, "", True), ("я" * 4094, "Я", True), ("я" * 4095, "Я", False)):
+            with self.subTest(length=len(prompt), vocabulary=vocabulary), KwisprScriptHarness() as h:
+                wav = h.make_wav()
+                h.write_config(
+                    KWISPR_API_URL="http://localhost:19650/v1/audio/transcriptions",
+                    KWISPR_WHISPER_PROMPT=prompt, KWISPR_VOCABULARY=vocabulary,
+                    KWISPR_AUTOPASTE="0",
+                )
+                h.fake_curl_response(200, {"text": "Привет."})
+                result = h.run("retry", str(wav))
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                self.assertEqual(bool(h.curl_invocations()), accepted)
+
+    def test_stop_delay_precedes_recorder_stop_and_cue_follows_finalization(self) -> None:
+        for delay in (None, "0350", "2000"):
+            with self.subTest(delay=delay), KwisprScriptHarness() as h:
+                h.prepare_recording()
+                options = {} if delay is None else {"KWISPR_STOP_DELAY_MS": delay}
+                h.write_config(
+                    KWISPR_API_URL="http://localhost:19650/v1/audio/transcriptions",
+                    KWISPR_AUTOPASTE="0", **options,
+                )
+                h.fake_curl_response(200, {"text": "Последние слова."})
+                result = h.run("toggle")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                events = h.recording_events()
+                stop = next(event for event in events if event["event"] == "stop-request")
+                finalized = next(event for event in events if event["event"] == "finalized")
+                cue = next(event for event in events if event["event"] == "cue")
+                self.assertGreater(cue["at"], finalized["at"])
+                sleeps_before_stop = [event for event in events if event["event"] == "sleep" and event["at"] < stop["at"]]
+                if delay is None:
+                    self.assertEqual(sleeps_before_stop, [])
+                else:
+                    self.assertEqual(len(sleeps_before_stop), 1)
+                    self.assertAlmostEqual(float(sleeps_before_stop[0]["seconds"]), int(delay) / 1000)
+                    self.assertGreaterEqual(stop["at"] - sleeps_before_stop[0]["at"], int(delay) / 1000)
+                self.assertFalse((h.cache_dir / "current.pid").exists())
+                self.assertEqual(h.clipboard_text(), "Последние слова.")
+
+    def test_legacy_hallucination_filter_works_under_host_locales(self) -> None:
+        transcript = "Привет! Последние слова сохранены."
+        for locale in ("C", "C.UTF-8"):
+            with self.subTest(locale=locale), KwisprScriptHarness() as h:
+                wav = h.make_wav()
+                h.write_config(
+                    KWISPR_API_URL="http://localhost:19650/v1/audio/transcriptions",
+                    KWISPR_AUTOPASTE="0",
+                )
+                h.fake_curl_response(200, {"text": f"  {transcript} Субтитры: Credits  "})
+                result = h.run("retry", str(wav), env_overrides={"LC_ALL": locale})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(h.clipboard_text(), transcript)
+                self.assertEqual(wav.with_suffix(".txt").read_text(), transcript)
 
 
 if __name__ == "__main__":
