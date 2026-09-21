@@ -130,7 +130,7 @@ python3 -m unittest discover
 ./rust-local-stt/build-in-podman.sh
 ```
 
-Подробнее: [локальный STT](docs/local-stt.md) · [KDE-приложение](docs/kde-whisper.md)
+Подробнее: [качество диктовки и словарь](docs/dictation-quality.md) · [локальный STT](docs/local-stt.md) · [KDE-приложение](docs/kde-whisper.md)
 
 ## Лицензия
 

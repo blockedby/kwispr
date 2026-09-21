@@ -118,3 +118,7 @@ KWISPR_MODEL=whisper-large-v3-turbo
 - Model install/delete/verify behavior stays authoritative in `kwispr-models.py`.
 - Hosting Local STT still requires the installed Rust runtime; connecting to a remote Local STT server does not.
 - LAN mode does not provide authentication, TLS, reverse-proxy setup, or firewall automation.
+
+## Dictation quality
+
+The **Dictation** settings group provides an editable personal vocabulary, a Whisper punctuation sample, stop delay, and local audio-ending preservation. See [Dictation quality and personal vocabulary](dictation-quality.md) for behavior and supported backends.

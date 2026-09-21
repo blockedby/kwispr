@@ -178,3 +178,5 @@ Use `./kwispr-models.py list` for the complete current catalog.
 | checksum failure | Do not use the bytes; retry so another catalog source can be attempted. |
 | backend initialization/load failure | Keep staged shared libraries beside the binary and verify the host Vulkan loader/driver; CPU remains available through dynamic CPU modules. |
 | incorrect language | Supply an ISO language code supported by the selected model, or omit `KWISPR_LANGUAGE` for model-default behavior. |
+
+See [Dictation quality and personal vocabulary](dictation-quality.md) for optional Whisper hints and audio-ending preservation.
