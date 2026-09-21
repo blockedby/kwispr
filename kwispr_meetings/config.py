@@ -51,16 +51,25 @@ def validate_local_backend(config: dict[str, str]) -> None:
     try:
         url = urlsplit(config.get("KWISPR_API_URL", ""))
         hostname = url.hostname or ""
+        _ = url.port  # Reject malformed ports before recording any audio.
     except ValueError as error:
         raise ConfigError("Meetings require a valid local STT HTTP endpoint.") from error
+    address = None
     try:
-        loopback = hostname.lower() == "localhost" or ipaddress.ip_address(hostname).is_loopback
+        address = ipaddress.ip_address(hostname)
     except ValueError:
-        loopback = False
+        pass
+    loopback = hostname.lower() == "localhost" or bool(address and address.is_loopback)
+    # A stale local-mode flag must never authorize uploads to a cloud endpoint.
+    private_networks = (ipaddress.ip_network("10.0.0.0/8"),
+                        ipaddress.ip_network("172.16.0.0/12"),
+                        ipaddress.ip_network("192.168.0.0/16"),
+                        ipaddress.ip_network("fc00::/7"))
+    private_lan = bool(address and any(address in network for network in private_networks))
     if url.scheme not in {"http", "https"} or not hostname or url.username or url.password:
         raise ConfigError("Meetings require a valid local STT HTTP endpoint.")
-    if not loopback and config.get("KWISPR_LOCAL_STT_CONFIGURED") != "1":
-        raise ConfigError("Meetings require local STT; cloud fallback is disabled. Configure a local endpoint first.")
+    if not loopback and not (private_lan and config.get("KWISPR_LOCAL_STT_CONFIGURED") == "1"):
+        raise ConfigError("Meetings require local STT on localhost or an explicitly configured private LAN IP; cloud fallback is disabled.")
 
 
 def output_dir(config: dict[str, str]) -> Path:

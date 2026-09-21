@@ -41,7 +41,13 @@ class MeetingConfigTests(unittest.TestCase):
                 validate_local_backend({"KWISPR_API_URL": url})
         with self.assertRaises(ConfigError):
             validate_local_backend({"KWISPR_BACKEND": "openrouter-chat", "KWISPR_API_URL": "http://localhost/x"})
-        validate_local_backend({"KWISPR_API_URL": "http://192.168.1.10:19650/x", "KWISPR_LOCAL_STT_CONFIGURED": "1"})
+        for host in ("192.168.1.10", "10.1.2.3", "172.20.1.1", "[fd12::1]"):
+            validate_local_backend({"KWISPR_API_URL": f"http://{host}:19650/x", "KWISPR_LOCAL_STT_CONFIGURED": "1"})
+        for host in ("api.openai.com", "example.local", "8.8.8.8", "169.254.1.1", "192.0.2.1", "[2001:db8::1]"):
+            with self.subTest(host=host), self.assertRaises(ConfigError):
+                validate_local_backend({"KWISPR_API_URL": f"https://{host}/x", "KWISPR_LOCAL_STT_CONFIGURED": "1"})
+        with self.assertRaises(ConfigError):
+            validate_local_backend({"KWISPR_API_URL": "http://localhost:invalid/x"})
 
     def test_speaker_range_and_output_location(self):
         self.assertEqual(speaker_count("0"), 0)
