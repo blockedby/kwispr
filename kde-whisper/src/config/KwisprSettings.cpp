@@ -128,6 +128,17 @@ KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
     settings.modelDir = env.value(QStringLiteral("KWISPR_MODEL_DIR"), settings.modelDir);
     settings.audioFormat = env.value(QStringLiteral("KWISPR_AUDIO_FORMAT"), settings.audioFormat);
     settings.transcriptionPrompt = env.value(QStringLiteral("KWISPR_TRANSCRIPTION_PROMPT"), settings.transcriptionPrompt);
+    settings.whisperPrompt = env.value(QStringLiteral("KWISPR_WHISPER_PROMPT"));
+    settings.vocabulary = normalizedVocabulary(env.value(QStringLiteral("KWISPR_VOCABULARY")));
+    if (env.contains(QStringLiteral("KWISPR_STOP_DELAY_MS"))) {
+        const QString rawDelay = env.value(QStringLiteral("KWISPR_STOP_DELAY_MS"));
+        static const QRegularExpression decimalDelay(QStringLiteral("^[0-9]+$"));
+        settings.stopDelayMs = rawDelay.toInt(&ok);
+        if (!ok || !decimalDelay.match(rawDelay).hasMatch()) {
+            settings.stopDelayMs = -1;
+        }
+    }
+    settings.preserveAudioTail = envEnabled(env.value(QStringLiteral("KWISPR_PRESERVE_AUDIO_TAIL")), false);
     settings.openRouterReferer = canonicalOrLegacyValue(env,
                                                         QStringLiteral("KWISPR_HTTP_REFERER"),
                                                         QStringLiteral("KWISPR_OPENROUTER_HTTP_REFERER"),
@@ -160,6 +171,26 @@ KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
     }
     settings.modelDir = settings.resolvedModelDir();
     return settings;
+}
+
+QString KwisprSettings::normalizedVocabulary(const QString &value)
+{
+    const QStringList entries = value.split(QRegularExpression(QStringLiteral("[,\\r\\n]+")), Qt::SkipEmptyParts);
+    QStringList terms;
+    for (const QString &entry : entries) {
+        const QString term = entry.simplified();
+        if (!term.isEmpty()) {
+            terms.append(term);
+        }
+    }
+    return terms.join(QStringLiteral(", "));
+}
+
+QString KwisprSettings::combinedWhisperPrompt() const
+{
+    const QString context = whisperPrompt.simplified();
+    const QString terms = normalizedVocabulary(vocabulary);
+    return context.isEmpty() ? terms : terms.isEmpty() ? context : context + QLatin1Char('\n') + terms;
 }
 
 QString KwisprSettings::resolvedModelDir() const
@@ -195,9 +226,11 @@ void KwisprSettings::writeTo(EnvFile &env) const
     env.setValue("KWISPR_SOUNDS", sounds ? "1" : "0");
 
     env.setValue("KWISPR_MODEL_DIR", resolvedModelDir());
-    if (!transcriptionPrompt.isEmpty()) {
-        env.setValue("KWISPR_TRANSCRIPTION_PROMPT", transcriptionPrompt);
-    }
+    env.setValue("KWISPR_TRANSCRIPTION_PROMPT", transcriptionPrompt.simplified());
+    env.setValue("KWISPR_WHISPER_PROMPT", whisperPrompt.simplified());
+    env.setValue("KWISPR_VOCABULARY", normalizedVocabulary(vocabulary));
+    env.setValue("KWISPR_STOP_DELAY_MS", QString::number(stopDelayMs));
+    env.setValue("KWISPR_PRESERVE_AUDIO_TAIL", preserveAudioTail ? "1" : "0");
     env.setValue("KWISPR_HTTP_REFERER", openRouterReferer);
     env.setValue("KWISPR_OPENROUTER_HTTP_REFERER", openRouterReferer);
     env.setValue("KWISPR_APP_TITLE", openRouterAppTitle);
@@ -242,6 +275,15 @@ QUrl KwisprSettings::localSttHealthUrl() const
 bool KwisprSettings::validate(QStringList *errors) const
 {
     bool ok = true;
+
+    if (combinedWhisperPrompt().toUcs4().size() > 4096) {
+        ok = false;
+        addError(errors, "Dictation context and vocabulary together must be at most 4096 characters.");
+    }
+    if (stopDelayMs < 0 || stopDelayMs > 2000) {
+        ok = false;
+        addError(errors, "Recording stop delay must be between 0 and 2000 ms.");
+    }
 
     if (apiUrl.startsWith(OpenAiTranscriptionsUrl) && apiKey.trimmed().isEmpty()) {
         ok = false;

@@ -91,6 +91,7 @@ private:
     void updateBackendVisibility();
     void updateModelControls();
     void updateVadControls();
+    void updateDictationControls();
     void showBusyCloseStatus();
     bool selectedModelIsCatalogModel() const;
     void setBackendRowVisible(QWidget *field, QLabel *label, bool visible);
@@ -149,6 +150,14 @@ private:
     QLabel *m_languageLabel = nullptr;
     QPlainTextEdit *m_promptEdit = nullptr;
     QLabel *m_promptLabel = nullptr;
+    QPlainTextEdit *m_whisperPromptEdit = nullptr;
+    QPlainTextEdit *m_vocabularyEdit = nullptr;
+    QPushButton *m_punctuationPresetButton = nullptr;
+    QLabel *m_dictationHintsLabel = nullptr;
+    QLabel *m_dictationErrorLabel = nullptr;
+    QSpinBox *m_stopDelaySpin = nullptr;
+    bool m_stopDelayNeedsCorrection = false;
+    QCheckBox *m_preserveAudioTailCheck = nullptr;
     QGroupBox *m_vadGroup = nullptr;
     QKeySequenceEdit *m_globalShortcutEdit = nullptr;
     QLabel *m_globalShortcutStatusLabel = nullptr;

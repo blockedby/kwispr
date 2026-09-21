@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <QTemporaryDir>
 
 class SettingsModelTest : public QObject {
     Q_OBJECT
@@ -23,7 +24,76 @@ private slots:
     void vadDefaultsMatchEnergyRuntime();
     void vadEnvUsesCanonicalKeyWithLegacyCompatibility();
     void vadValidationMatchesRuntimeRequirements();
+    void dictationHintsRoundTripAndClearWithoutMultilineAssignments();
+    void dictationValidationMatchesRuntimeLimits();
 };
+
+void SettingsModelTest::dictationHintsRoundTripAndClearWithoutMultilineAssignments()
+{
+    KwisprSettings settings;
+    QVERIFY(settings.whisperPrompt.isEmpty());
+    QVERIFY(settings.vocabulary.isEmpty());
+    QCOMPARE(settings.stopDelayMs, 0);
+    QVERIFY(!settings.preserveAudioTail);
+    settings.whisperPrompt = QStringLiteral("Привет!\n Что  нового?\tВсё хорошо.");
+    settings.vocabulary = QStringLiteral("Kwispr\n OpenRouter\n\nO'Brien, имя проекта");
+    settings.transcriptionPrompt = QStringLiteral("Keep\n punctuation.");
+    settings.stopDelayMs = 350;
+    settings.preserveAudioTail = true;
+    EnvFile env;
+    settings.writeTo(env);
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("kwispr.env"));
+    QVERIFY(env.save(path));
+    EnvFile reloaded;
+    QVERIFY(reloaded.load(path));
+    const KwisprSettings actual = KwisprSettings::fromEnv(reloaded);
+    QCOMPARE(actual.whisperPrompt, QStringLiteral("Привет! Что нового? Всё хорошо."));
+    QCOMPARE(actual.vocabulary, QStringLiteral("Kwispr, OpenRouter, O'Brien, имя проекта"));
+    QCOMPARE(actual.transcriptionPrompt, QStringLiteral("Keep punctuation."));
+    QCOMPARE(actual.stopDelayMs, 350);
+    QVERIFY(actual.preserveAudioTail);
+    settings.whisperPrompt.clear();
+    settings.vocabulary.clear();
+    settings.transcriptionPrompt.clear();
+    settings.writeTo(reloaded);
+    QVERIFY(reloaded.save(path));
+    QVERIFY(env.load(path));
+    const auto cleared = KwisprSettings::fromEnv(env);
+    QVERIFY(cleared.whisperPrompt.isEmpty());
+    QVERIFY(cleared.vocabulary.isEmpty());
+    QVERIFY(cleared.transcriptionPrompt.isEmpty());
+}
+
+void SettingsModelTest::dictationValidationMatchesRuntimeLimits()
+{
+    KwisprSettings settings;
+    settings.applyLocalPreset(QStringLiteral("whisper-large-v3-turbo"), QString(), QString());
+    const QString emoji = QString::fromUcs4(U"😀");
+    settings.whisperPrompt = emoji.repeated(4094);
+    settings.vocabulary = QStringLiteral("Я");
+    QVERIFY(settings.validate());
+    QCOMPARE(settings.combinedWhisperPrompt().toUcs4().size(), 4096);
+    settings.vocabulary += QLatin1Char('a');
+    QStringList errors;
+    QVERIFY(!settings.validate(&errors));
+    QVERIFY(errors.join('\n').contains(QStringLiteral("4096")));
+    settings.whisperPrompt.clear();
+    settings.vocabulary.clear();
+    for (int delay : {0, 2000}) {
+        settings.stopDelayMs = delay;
+        QVERIFY(settings.validate());
+    }
+    for (const QString &delay : {QStringLiteral("-1"), QStringLiteral("2001"), QStringLiteral("soon"), QStringLiteral("1.5")}) {
+        EnvFile env;
+        settings.writeTo(env);
+        env.setValue(QStringLiteral("KWISPR_STOP_DELAY_MS"), delay);
+        errors.clear();
+        QVERIFY(!KwisprSettings::fromEnv(env).validate(&errors));
+        QVERIFY(errors.join('\n').contains(QStringLiteral("stop delay")));
+    }
+}
 
 void SettingsModelTest::localPresetWritesLocalSttKeys()
 {

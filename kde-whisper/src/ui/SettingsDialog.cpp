@@ -22,6 +22,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QUrl>
@@ -143,6 +144,8 @@ KwisprSettings SettingsDialog::currentSettings() const
 bool SettingsDialog::save()
 {
     m_lastError.clear();
+    m_dictationErrorLabel->clear();
+    m_dictationErrorLabel->hide();
     if (m_modelOperationBusy) {
         m_lastError = QStringLiteral("Wait for the current model operation to finish before saving settings.");
         m_modelStatusLabel->setText(m_lastError);
@@ -182,6 +185,13 @@ bool SettingsDialog::save()
     if (!settings.validate(&errors)) {
         m_lastError = errors.join(QStringLiteral("\n"));
         m_modelStatusLabel->setText(m_lastError);
+        m_dictationErrorLabel->setText(m_lastError);
+        m_dictationErrorLabel->show();
+        if (settings.combinedWhisperPrompt().toUcs4().size() > 4096) {
+            m_vocabularyEdit->setFocus(Qt::OtherFocusReason);
+        } else if (settings.stopDelayMs < 0 || settings.stopDelayMs > 2000) {
+            m_stopDelaySpin->setFocus(Qt::OtherFocusReason);
+        }
         return false;
     }
 
@@ -244,10 +254,21 @@ void SettingsDialog::buildUi()
 {
     setWindowTitle(QStringLiteral("KDE Whisper Settings"));
     auto *root = new QVBoxLayout(this);
+    auto *scroll = new QScrollArea(this);
+    scroll->setObjectName(QStringLiteral("settingsScrollArea"));
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto *content = new QWidget(scroll);
+    auto *sections = new QVBoxLayout(content);
+    sections->setContentsMargins(0, 0, 0, 0);
+    scroll->setWidget(content);
+    root->addWidget(scroll);
+    resize(760, 720);
 
     auto *backendGroup = new QGroupBox(QStringLiteral("Backend"), this);
     backendGroup->setObjectName(QStringLiteral("backendGroup"));
     m_backendForm = new QFormLayout(backendGroup);
+    m_backendForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     m_backendCombo = new QComboBox(backendGroup);
     m_backendCombo->setObjectName(QStringLiteral("backendCombo"));
@@ -308,14 +329,14 @@ void SettingsDialog::buildUi()
     m_localModelCombo = new QComboBox(m_localModelRow);
     m_localModelCombo->setObjectName(QStringLiteral("localModelCombo"));
     m_localModelCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    m_localModelCombo->setMinimumContentsLength(24);
+    m_localModelCombo->setMinimumContentsLength(14);
     m_downloadButton = new QPushButton(QStringLiteral("Download here"), m_localModelRow);
     m_downloadButton->setObjectName(QStringLiteral("localModelDownloadButton"));
     m_deleteButton = new QPushButton(QStringLiteral("Delete local"), m_localModelRow);
     m_deleteButton->setObjectName(QStringLiteral("localModelDeleteButton"));
-    modelGrid->addWidget(m_localModelCombo, 0, 0);
-    modelGrid->addWidget(m_downloadButton, 0, 1);
-    modelGrid->addWidget(m_deleteButton, 0, 2);
+    modelGrid->addWidget(m_localModelCombo, 0, 0, 1, 3);
+    modelGrid->addWidget(m_downloadButton, 1, 1);
+    modelGrid->addWidget(m_deleteButton, 1, 2);
 
     auto *progressStatus = new QWidget(m_localModelRow);
     auto *progressStatusLayout = new QVBoxLayout(progressStatus);
@@ -330,7 +351,7 @@ void SettingsDialog::buildUi()
     m_modelStatusLabel->setWordWrap(true);
     progressStatusLayout->addWidget(m_modelBusyIndicator);
     progressStatusLayout->addWidget(m_modelStatusLabel);
-    modelGrid->addWidget(progressStatus, 1, 0);
+    modelGrid->addWidget(progressStatus, 2, 0, 1, 3);
 
     m_modelDownloadPercentLabel = new QLabel(m_localModelRow);
     m_modelDownloadPercentLabel->setObjectName(QStringLiteral("modelDownloadPercentLabel"));
@@ -338,8 +359,8 @@ void SettingsDialog::buildUi()
     m_modelDownloadEtaLabel = new QLabel(m_localModelRow);
     m_modelDownloadEtaLabel->setObjectName(QStringLiteral("modelDownloadEtaLabel"));
     m_modelDownloadEtaLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
-    modelGrid->addWidget(m_modelDownloadPercentLabel, 1, 1);
-    modelGrid->addWidget(m_modelDownloadEtaLabel, 1, 2);
+    modelGrid->addWidget(m_modelDownloadPercentLabel, 3, 1);
+    modelGrid->addWidget(m_modelDownloadEtaLabel, 3, 2);
     modelGrid->setColumnStretch(0, 1);
     m_modelDownloadPercentLabel->hide();
     m_modelDownloadEtaLabel->hide();
@@ -349,20 +370,74 @@ void SettingsDialog::buildUi()
 
     m_languageCombo = new QComboBox(backendGroup);
     m_languageCombo->setObjectName(QStringLiteral("languageEdit"));
+    m_languageCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_languageCombo->setMinimumContentsLength(14);
     m_languageLabel = formLabel(QStringLiteral("Language"), QStringLiteral("languageLabel"), backendGroup);
     m_backendForm->addRow(m_languageLabel, m_languageCombo);
 
     m_promptEdit = new QPlainTextEdit(backendGroup);
     m_promptEdit->setObjectName(QStringLiteral("promptEdit"));
     m_promptEdit->setMinimumHeight(80);
+    m_promptEdit->setMaximumHeight(110);
     m_promptLabel = formLabel(QStringLiteral("Prompt"), QStringLiteral("promptLabel"), backendGroup);
     m_backendForm->addRow(m_promptLabel, m_promptEdit);
-    root->addWidget(backendGroup);
+    sections->addWidget(backendGroup);
+
+    auto *dictationGroup = new QGroupBox(QStringLiteral("Dictation"), content);
+    dictationGroup->setObjectName(QStringLiteral("dictationGroup"));
+    auto *dictationForm = new QFormLayout(dictationGroup);
+    dictationForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+
+    m_vocabularyEdit = new QPlainTextEdit(dictationGroup);
+    m_vocabularyEdit->setObjectName(QStringLiteral("vocabularyEdit"));
+    m_vocabularyEdit->setAccessibleName(QStringLiteral("Personal vocabulary, one term per line"));
+    m_vocabularyEdit->setPlaceholderText(QStringLiteral("Kwispr\nOpenRouter\nProject or person names"));
+    m_vocabularyEdit->setFixedHeight(88);
+    m_vocabularyEdit->setTabChangesFocus(true);
+    auto *vocabularyLabel = formLabel(QStringLiteral("Personal vocabulary"), QStringLiteral("vocabularyLabel"), dictationGroup);
+    vocabularyLabel->setBuddy(m_vocabularyEdit);
+    dictationForm->addRow(vocabularyLabel, m_vocabularyEdit);
+
+    m_whisperPromptEdit = new QPlainTextEdit(dictationGroup);
+    m_whisperPromptEdit->setObjectName(QStringLiteral("whisperPromptEdit"));
+    m_whisperPromptEdit->setAccessibleName(QStringLiteral("Transcript style example"));
+    m_whisperPromptEdit->setFixedHeight(72);
+    m_whisperPromptEdit->setTabChangesFocus(true);
+    auto *whisperLabel = formLabel(QStringLiteral("Transcript style example"), QStringLiteral("whisperPromptLabel"), dictationGroup);
+    whisperLabel->setBuddy(m_whisperPromptEdit);
+    dictationForm->addRow(whisperLabel, m_whisperPromptEdit);
+    m_punctuationPresetButton = new QPushButton(QStringLiteral("Use Russian punctuation example"), dictationGroup);
+    m_punctuationPresetButton->setObjectName(QStringLiteral("punctuationPresetButton"));
+    m_punctuationPresetButton->setAutoDefault(false);
+    dictationForm->addRow(QString(), m_punctuationPresetButton);
+    m_dictationHintsLabel = new QLabel(dictationGroup);
+    m_dictationHintsLabel->setObjectName(QStringLiteral("dictationHintsLabel"));
+    m_dictationHintsLabel->setWordWrap(true);
+    dictationForm->addRow(m_dictationHintsLabel);
+
+    m_stopDelaySpin = new QSpinBox(dictationGroup);
+    m_stopDelaySpin->setObjectName(QStringLiteral("stopDelaySpin"));
+    m_stopDelaySpin->setRange(0, 2000);
+    m_stopDelaySpin->setSingleStep(100);
+    m_stopDelaySpin->setSuffix(QStringLiteral(" ms"));
+    dictationForm->addRow(QStringLiteral("Continue recording after Stop"), m_stopDelaySpin);
+
+    m_preserveAudioTailCheck = new QCheckBox(QStringLiteral("Preserve recording ending (VAD)"), dictationGroup);
+    m_preserveAudioTailCheck->setObjectName(QStringLiteral("preserveAudioTailCheck"));
+    m_preserveAudioTailCheck->setToolTip(QStringLiteral("Local STT only. VAD still checks for speech and trims the start, but keeps the recording's ending."));
+    dictationForm->addRow(m_preserveAudioTailCheck);
+    m_dictationErrorLabel = new QLabel(dictationGroup);
+    m_dictationErrorLabel->setObjectName(QStringLiteral("dictationErrorLabel"));
+    m_dictationErrorLabel->setWordWrap(true);
+    m_dictationErrorLabel->hide();
+    dictationForm->addRow(m_dictationErrorLabel);
+    sections->addWidget(dictationGroup);
 
     auto *pasteGroup = new QGroupBox(QStringLiteral("Paste"), this);
     pasteGroup->setObjectName(QStringLiteral("pasteGroup"));
     auto *pasteForm = new QFormLayout(pasteGroup);
-    m_autopasteCheck = new QCheckBox(QStringLiteral("Paste automatically after transcription"), pasteGroup);
+    pasteForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    m_autopasteCheck = new QCheckBox(QStringLiteral("Paste automatically"), pasteGroup);
     m_autopasteCheck->setObjectName(QStringLiteral("autopasteCheck"));
     pasteForm->addRow(QString(), m_autopasteCheck);
 
@@ -378,7 +453,7 @@ void SettingsDialog::buildUi()
     m_autopasteDelaySpin->setDecimals(2);
     m_autopasteDelaySpin->setSingleStep(0.05);
     pasteForm->addRow(QStringLiteral("Paste delay"), m_autopasteDelaySpin);
-    root->addWidget(pasteGroup);
+    sections->addWidget(pasteGroup);
 
     auto *shortcutGroup = new QGroupBox(QStringLiteral("Global dictation shortcut"), this);
     shortcutGroup->setObjectName(QStringLiteral("globalShortcutGroup"));
@@ -403,7 +478,7 @@ void SettingsDialog::buildUi()
     m_globalShortcutStatusLabel->setObjectName(QStringLiteral("globalShortcutStatusLabel"));
     m_globalShortcutStatusLabel->setWordWrap(true);
     shortcutForm->addRow(QString(), m_globalShortcutStatusLabel);
-    root->addWidget(shortcutGroup);
+    sections->addWidget(shortcutGroup);
 
     m_vadGroup = new QGroupBox(QStringLiteral("Voice activity detection"), this);
     m_vadGroup->setObjectName(QStringLiteral("vadGroup"));
@@ -432,7 +507,8 @@ void SettingsDialog::buildUi()
     m_vadFrameMsEdit = new QLineEdit(m_vadGroup);
     m_vadFrameMsEdit->setObjectName(QStringLiteral("vadFrameMsEdit"));
     vadForm->addRow(QStringLiteral("Frame ms"), m_vadFrameMsEdit);
-    root->addWidget(m_vadGroup);
+    sections->addWidget(m_vadGroup);
+    sections->addStretch();
 
     m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel, this);
     m_buttons->setObjectName(QStringLiteral("buttonBox"));
@@ -454,6 +530,16 @@ void SettingsDialog::buildUi()
     });
     connect(m_vadEnabledCheck, &QCheckBox::toggled, this, [this]() {
         updateVadControls();
+        updateDictationControls();
+    });
+    connect(m_punctuationPresetButton, &QPushButton::clicked, this, [this]() {
+        m_whisperPromptEdit->setPlainText(QStringLiteral("Привет! Да, всё хорошо. Давай обсудим эту задачу: сначала проверим код, потом запустим тесты. Что нужно исправить?"));
+    });
+    connect(m_stopDelaySpin, qOverload<int>(&QSpinBox::valueChanged), this, [this]() {
+        m_stopDelayNeedsCorrection = false;
+    });
+    connect(m_stopDelaySpin, &QSpinBox::editingFinished, this, [this]() {
+        m_stopDelayNeedsCorrection = false;
     });
     connect(m_vadProviderCombo, &QComboBox::currentTextChanged, this, [this]() {
         updateVadControls();
@@ -523,6 +609,11 @@ void SettingsDialog::loadFromSettings(const KwisprSettings &settings)
     }
     populateLanguageChoices(settings.language);
     m_promptEdit->setPlainText(settings.transcriptionPrompt);
+    m_whisperPromptEdit->setPlainText(settings.whisperPrompt);
+    m_vocabularyEdit->setPlainText(KwisprSettings::normalizedVocabulary(settings.vocabulary).split(QStringLiteral(", ")).join(QLatin1Char('\n')));
+    m_stopDelaySpin->setValue(settings.stopDelayMs);
+    m_stopDelayNeedsCorrection = settings.stopDelayMs < 0 || settings.stopDelayMs > 2000;
+    m_preserveAudioTailCheck->setChecked(settings.preserveAudioTail);
     m_autopasteCheck->setChecked(settings.autopaste);
     m_pasteHotkeyCombo->setCurrentText(settings.pasteHotkey);
     m_autopasteDelaySpin->setValue(settings.autopasteDelay);
@@ -721,7 +812,29 @@ void SettingsDialog::updateBackendVisibility()
     setBackendRowVisible(m_promptEdit, m_promptLabel, openRouter);
     m_vadGroup->setVisible(local && m_localRuntimeInstalled);
     updateVadControls();
+    updateDictationControls();
     updateModelControls();
+}
+
+void SettingsDialog::updateDictationControls()
+{
+    const bool local = m_backendCombo->currentText() == QLatin1String("Local STT");
+    const bool openRouter = m_backendCombo->currentText() == QLatin1String("OpenRouter");
+    const auto model = m_catalog.modelById(selectedModelId());
+    const bool hintsSupported = !local || (model ? model->engineType == QLatin1String("whisper.cpp")
+                                                : selectedModelId().startsWith(QStringLiteral("whisper"), Qt::CaseInsensitive));
+    m_vocabularyEdit->setEnabled(hintsSupported);
+    m_whisperPromptEdit->setEnabled(hintsSupported && !openRouter);
+    m_punctuationPresetButton->setEnabled(hintsSupported && !openRouter);
+    m_dictationHintsLabel->setText(!hintsSupported
+        ? QStringLiteral("This local model does not support vocabulary or style hints. Your entries are kept for Whisper models.")
+        : openRouter
+            ? QStringLiteral("Enter one vocabulary term per line. Vocabulary is sent with the OpenRouter prompt above; the style example is kept for transcription models.")
+            : QStringLiteral("One vocabulary term per line. Hints guide recognition; they do not rewrite text. Limit: 4096 characters together. Whisper uses about 223 context tokens shared with the style example, so keep hints short."));
+    m_vocabularyEdit->setAccessibleDescription(m_dictationHintsLabel->text());
+    m_whisperPromptEdit->setAccessibleDescription(m_dictationHintsLabel->text());
+    m_preserveAudioTailCheck->setVisible(local);
+    m_preserveAudioTailCheck->setEnabled(local && m_vadEnabledCheck->isChecked());
 }
 
 void SettingsDialog::updateModelControls()
@@ -1018,6 +1131,10 @@ KwisprSettings SettingsDialog::settingsFromWidgets() const
     settings.model = local ? selectedModelId() : m_modelEdit->text().trimmed();
     settings.language = selectedLanguageCode();
     settings.transcriptionPrompt = m_promptEdit->toPlainText();
+    settings.whisperPrompt = m_whisperPromptEdit->toPlainText().simplified();
+    settings.vocabulary = KwisprSettings::normalizedVocabulary(m_vocabularyEdit->toPlainText());
+    settings.stopDelayMs = m_stopDelayNeedsCorrection ? -1 : m_stopDelaySpin->value();
+    settings.preserveAudioTail = m_preserveAudioTailCheck->isChecked();
     settings.autopaste = m_autopasteCheck->isChecked();
     settings.pasteHotkey = m_pasteHotkeyCombo->currentText();
     settings.autopasteDelay = m_autopasteDelaySpin->value();
