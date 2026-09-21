@@ -36,6 +36,7 @@ add_library(kde_whisper_core STATIC
     src/models/ModelCatalog.cpp
     src/models/ModelManager.cpp
     src/ui/GlobalShortcut.cpp
+    src/ui/MeetingDialog.cpp
     src/ui/SettingsDialog.cpp
     src/ui/TrayApp.cpp
     src/ui/TrayController.cpp
@@ -102,6 +103,11 @@ if(BUILD_TESTING)
     target_link_libraries(SettingsDialogTest PRIVATE kde_whisper_core Qt6::Test Qt6::Widgets)
     add_test(NAME SettingsDialogTest COMMAND SettingsDialogTest)
     set_tests_properties(SettingsDialogTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(MeetingDialogTest tests/meeting_dialog_test.cpp)
+    target_link_libraries(MeetingDialogTest PRIVATE kde_whisper_core Qt6::Test Qt6::Widgets)
+    add_test(NAME MeetingDialogTest COMMAND MeetingDialogTest)
+    set_tests_properties(MeetingDialogTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(LocalSttClientTest tests/local_stt_client_test.cpp)
     target_link_libraries(LocalSttClientTest PRIVATE kde_whisper_core Qt6::Test Qt6::Network)

@@ -10,6 +10,7 @@
 #include "runtime/RetryState.h"
 #include "ui/GlobalShortcut.h"
 #include "ui/SettingsDialog.h"
+#include "ui/MeetingDialog.h"
 
 #include <KStatusNotifierItem>
 
@@ -71,7 +72,29 @@ TrayApp::TrayApp(QString repoRoot,
             this, &TrayApp::toggleRecording);
 }
 
-TrayApp::~TrayApp() = default;
+TrayApp::~TrayApp()
+{
+    delete m_meetingDialog;
+}
+
+void TrayApp::openMeetings()
+{
+    if (!m_meetingDialog) {
+        m_meetingDialog = new MeetingDialog(m_repoRoot, configFilePath());
+        connect(m_meetingDialog, &MeetingDialog::meetingStateChanged, this, [this](const QString &state) {
+            m_controller->setMeetingState(state);
+            const bool recording = m_meetingDialog && m_meetingDialog->recordingActive();
+            m_notifier->setTitle(recording ? QStringLiteral("KDE Whisper — Meeting recording") : QStringLiteral("KDE Whisper"));
+            m_notifier->setIconByName(recording ? QStringLiteral("media-record") : QStringLiteral("audio-input-microphone"));
+        });
+    }
+    if (m_meetingDialog->isMinimized()) {
+        m_meetingDialog->setWindowState(m_meetingDialog->windowState() & ~Qt::WindowMinimized);
+    }
+    m_meetingDialog->show();
+    m_meetingDialog->raise();
+    m_meetingDialog->activateWindow();
+}
 
 void TrayApp::toggleRecording()
 {
@@ -209,6 +232,12 @@ void TrayApp::retryLastFailed()
 
 void TrayApp::quitApplication()
 {
+    if (m_meetingDialog && m_meetingDialog->recordingActive()) {
+        openMeetings();
+        QMessageBox::information(m_meetingDialog, QStringLiteral("Meeting recording"),
+                                 QStringLiteral("Stop the meeting recording before quitting Kwispr."));
+        return;
+    }
     qApp->quit();
 }
 
