@@ -18,7 +18,7 @@ Use the punctuation sample button, or write a short example in the language you 
 
 `KWISPR_WHISPER_PROMPT` provides transcript-style context for Whisper. It is independent of `KWISPR_TRANSCRIPTION_PROMPT`, which remains the instruction field for OpenRouter. The application normalizes the sample to a single configuration line.
 
-The local runtime passes this context into the Whisper decoder. With a hint present, successive audio segments retain previous text context so punctuation does not lose its example after the first segment. Without hints, the original decoder behavior remains unchanged. This improves recognition guidance; it is not a separate proofreading or rewriting model, and punctuation is still model-dependent.
+The local runtime passes the same user-provided context into every Whisper audio segment, without carrying generated text from earlier segments. This keeps the punctuation example and vocabulary available on long recordings while avoiding repetition loops caused by generated-history conditioning. Without hints, the original decoder behavior remains unchanged. This improves recognition guidance; it is not a separate proofreading or rewriting model, and punctuation is still model-dependent.
 
 ## End of recording
 

@@ -1,5 +1,8 @@
 # Dictation quality verification — 2026-09-21
 
+The later [repetition regression and correction](dictation-repetition-verification.md)
+supersedes the generated-history approach described in this original verification.
+
 ## Installed baseline
 
 The active installation used local Whisper large-v3-turbo Q8_0, transcribe-cpp 0.1.3, automatic language selection, and energy VAD (threshold 0.01, padding 1500 ms). Its installed CLI and model catalog matched the current repository and `origin/main` fetched on this date. The application reports package version 0.1.0; that version alone does not identify an exact installed source revision.
