@@ -21,6 +21,10 @@ public:
     QString modelDir;
     QString audioFormat = "wav";
     QString transcriptionPrompt;
+    QString whisperPrompt;
+    QString vocabulary;
+    int stopDelayMs = 0;
+    bool preserveAudioTail = false;
     QString openRouterReferer = "https://github.com/blockedby/kwispr";
     QString openRouterAppTitle = "KDE Whisper";
 
@@ -42,6 +46,8 @@ public:
     void applyOpenRouterPreset(const QString &key, const QString &openRouterModel, const QString &prompt, const QString &format);
 
     static KwisprSettings fromEnv(const EnvFile &env);
+    static QString normalizedVocabulary(const QString &value);
+    QString combinedWhisperPrompt() const;
     QString resolvedModelDir() const;
     QUrl localSttHealthUrl() const;
     void writeTo(EnvFile &env) const;
