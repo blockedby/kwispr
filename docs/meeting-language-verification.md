@@ -97,5 +97,36 @@ decoder quality. Native allowed-language audio replay is a separate check.
 With that integration, the focused suite has 22 passing tests and the full suite
 has 104 passing tests (two optional real-audio tests skipped).
 
+## Native allowed-language validation
+
+Repeated the complete copied session on an isolated local server built from
+`bc04c00`, with `KWISPR_WHISPER_ALLOWED_LANGUAGES=ru,en` and both track languages
+set to Auto. Binary SHA-256:
+`d1247b51d07fddc849ed2dd8e9b050ca88cc7a2c339086d9e912991fd680a63a`.
+The installed server and user configuration were not changed.
+
+The health response advertised `whisper_allowed_languages: true`. Full recovery
+took 20.147 seconds and produced the same 34 rows and text as the earlier repaired
+baseline. Remote metadata contained `en`, microphone metadata contained `ru`, and
+the saved language policy recorded support and the effective `ru,en` list. Auto
+diarization still had three labels; this check does not fix its extra short label.
+
+Additional real multipart API requests used the user's bilingual punctuation
+example, separately from the meeting pipeline that does not inherit that example:
+
+| Request | Result |
+|---|---|
+| Russian technical recording, `ru,en` | HTTP 200, `ru`; `VPN`, `KDE`, `TUI` retained |
+| 19.019-second English crop, same example and `ru,en` | HTTP 200, `en`; English output |
+| Same crop, malformed `ru,,en` | HTTP 400 |
+| Same crop, unsupported `zz` | HTTP 400 |
+| Same crop, explicit `en` and allowed list `ru` | HTTP 200, `en`; same English text |
+
+All original session-file SHA-256 hashes were unchanged; copied WAV hashes
+matched their sources, and the separate technical recording was unchanged. The
+temporary server was stopped after validation. These recordings establish the
+tested request behavior and preservation of those particular technical terms,
+not a general word-error rate or guarantee for arbitrary mixed-language speech.
+
 The audio, transcripts and probe outputs used for this verification are private
 local artifacts and are not included in the repository.
