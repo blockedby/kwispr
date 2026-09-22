@@ -113,6 +113,7 @@ load_env() {
   : "${KWISPR_PULSE_SOURCE:=default}"
   : "${KWISPR_TRANSCRIPTION_PROMPT:=Transcribe this audio exactly as spoken. The speech may be Russian, English, or mixed. Do not translate. Return only the transcript.}"
   : "${KWISPR_WHISPER_PROMPT:=}"
+  : "${KWISPR_WHISPER_ALLOWED_LANGUAGES:=}"
   : "${KWISPR_VOCABULARY:=}"
   : "${KWISPR_STOP_DELAY_MS:=0}"
   : "${KWISPR_PRESERVE_AUDIO_TAIL:=0}"
@@ -126,6 +127,12 @@ load_env() {
     || die "KWISPR_PRESERVE_AUDIO_TAIL must be 0 or 1"
   [[ "$KWISPR_VOCABULARY" != *$'\n'* && "$KWISPR_VOCABULARY" != *$'\r'* ]] \
     || die "KWISPR_VOCABULARY must be a single line of comma-separated terms"
+  # Restrict only automatic language selection, never the transcript's words.
+  # The local runtime validates these codes against Whisper's language table.
+  KWISPR_WHISPER_ALLOWED_LANGUAGES="${KWISPR_WHISPER_ALLOWED_LANGUAGES,,}"
+  KWISPR_WHISPER_ALLOWED_LANGUAGES="${KWISPR_WHISPER_ALLOWED_LANGUAGES// /}"
+  [[ ${#KWISPR_WHISPER_ALLOWED_LANGUAGES} -le 1024 && ( -z "$KWISPR_WHISPER_ALLOWED_LANGUAGES" || "$KWISPR_WHISPER_ALLOWED_LANGUAGES" =~ ^[a-z]{2,3}(-[a-z0-9]{1,8})*(,[a-z]{2,3}(-[a-z0-9]{1,8})*)*$ ) ]] \
+    || die "KWISPR_WHISPER_ALLOWED_LANGUAGES must be empty or comma-separated language codes, such as ru,en"
   local whisper_context
   whisper_context="$(transcription_context)"
   [[ "$(printf '%s' "$whisper_context" | jq -Rs 'length')" -le 4096 ]] \
@@ -306,6 +313,9 @@ transcribe() {
       fi
       if [[ "$KWISPR_PRESERVE_AUDIO_TAIL" == "1" ]] && is_local_stt; then
         curl_args+=(--form-string preserve_audio_tail=1)
+      fi
+      if [[ -n "$KWISPR_WHISPER_ALLOWED_LANGUAGES" && "$KWISPR_MODEL" == whisper* ]] && is_local_stt; then
+        curl_args+=(--form-string "allowed_languages=$KWISPR_WHISPER_ALLOWED_LANGUAGES")
       fi
       # Optional: force language if KWISPR_LANGUAGE is configured.
       if [[ -n "${KWISPR_LANGUAGE:-}" ]]; then

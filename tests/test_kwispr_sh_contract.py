@@ -257,6 +257,36 @@ class KwisprShellContractTest(unittest.TestCase):
             self.assertNotIn("preserve_audio_tail=1", args)
             self.assertFalse((h.repo / "injected").exists())
 
+    def test_local_whisper_language_candidates_keep_mixed_text_and_explicit_hint(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav()
+            h.write_config(
+                KWISPR_API_URL="http://localhost:19650/v1/audio/transcriptions",
+                KWISPR_MODEL="whisper-large-v3-turbo", KWISPR_LANGUAGE="ru",
+                KWISPR_WHISPER_ALLOWED_LANGUAGES=" RU, en ", KWISPR_AUTOPASTE="0",
+            )
+            transcript = "Проверим pull request в GitHub. Looks good, запускай тесты."
+            h.fake_curl_response(200, {"text": transcript, "language": "ru"})
+            result = h.run("retry", str(wav))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = h.curl_invocations()[0]
+            index = args.index("allowed_languages=ru,en")
+            self.assertEqual(args[index - 1], "--form-string")
+            self.assertIn("language=ru", args)
+            self.assertEqual(h.clipboard_text(), transcript)
+
+    def test_language_candidates_are_not_sent_to_cloud_or_other_local_models(self) -> None:
+        for endpoint, model in (("https://api.openai.com/v1/audio/transcriptions", "whisper-1"),
+                                ("http://localhost:19650/v1/audio/transcriptions", "parakeet-tdt-0.6b-v3")):
+            with self.subTest(endpoint=endpoint), KwisprScriptHarness() as h:
+                wav = h.make_wav()
+                h.write_config(KWISPR_API_URL=endpoint, KWISPR_MODEL=model, KWISPR_API_KEY="sk-test",
+                               KWISPR_WHISPER_ALLOWED_LANGUAGES="ru,en", KWISPR_AUTOPASTE="0")
+                h.fake_curl_response(200, {"text": "Hello, привет."})
+                result = h.run("retry", str(wav))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(any(arg.startswith("allowed_languages=") for arg in h.curl_invocations()[0]))
+
     def test_invalid_quality_settings_fail_before_request(self) -> None:
         invalid_settings = [
             ("KWISPR_STOP_DELAY_MS", value) for value in ("-1", "2001", "1.5", "00000", "1;id")
@@ -265,6 +295,10 @@ class KwisprShellContractTest(unittest.TestCase):
             ("KWISPR_VOCABULARY", "one\ntwo"),
             ("KWISPR_VOCABULARY", "one\rtwo"),
             ("KWISPR_WHISPER_PROMPT", "я" * 4097),
+            ("KWISPR_WHISPER_ALLOWED_LANGUAGES", "ru,,en"),
+            ("KWISPR_WHISPER_ALLOWED_LANGUAGES", "ru\nen"),
+            ("KWISPR_WHISPER_ALLOWED_LANGUAGES", "@/etc/passwd"),
+            ("KWISPR_WHISPER_ALLOWED_LANGUAGES", "ru;en"),
         ]
         for key, value in invalid_settings:
             with self.subTest(key=key, value=value[:30]), KwisprScriptHarness() as h:

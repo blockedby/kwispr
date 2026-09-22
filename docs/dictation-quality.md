@@ -20,6 +20,14 @@ Use the punctuation sample button, or write a short example in the language you 
 
 The local runtime passes the same user-provided context into every Whisper audio segment, without carrying generated text from earlier segments. This keeps the punctuation example and vocabulary available on long recordings while avoiding repetition loops caused by generated-history conditioning. Without hints, the original decoder behavior remains unchanged. This improves recognition guidance; it is not a separate proofreading or rewriting model, and punctuation is still model-dependent.
 
+## Russian and English in the same recording
+
+Keep **Language** on **Auto** and choose **Russian + English (ru,en)** in the auto-detection candidates setting. This saves `KWISPR_WHISPER_ALLOWED_LANGUAGES=ru,en`. An empty list keeps all languages available. The setting applies to local Whisper dictation and meeting recognition; update the local server together with the application.
+
+The native detector chooses its language token from the permitted candidates. It still transcribes with the complete multilingual vocabulary, without translating or deleting words from the result. An explicit language choice overrides automatic selection. Whisper currently selects its language token from the first audio window in a request; restricting the candidates prevents selection of an unrelated language but does not guarantee perfect code switching or the spelling of English names inside Russian speech. Put preferred spellings such as `React`, `Vue`, or `Svelte` in the personal vocabulary when those are words you use.
+
+Meeting recognition has separate language choices for the microphone and other speakers. It uses personal vocabulary but does not inherit the dictation punctuation sample or its explicit language choice.
+
 ## End of recording
 
 - **Stop delay** continues microphone capture briefly after you press Stop; `350` ms is a useful starting point. The allowed range is `0–2000` ms, and the default is `0`.
@@ -33,11 +41,14 @@ The stop sound plays after capture has stopped. Cloud transcription services do 
 ```bash
 KWISPR_WHISPER_PROMPT='Привет! Да, всё хорошо. Что нужно исправить?'
 KWISPR_VOCABULARY='Kwispr, Codex, OpenRouter'
+KWISPR_WHISPER_ALLOWED_LANGUAGES=ru,en
 KWISPR_STOP_DELAY_MS=350
 KWISPR_PRESERVE_AUDIO_TAIL=1
 ```
 
 All new features are opt-in. An empty sample and vocabulary, zero delay, and disabled ending preservation retain the original request behavior.
+
+Recognized text is preserved without keyword-based cleanup. Mentioning subtitles, credits, music, or closing phrases must not remove that speech or the sentences after it.
 
 ## Local API
 
@@ -45,5 +56,6 @@ All new features are opt-in. An empty sample and vocabulary, zero delay, and dis
 
 - `prompt`: up to 4096 Unicode characters, without NUL; supported only for models with architecture `whisper`.
 - `preserve_audio_tail`: `1`, `0`, `true`, or `false`; defaults to false.
+- `allowed_languages`: optional comma-separated language codes for Whisper auto-detection, for example `ru,en`. Omit for unrestricted detection. An explicit `language` takes precedence; invalid codes are rejected.
 
-`GET /health` advertises `capabilities.whisper_prompt` and `capabilities.preserve_audio_tail`. Neither feature requires uploading local audio to a cloud service.
+`GET /health` advertises `capabilities.whisper_prompt`, `capabilities.preserve_audio_tail`, and `capabilities.whisper_allowed_languages`. These features do not require uploading local audio to a cloud service.
