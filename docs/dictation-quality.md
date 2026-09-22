@@ -18,6 +18,12 @@ Use the punctuation sample button, or write a short example in the language you 
 
 `KWISPR_WHISPER_PROMPT` provides transcript-style context for Whisper. It is independent of `KWISPR_TRANSCRIPTION_PROMPT`, which remains the instruction field for OpenRouter. The application normalizes the sample to a single configuration line.
 
+For Auto with Russian and English candidates, the sample button inserts a bilingual example:
+
+> Привет! Давай проверим pull request: сначала code review, потом тесты. Looks good! What should we fix?
+
+The button applies the sample only when clicked. Changing the candidate list does not replace a custom sample. A monolingual example can bias speech in another language; use a sample that matches the languages you actually speak.
+
 The local runtime passes the same user-provided context into every Whisper audio segment, without carrying generated text from earlier segments. This keeps the punctuation example and vocabulary available on long recordings while avoiding repetition loops caused by generated-history conditioning. Without hints, the original decoder behavior remains unchanged. This improves recognition guidance; it is not a separate proofreading or rewriting model, and punctuation is still model-dependent.
 
 ## Russian and English in the same recording
