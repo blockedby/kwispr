@@ -316,8 +316,13 @@ class KwisprShellContractTest(unittest.TestCase):
                 self.assertFalse((h.cache_dir / "current.pid").exists())
                 self.assertEqual(h.clipboard_text(), "Последние слова.")
 
-    def test_legacy_hallucination_filter_works_under_host_locales(self) -> None:
-        transcript = "Привет! Последние слова сохранены."
+    def test_real_speech_is_not_deleted_as_subtitle_hallucinations(self) -> None:
+        transcript = (
+            "Можешь сам субтитры посмотреть. А теперь важное продолжение.\n"
+            "Редактор субтитров нужен для видео. Корректор Иван проверит текст.\n"
+            "Subtitles by Alice are available. Keep this sentence too.\n"
+            "[Музыка] и [Music] — названия меток. Thanks for watching!"
+        )
         for locale in ("C", "C.UTF-8"):
             with self.subTest(locale=locale), KwisprScriptHarness() as h:
                 wav = h.make_wav()
@@ -325,11 +330,24 @@ class KwisprShellContractTest(unittest.TestCase):
                     KWISPR_API_URL="http://localhost:19650/v1/audio/transcriptions",
                     KWISPR_AUTOPASTE="0",
                 )
-                h.fake_curl_response(200, {"text": f"  {transcript} Субтитры: Credits  "})
+                h.fake_curl_response(200, {"text": transcript})
                 result = h.run("retry", str(wav), env_overrides={"LC_ALL": locale})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(h.clipboard_text(), transcript)
                 self.assertEqual(wav.with_suffix(".txt").read_text(), transcript)
+
+    def test_whitespace_only_local_response_is_no_speech(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav()
+            h.write_config(
+                KWISPR_API_URL="http://localhost:19650/v1/audio/transcriptions",
+                KWISPR_AUTOPASTE="0",
+            )
+            h.fake_curl_response(200, {"text": " \t\n "})
+            result = h.run("retry", str(wav))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(wav.with_suffix(".txt").exists())
+            self.assertEqual(h.clipboard_text(), "")
 
 
 if __name__ == "__main__":

@@ -364,24 +364,10 @@ transcribe() {
   esac
   rm -f "$response"
 
-  # Strip known whisper hallucinations that leak from subtitle training data.
-  # These phrases can leak into dictation; they're artifacts of training
-  # on subtitles/credits. Match greedily to end of line since they're always
-  # tacked on at the very end of the transcript.
-  # Use a character class: a Cyrillic [А-Я] range is invalid in some locales.
-  text="$(printf '%s' "$text" | sed -E \
-    -e 's/[[:space:]]*Редактор субтитров.*$//I' \
-    -e 's/[[:space:]]*Корректор[[:space:]]+[[:upper:]]\.?[^[:space:]]*.*$//I' \
-    -e 's/[[:space:]]*Субтитры:?.*$//I' \
-    -e 's/[[:space:]]*Продолжение следует\.?[[:space:]]*$//I' \
-    -e 's/[[:space:]]*Thanks for watching[!.]?[[:space:]]*$//I' \
-    -e 's/[[:space:]]*Thank you for watching[!.]?[[:space:]]*$//I' \
-    -e 's/[[:space:]]*Subtitles by.*$//I' \
-    -e 's/[[:space:]]*\[Музыка\]//gI' \
-    -e 's/[[:space:]]*\[Music\]//gI' \
-    -e 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-
-  if [[ -z "$text" ]]; then
+  # Keep the model's text intact. Words such as "subtitles" and closing
+  # phrases can be real speech; a text-only filter cannot distinguish them
+  # from hallucinations and must never delete the rest of a dictation.
+  if [[ -z "${text//[[:space:]]/}" ]]; then
     # Local VAD servers may intentionally return an empty transcript for
     # silence/no-speech audio. Treat that as a clean skip instead of an API
     # failure that pollutes last-failed.txt and the clipboard.
