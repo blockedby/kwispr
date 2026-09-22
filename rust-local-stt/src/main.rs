@@ -20,7 +20,7 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 use transcribe_cpp::{
-    Backend, Model, ModelOptions, RunExtension, RunOptions, Session, WhisperPromptCondition,
+    Backend, Model, ModelOptions, RunExtension, RunOptions, Session, Transcript, WhisperPromptCondition,
     WhisperRunOptions,
 };
 use transcribe_rs::vad::{SileroVad, SmoothedVad, Vad};
@@ -94,9 +94,26 @@ struct RuntimeCapabilities {
     whisper_prompt: bool,
     preserve_audio_tail: bool,
 }
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 struct Transcription {
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+}
+
+impl Transcription {
+    fn from_result(result: Transcript, fallback_language: Option<String>) -> Self {
+        let text = result.text.trim().to_string();
+        let language = if text.is_empty() {
+            None
+        } else {
+            result
+                .language
+                .filter(|language| !language.trim().is_empty())
+                .or(fallback_language)
+        };
+        Self { text, language }
+    }
 }
 #[derive(Serialize)]
 struct ErrorBody {
@@ -249,11 +266,9 @@ async fn transcribe(
     let preprocessed =
         preprocess_audio(audio, &state.vad, preserve_audio_tail).map_err(ApiError::bad_request)?;
     if preprocessed.decision == VadDecision::NoSpeech {
-        return Ok(Json(Transcription {
-            text: String::new(),
-        }));
+        return Ok(Json(Transcription::default()));
     }
-    let text = tokio::task::spawn_blocking(move || {
+    let transcription = tokio::task::spawn_blocking(move || {
         transcribe_blocking(
             &state.model_dir,
             &info,
@@ -264,7 +279,7 @@ async fn transcribe(
     })
     .await
     .map_err(|e| ApiError::internal(anyhow!(e)))??;
-    Ok(Json(Transcription { text }))
+    Ok(Json(transcription))
 }
 
 fn validate_catalog(catalog: &Catalog) -> Result<()> {
@@ -425,7 +440,7 @@ fn transcribe_blocking(
     audio: Vec<f32>,
     language: Option<String>,
     prompt: Option<String>,
-) -> std::result::Result<String, ApiError> {
+) -> std::result::Result<Transcription, ApiError> {
     let mut cache = SESSION_CACHE
         .lock()
         .map_err(|_| ApiError::internal(anyhow!("session cache lock poisoned")))?;
@@ -436,12 +451,13 @@ fn transcribe_blocking(
         );
     }
     let session = cache.get_mut(&info.slug).expect("cached session");
+    let options = run_options(language, prompt);
     let result = session
-        .run(&audio, &run_options(language, prompt))
+        .run(&audio, &options)
         .map_err(|error| {
             ApiError::runtime(anyhow!("transcribe-cpp transcription failed: {error}"))
         })?;
-    Ok(result.text.trim().to_string())
+    Ok(Transcription::from_result(result, options.language))
 }
 
 fn run_options(language: Option<String>, prompt: Option<String>) -> RunOptions {
@@ -1152,6 +1168,80 @@ mod tests {
         assert_eq!(
             run_options(Some("zh".into()), None).language.as_deref(),
             Some("zh")
+        );
+    }
+
+    #[test]
+    fn transcription_response_exposes_detected_language_and_preserves_text() {
+        let response = Transcription::from_result(
+            Transcript {
+                text: "  Привет, друг!\n".into(),
+                language: Some("ru".into()),
+                ..Default::default()
+            },
+            Some("en".into()),
+        );
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({"text": "Привет, друг!", "language": "ru"})
+        );
+    }
+
+    #[test]
+    fn transcription_response_falls_back_to_effective_input_language() {
+        // Whisper leaves its detected language unset when given a hint;
+        // models without language detection also need this fallback.
+        for detected_language in [None, Some(String::new()), Some(" \t".into())] {
+            let response = Transcription::from_result(
+                Transcript {
+                    text: "Hello.".into(),
+                    language: detected_language,
+                    ..Default::default()
+                },
+                Some("en-US".into()),
+            );
+            assert_eq!(
+                serde_json::to_value(response).unwrap(),
+                serde_json::json!({"text": "Hello.", "language": "en-US"})
+            );
+        }
+    }
+
+    #[test]
+    fn transcription_response_omits_unknown_language_for_existing_clients() {
+        let response = Transcription::from_result(
+            Transcript {
+                text: "Hello.".into(),
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({"text": "Hello."})
+        );
+    }
+
+    #[test]
+    fn empty_transcription_never_establishes_a_language() {
+        for text in ["", " \n\t"] {
+            let response = Transcription::from_result(
+                Transcript {
+                    text: text.into(),
+                    language: Some("ru".into()),
+                    ..Default::default()
+                },
+                Some("en".into()),
+            );
+            assert_eq!(
+                serde_json::to_value(response).unwrap(),
+                serde_json::json!({"text": ""})
+            );
+        }
+        // The pre-decoder VAD NoSpeech branch uses this same empty response.
+        assert_eq!(
+            serde_json::to_value(Transcription::default()).unwrap(),
+            serde_json::json!({"text": ""})
         );
     }
 
