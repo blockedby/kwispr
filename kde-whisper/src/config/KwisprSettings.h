@@ -18,6 +18,7 @@ public:
     QString apiKey;
     QString model = "whisper-1";
     QString language;
+    QString whisperAllowedLanguages;
     QString modelDir;
     QString audioFormat = "wav";
     QString transcriptionPrompt;
@@ -47,6 +48,8 @@ public:
 
     static KwisprSettings fromEnv(const EnvFile &env);
     static QString normalizedVocabulary(const QString &value);
+    static bool validWhisperAllowedLanguages(const QString &value);
+    static QString normalizedWhisperAllowedLanguages(const QString &value);
     QString combinedWhisperPrompt() const;
     QString resolvedModelDir() const;
     QUrl localSttHealthUrl() const;

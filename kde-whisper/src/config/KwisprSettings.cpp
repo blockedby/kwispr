@@ -125,6 +125,7 @@ KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
     settings.apiKey = env.value(QStringLiteral("KWISPR_API_KEY"), settings.apiKey);
     settings.model = env.value(QStringLiteral("KWISPR_MODEL"), settings.model);
     settings.language = env.value(QStringLiteral("KWISPR_LANGUAGE"), settings.language);
+    settings.whisperAllowedLanguages = env.value(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES"));
     settings.modelDir = env.value(QStringLiteral("KWISPR_MODEL_DIR"), settings.modelDir);
     settings.audioFormat = env.value(QStringLiteral("KWISPR_AUDIO_FORMAT"), settings.audioFormat);
     settings.transcriptionPrompt = env.value(QStringLiteral("KWISPR_TRANSCRIPTION_PROMPT"), settings.transcriptionPrompt);
@@ -186,6 +187,39 @@ QString KwisprSettings::normalizedVocabulary(const QString &value)
     return terms.join(QStringLiteral(", "));
 }
 
+bool KwisprSettings::validWhisperAllowedLanguages(const QString &value)
+{
+    if (value.size() > 1024) {
+        return false;
+    }
+    if (value.trimmed().isEmpty()) {
+        return true;
+    }
+    static const QRegularExpression code(QStringLiteral("^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{1,8})*$"));
+    for (const QString &entry : value.split(QLatin1Char(','))) {
+        if (!code.match(entry.trimmed()).hasMatch()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+QString KwisprSettings::normalizedWhisperAllowedLanguages(const QString &value)
+{
+    // Invalid values must remain invalid until the user corrects them.
+    if (!validWhisperAllowedLanguages(value)) {
+        return value;
+    }
+    QStringList codes;
+    for (const QString &entry : value.split(QLatin1Char(','))) {
+        const QString code = entry.trimmed().toLower();
+        if (!code.isEmpty() && !codes.contains(code)) {
+            codes.append(code);
+        }
+    }
+    return codes.join(QLatin1Char(','));
+}
+
 QString KwisprSettings::combinedWhisperPrompt() const
 {
     const QString context = whisperPrompt.simplified();
@@ -218,6 +252,7 @@ void KwisprSettings::writeTo(EnvFile &env) const
     env.setValue("KWISPR_API_KEY", apiKey);
     env.setValue("KWISPR_MODEL", model);
     env.setValue("KWISPR_LANGUAGE", language);
+    env.setValue("KWISPR_WHISPER_ALLOWED_LANGUAGES", normalizedWhisperAllowedLanguages(whisperAllowedLanguages));
     env.setValue("KWISPR_PULSE_SOURCE", pulseSource);
     env.setValue("KWISPR_AUDIO_FORMAT", audioFormat);
     env.setValue("KWISPR_AUTOPASTE", autopaste ? "1" : "0");
@@ -275,6 +310,11 @@ QUrl KwisprSettings::localSttHealthUrl() const
 bool KwisprSettings::validate(QStringList *errors) const
 {
     bool ok = true;
+
+    if (!validWhisperAllowedLanguages(whisperAllowedLanguages)) {
+        ok = false;
+        addError(errors, "Auto-detection candidates must be comma-separated language codes (for example ru,en), at most 1024 characters. Leave empty for all languages.");
+    }
 
     if (combinedWhisperPrompt().toUcs4().size() > 4096) {
         ok = false;
