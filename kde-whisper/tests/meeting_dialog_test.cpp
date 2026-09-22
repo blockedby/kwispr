@@ -12,6 +12,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QProcess>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -19,6 +20,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QtTest/QtTest>
+#include <memory>
 
 namespace {
 bool writeFile(const QString &path, const QByteArray &contents)
@@ -146,7 +148,41 @@ private slots:
     void hiddenActiveMeetingKeepsPolling_data();
     void hiddenActiveMeetingKeepsPolling();
     void narrowLayoutKeepsActionsReachable();
+    void destructionDisconnectsPendingWorkerCallbacks();
 };
+
+void MeetingDialogTest::destructionDisconnectsPendingWorkerCallbacks()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    QVERIFY(fixture.setState(QStringLiteral("complete"), QStringLiteral("An allocated status message for teardown.")));
+    auto dialog = std::make_unique<MeetingDialog>(fixture.dir.path(), fixture.configPath());
+    dialog->show();
+    QTRY_COMPARE(control<QLabel>(*dialog, "meetingStatus")->text(), QStringLiteral("Transcript saved"));
+    QProcess *status = nullptr;
+    for (auto *process : dialog->findChildren<QProcess *>()) {
+        if (process->arguments().value(0) == QStringLiteral("status")) status = process;
+    }
+    QVERIFY(status);
+    QTRY_COMPARE(status->state(), QProcess::NotRunning);
+    QVERIFY(writeFile(fixture.dir.filePath(QStringLiteral("slow-status")), "1"));
+    QTimer *poll = nullptr;
+    for (auto *timer : dialog->findChildren<QTimer *>()) {
+        if (!timer->isSingleShot() && timer->interval() == 1000) poll = timer;
+    }
+    QVERIFY(poll);
+    poll->stop();
+    QVERIFY(QMetaObject::invokeMethod(poll, "timeout", Qt::DirectConnection));
+    QTRY_COMPARE(status->state(), QProcess::Running);
+    QSignalSpy finished(status, &QProcess::finished);
+    // Let the worker exit without delivering its queued completion to Qt.
+    // QProcess destruction then emits finished after derived members would
+    // already have been destroyed unless the dialog disconnects the callback.
+    QTest::qSleep(1400);
+    QCOMPARE(finished.count(), 0);
+    dialog.reset();
+    QCOMPARE(finished.count(), 1);
+}
 
 void MeetingDialogTest::recordsAsynchronouslyPreservesConfigAndStopsBeforeClosing()
 {
