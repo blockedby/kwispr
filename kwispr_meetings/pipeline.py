@@ -10,11 +10,12 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import wave
 from pathlib import Path
-from .config import meeting_language, runtime_dir
+from .config import allowed_whisper_languages, meeting_language, runtime_dir
 
 PIPELINE_VERSION = 2
 SHORT_TURN_SECONDS = 4.0
@@ -161,11 +162,54 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise RuntimeError("Meeting transcription endpoint redirected. Configure the local endpoint directly.")
 
 
+def _prepare_language_policy(config):
+    """Check an opt-in capability once per run, preserving the full configuration."""
+    from .config import validate_local_backend
+    validate_local_backend(config)
+    prepared = dict(config)
+    policy = {"configured_allowed_languages": config.get("KWISPR_WHISPER_ALLOWED_LANGUAGES", "").strip(),
+              "effective_allowed_languages": "", "supported": None}
+    prepared["_meeting_language_policy"] = policy
+    if not config.get("KWISPR_MODEL", "whisper-large-v3-turbo").startswith("whisper"):
+        return prepared
+    configured = allowed_whisper_languages(config)
+    policy["configured_allowed_languages"] = configured
+    if not configured:
+        return prepared  # Default requests need no extra network round trip.
+    endpoint = urllib.parse.urlsplit(config["KWISPR_API_URL"])
+    health_url = urllib.parse.urlunsplit((endpoint.scheme, endpoint.netloc, "/health", "", ""))
+    headers = {}
+    key = config.get("KWISPR_API_KEY") or config.get("OPENAI_API_KEY", "")
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    request = urllib.request.Request(health_url, headers=headers)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    try:
+        with opener.open(request, timeout=3) as response:
+            health = json.loads(response.read(64 * 1024))
+        capabilities = health.get("capabilities", {}) if isinstance(health, dict) else {}
+        supported = isinstance(capabilities, dict) and capabilities.get("whisper_allowed_languages") is True
+    except urllib.error.HTTPError as error:
+        error.close()
+        supported = False
+    except (urllib.error.URLError, TimeoutError, ValueError, RuntimeError, OSError):
+        supported = False
+    policy["supported"] = supported
+    if supported:
+        policy["effective_allowed_languages"] = configured
+    return prepared
+
+
 def _request_transcription(pcm, config, *, language="", vocabulary=True):
     from .config import validate_local_backend
     validate_local_backend(config)
+    if "_meeting_language_policy" not in config:
+        config = _prepare_language_policy(config)
     fields = {"model": config.get("KWISPR_MODEL", "whisper-large-v3-turbo"),
               "response_format": "json", "temperature": "0", "preserve_audio_tail": "1"}
+    allowed = config["_meeting_language_policy"]["effective_allowed_languages"]
+    if fields["model"].startswith("whisper") and allowed:
+        fields["allowed_languages"] = allowed
     if language:
         fields["language"] = language
     # Dictation's example prose and language describe the user's own voice, not
@@ -199,7 +243,7 @@ def _request_transcription(pcm, config, *, language="", vocabulary=True):
         raise RuntimeError("Local transcription returned an invalid response; expected a text field.")
     answer = {"text": result["text"].strip()}
     detected = result.get("language")
-    if isinstance(detected, str) and re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", detected.strip()):
+    if isinstance(detected, str) and re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*", detected.strip()):
         answer["language"] = detected.strip().lower()
     return answer
 
@@ -229,6 +273,9 @@ def _fingerprint(session_dir, config, session):
         tracks.append([name, stat.st_size, stat.st_mtime_ns])
     inputs = {"version": PIPELINE_VERSION, "tracks": tracks, "speakers": session.get("speakers", 0),
               "context": [config.get(key, "") for key in ["KWISPR_API_URL", "KWISPR_MODEL", "KWISPR_MEETING_MIC_LANGUAGE", "KWISPR_MEETING_REMOTE_LANGUAGE", "KWISPR_VOCABULARY"]]}
+    if config.get("KWISPR_WHISPER_ALLOWED_LANGUAGES", "").strip():
+        inputs["allowed_languages"] = {"configured": config["KWISPR_WHISPER_ALLOWED_LANGUAGES"],
+                                       "policy": config.get("_meeting_language_policy", {})}
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
@@ -241,7 +288,7 @@ def _markdown_literal(text):
     return re.sub(r"([\\`*_{}\[\]<>#!|])", r"\\\1", " ".join(str(text).split()))
 
 
-def write_outputs(session_dir, session, rows, names=None, languages=None):
+def write_outputs(session_dir, session, rows, names=None, languages=None, language_policy=None):
     session_dir = Path(session_dir)
     names = names or {}
     labels = {"self": "Я"}
@@ -252,7 +299,8 @@ def write_outputs(session_dir, session, rows, names=None, languages=None):
     labels.update({key: value.strip() for key, value in names.items() if key in labels and isinstance(value, str) and value.strip()})
     ordered = sorted(rows, key=lambda row: (row["start"], row["end"], row["track"]))
     document = {"schema_version": 1, "title": session.get("title") or "Звонок", "started_at": session.get("started_at"),
-                "speakers": labels, "utterances": ordered, "track_languages": languages or {}}
+                "speakers": labels, "utterances": ordered, "track_languages": languages or {},
+                "language_policy": language_policy or {}}
     atomic_json(session_dir / "transcript.json", document)
     lines = ["# " + _markdown_literal(document["title"]), ""]
     if document["started_at"]:
@@ -279,6 +327,9 @@ def process_session(session_dir, config, progress_callback=None):
     from .config import validate_local_backend
     validate_local_backend(config)
     require_ready(config)
+    # Recheck on every processing/retry run: upgrading an old server must
+    # invalidate turns that were decoded without the requested restriction.
+    config = _prepare_language_policy(config)
     session_dir = Path(session_dir)
     session = read_json(session_dir / "session.json", {})
     speakers = int(session.get("speakers", config.get("KWISPR_MEETING_SPEAKERS", 0)))
@@ -363,4 +414,5 @@ def process_session(session_dir, config, progress_callback=None):
                              "speakers": interval["speakers"], "track": track, **result})
         del audio
     _notify(progress_callback, "Saving transcript files…")
-    return write_outputs(session_dir, session, all_rows, read_json(session_dir / "speaker-names.json", {}), track_languages)
+    return write_outputs(session_dir, session, all_rows, read_json(session_dir / "speaker-names.json", {}),
+                         track_languages, config["_meeting_language_policy"])

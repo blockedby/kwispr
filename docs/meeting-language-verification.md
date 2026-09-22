@@ -84,5 +84,18 @@ switches, short-turn context, unprompted probes, old-server fallback, checkpoint
 retry context, and fingerprint invalidation. Mixed Russian/English text is kept
 as returned; there is no translation or output-script filter.
 
+The optional `KWISPR_WHISPER_ALLOWED_LANGUAGES` integration has fake-HTTP coverage
+for a capable server, an older server, a refused health redirect, and a malformed
+capability value. Only a nonempty setting with a Whisper model triggers a single
+health probe per processing run. The real multipart request retains the list,
+explicit language, vocabulary and authorization; proxies and redirects are
+disabled for both health and audio requests. A regression processes the same
+session before and after the server gains support and checks that the old
+unrestricted checkpoint is invalidated, while a subsequent unchanged run reuses
+the completed turn. These tests validate the wire/cache contract, not native
+decoder quality. Native allowed-language audio replay is a separate check.
+With that integration, the focused suite has 22 passing tests and the full suite
+has 104 passing tests (two optional real-audio tests skipped).
+
 The audio, transcripts and probe outputs used for this verification are private
 local artifacts and are not included in the repository.

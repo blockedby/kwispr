@@ -90,9 +90,22 @@ def meeting_language(config: dict[str, str], track: str) -> str:
     language = config.get(key, "").strip().lower()
     if language in {"", "auto"}:
         return ""
-    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*", language):
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{1,8})*", language):
         raise ConfigError(f"{key} must be Auto or a language code, such as ru or en.")
     return language
+
+
+def allowed_whisper_languages(config: dict[str, str]) -> str:
+    """Optional detection candidates; an empty setting keeps all languages."""
+    raw = config.get("KWISPR_WHISPER_ALLOWED_LANGUAGES", "")
+    if len(raw) > 1024:
+        raise ConfigError("KWISPR_WHISPER_ALLOWED_LANGUAGES must be at most 1024 characters.")
+    if not raw.strip():
+        return ""
+    codes = [code.strip().lower() for code in raw.split(",")]
+    if any(not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{1,8})*", code) for code in codes):
+        raise ConfigError("KWISPR_WHISPER_ALLOWED_LANGUAGES must be comma-separated language codes, such as ru,en, without empty entries.")
+    return ",".join(dict.fromkeys(codes))
 
 
 def speaker_count(value: str | int) -> int:
