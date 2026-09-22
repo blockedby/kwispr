@@ -451,7 +451,17 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     updateUi();
 }
 
-MeetingDialog::~MeetingDialog() = default;
+MeetingDialog::~MeetingDialog()
+{
+    for (auto *timer : {m_pollTimer, m_commandTimeout, m_statusTimeout, m_sourcesTimeout}) {
+        timer->stop();
+    }
+    // QProcess destruction can emit finished while QWidget deletes its children,
+    // after our QString members are gone. Prevent callbacks into that partial object.
+    for (auto *process : {m_command, m_statusProcess, m_sourcesProcess, m_setupProcess}) {
+        QObject::disconnect(process, nullptr, this, nullptr);
+    }
+}
 
 void MeetingDialog::showEvent(QShowEvent *event)
 {
