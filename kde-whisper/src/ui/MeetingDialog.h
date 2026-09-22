@@ -2,6 +2,7 @@
 
 #include <QDialog>
 #include <QString>
+#include <functional>
 
 class QComboBox;
 class QLabel;
@@ -17,7 +18,10 @@ class MeetingDialog : public QDialog
 {
     Q_OBJECT
 public:
-    explicit MeetingDialog(QString runtimeRoot, QString configPath, QWidget *parent = nullptr);
+    using FolderOpenCompletion = std::function<void(bool, const QString &)>;
+    using FolderOpener = std::function<void(const QString &, FolderOpenCompletion)>;
+    explicit MeetingDialog(QString runtimeRoot, QString configPath, QWidget *parent = nullptr,
+                           FolderOpener folderOpener = {});
     ~MeetingDialog() override;
     bool recordingActive() const;
 
@@ -38,7 +42,8 @@ private:
     void runCommand(const QStringList &arguments, const QString &pendingState);
     void startMeeting();
     void setupModels();
-    bool saveChoices();
+    void openSavedFolder();
+    bool saveChoices(bool languagesOnly = false);
     bool captureActive() const;
     void updatePolling();
     void updateDeviceDetails();
@@ -60,6 +65,8 @@ private:
     QString m_savedMonitor;
     QString m_defaultMic;
     QString m_defaultMonitor;
+    FolderOpener m_folderOpener;
+    bool m_folderOpenBusy = false;
     bool m_statusKnown = false;
     bool m_sourcesLoaded = false;
     bool m_commandBusy = false;
@@ -86,6 +93,8 @@ private:
     QLineEdit *m_titleEdit;
     QComboBox *m_micCombo;
     QComboBox *m_monitorCombo;
+    QComboBox *m_micLanguageCombo;
+    QComboBox *m_remoteLanguageCombo;
     QLabel *m_micDetailsLabel;
     QLabel *m_monitorDetailsLabel;
     QLineEdit *m_outputEdit;
