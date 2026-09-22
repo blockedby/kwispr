@@ -4,10 +4,20 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from kwispr_meetings.config import ConfigError, load_config, output_dir, speaker_count, validate_local_backend
+from kwispr_meetings.config import ConfigError, load_config, meeting_language, output_dir, speaker_count, validate_local_backend
 
 
 class MeetingConfigTests(unittest.TestCase):
+    def test_meeting_languages_are_independent_and_normalized(self):
+        config = {"KWISPR_LANGUAGE": "zh", "KWISPR_MEETING_MIC_LANGUAGE": " RU ", "KWISPR_MEETING_REMOTE_LANGUAGE": "en-US"}
+        self.assertEqual(meeting_language(config, "microphone"), "ru")
+        self.assertEqual(meeting_language(config, "remote"), "en-us")
+        self.assertEqual(meeting_language({"KWISPR_LANGUAGE": "ru"}, "remote"), "")
+        self.assertEqual(meeting_language({"KWISPR_MEETING_REMOTE_LANGUAGE": "AUTO"}, "remote"), "")
+        for value in ("English", "en ru", "x", "../../ru"):
+            with self.assertRaises(ConfigError):
+                meeting_language({"KWISPR_MEETING_REMOTE_LANGUAGE": value}, "remote")
+
     def test_literal_quotes_preserve_dictionary_without_shell_execution(self):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {}, clear=True):
             root = Path(temporary)

@@ -14,9 +14,10 @@ import urllib.request
 import uuid
 import wave
 from pathlib import Path
-from .config import runtime_dir
+from .config import meeting_language, runtime_dir
 
-PIPELINE_VERSION = 1
+PIPELINE_VERSION = 2
+SHORT_TURN_SECONDS = 4.0
 MODEL_FILES = {
     "segmentation.onnx": (5992913, "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"),
     "embedding.onnx": (40257283, "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e"),
@@ -160,15 +161,17 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise RuntimeError("Meeting transcription endpoint redirected. Configure the local endpoint directly.")
 
 
-def _request_transcript(pcm, config):
+def _request_transcription(pcm, config, *, language="", vocabulary=True):
     from .config import validate_local_backend
     validate_local_backend(config)
     fields = {"model": config.get("KWISPR_MODEL", "whisper-large-v3-turbo"),
               "response_format": "json", "temperature": "0", "preserve_audio_tail": "1"}
-    language = config.get("KWISPR_LANGUAGE", "").strip()
     if language:
         fields["language"] = language
-    context = "\n".join(part for part in [config.get("KWISPR_WHISPER_PROMPT", "").strip(), config.get("KWISPR_VOCABULARY", "").strip()] if part)
+    # Dictation's example prose and language describe the user's own voice, not
+    # everyone in a call. In particular, a Russian example can turn English
+    # speech into Cyrillic gibberish. Only the personal spellings are shared.
+    context = config.get("KWISPR_VOCABULARY", "").strip() if vocabulary else ""
     if fields["model"].startswith("whisper") and context:
         if len(context) > 4096 or "\0" in context:
             raise RuntimeError("Whisper context must be at most 4096 characters and contain no NUL.")
@@ -194,7 +197,16 @@ def _request_transcript(pcm, config):
         raise RuntimeError(f"Local transcription failed ({type(error).__name__}). Audio and completed turns were kept; retry when the server is ready.") from error
     if not isinstance(result, dict) or not isinstance(result.get("text"), str):
         raise RuntimeError("Local transcription returned an invalid response; expected a text field.")
-    return result["text"].strip()
+    answer = {"text": result["text"].strip()}
+    detected = result.get("language")
+    if isinstance(detected, str) and re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", detected.strip()):
+        answer["language"] = detected.strip().lower()
+    return answer
+
+
+def _request_transcript(pcm, config):
+    """Compatibility text-only helper; meeting language is selected per track."""
+    return _request_transcription(pcm, config)["text"]
 
 
 def _wav_slice(audio, start, end):
@@ -216,7 +228,7 @@ def _fingerprint(session_dir, config, session):
         stat = (session_dir / name).stat()
         tracks.append([name, stat.st_size, stat.st_mtime_ns])
     inputs = {"version": PIPELINE_VERSION, "tracks": tracks, "speakers": session.get("speakers", 0),
-              "context": [config.get(key, "") for key in ["KWISPR_API_URL", "KWISPR_MODEL", "KWISPR_LANGUAGE", "KWISPR_WHISPER_PROMPT", "KWISPR_VOCABULARY"]]}
+              "context": [config.get(key, "") for key in ["KWISPR_API_URL", "KWISPR_MODEL", "KWISPR_MEETING_MIC_LANGUAGE", "KWISPR_MEETING_REMOTE_LANGUAGE", "KWISPR_VOCABULARY"]]}
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
@@ -229,7 +241,7 @@ def _markdown_literal(text):
     return re.sub(r"([\\`*_{}\[\]<>#!|])", r"\\\1", " ".join(str(text).split()))
 
 
-def write_outputs(session_dir, session, rows, names=None):
+def write_outputs(session_dir, session, rows, names=None, languages=None):
     session_dir = Path(session_dir)
     names = names or {}
     labels = {"self": "Я"}
@@ -240,7 +252,7 @@ def write_outputs(session_dir, session, rows, names=None):
     labels.update({key: value.strip() for key, value in names.items() if key in labels and isinstance(value, str) and value.strip()})
     ordered = sorted(rows, key=lambda row: (row["start"], row["end"], row["track"]))
     document = {"schema_version": 1, "title": session.get("title") or "Звонок", "started_at": session.get("started_at"),
-                "speakers": labels, "utterances": ordered}
+                "speakers": labels, "utterances": ordered, "track_languages": languages or {}}
     atomic_json(session_dir / "transcript.json", document)
     lines = ["# " + _markdown_literal(document["title"]), ""]
     if document["started_at"]:
@@ -281,7 +293,7 @@ def process_session(session_dir, config, progress_callback=None):
     diarization = read_json(diarization_path, {})
     if diarization.get("signature") != signature:
         diarization = {"signature": signature, "tracks": {}}
-    all_rows = []
+    all_rows, track_languages = [], {}
     for track in ["remote", "microphone"]:
         _notify(progress_callback, f"Reading {track} recording…")
         audio = _load_track(session_dir / (track + ".wav"))
@@ -292,6 +304,33 @@ def process_session(session_dir, config, progress_callback=None):
             diarization["tracks"][track] = speech_intervals(segments, duration, track == "microphone")
             atomic_json(diarization_path, diarization)
         intervals = split_intervals(diarization["tracks"][track], audio)
+        explicit_language = meeting_language(config, track)
+        fallback_language = ""
+        detected_languages = []
+        language_info = {"requested": explicit_language or "auto", "detected": detected_languages,
+                         "short_turn_fallback": ""}
+        track_languages[track] = language_info
+        # Probe only when the first utterance is too short to identify a language.
+        # Longer turns continue to autodetect, so a later language switch can
+        # update the fallback instead of fixing a multilingual call to one language.
+        if intervals and not explicit_language and intervals[0]["end"] - intervals[0]["start"] < SHORT_TURN_SECONDS:
+            probe = checkpoint.setdefault("language_probes", {}).get(track)
+            if probe is None:
+                probe_interval = next((item for item in intervals if item["end"] - item["start"] >= 10), None)
+                if probe_interval:
+                    _notify(progress_callback, f"Detecting language in {track} recording…")
+                    probe = _request_transcription(_wav_slice(audio, probe_interval["start"],
+                                                              min(probe_interval["end"], probe_interval["start"] + 20)),
+                                                   config, vocabulary=False)
+                    # Probe text is not used as a transcript; every timed turn is
+                    # still decoded. Persist only language metadata for retries.
+                    probe = {"language": probe.get("language", "")}
+                else:
+                    probe = {}
+                checkpoint["language_probes"][track] = probe
+                atomic_json(checkpoint_path, checkpoint)
+            fallback_language = probe.get("language", "")
+            language_info["probe"] = fallback_language
         offset = float(session.get(track + "_offset_seconds", 0))
         if not math.isfinite(offset):
             raise RuntimeError("Invalid audio track timing offset.")
@@ -304,13 +343,24 @@ def process_session(session_dir, config, progress_callback=None):
                 next_start = intervals[index + 1]["start"] if index + 1 < len(intervals) else duration
                 start = max(previous_end, interval["start"] - 0.15)
                 end = min(next_start, interval["end"] + 0.2)
-                text = _request_transcript(_wav_slice(audio, start, end), config)
-                checkpoint["turns"][key] = text
+                short = interval["end"] - interval["start"] < SHORT_TURN_SECONDS
+                requested = explicit_language or (fallback_language if short else "")
+                result = _request_transcription(_wav_slice(audio, start, end), config, language=requested)
+                result["requested_language"] = requested or "auto"
+                result["language_mode"] = "explicit" if explicit_language else "short-turn-context" if requested else "auto"
+                checkpoint["turns"][key] = result
                 atomic_json(checkpoint_path, checkpoint)
                 # Give interactive dictation a chance between bounded requests.
                 time.sleep(0.05)
+            result = checkpoint["turns"][key]
+            detected = result.get("language", "")
+            if detected and detected not in detected_languages:
+                detected_languages.append(detected)
+            if detected and interval["end"] - interval["start"] >= SHORT_TURN_SECONDS:
+                fallback_language = detected
+            language_info["short_turn_fallback"] = fallback_language
             all_rows.append({"start": round(interval["start"] + offset, 3), "end": round(interval["end"] + offset, 3),
-                             "speakers": interval["speakers"], "track": track, "text": checkpoint["turns"][key]})
+                             "speakers": interval["speakers"], "track": track, **result})
         del audio
     _notify(progress_callback, "Saving transcript files…")
-    return write_outputs(session_dir, session, all_rows, read_json(session_dir / "speaker-names.json", {}))
+    return write_outputs(session_dir, session, all_rows, read_json(session_dir / "speaker-names.json", {}), track_languages)

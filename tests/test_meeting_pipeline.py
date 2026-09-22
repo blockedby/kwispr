@@ -12,6 +12,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 import wave
+from contextlib import contextmanager, ExitStack
 
 from kwispr_meetings import pipeline
 
@@ -81,7 +82,7 @@ class MeetingPipelineTest(unittest.TestCase):
             self.assertEqual(Path(result["transcript_path"]).stat().st_mode & 0o777, 0o600)
             self.assertEqual(Path(result["transcript_json"]).stat().st_mode & 0o777, 0o600)
 
-    def test_local_http_payload_uses_shared_hints_and_avoids_redirects(self):
+    def test_local_http_payload_keeps_vocabulary_without_dictation_language_or_prompt(self):
         requests = []
         authorization = []
         class Handler(BaseHTTPRequestHandler):
@@ -91,18 +92,24 @@ class MeetingPipelineTest(unittest.TestCase):
                 if self.path == "/redirect":
                     self.send_response(307); self.send_header("Location", "https://example.invalid/upload"); self.end_headers()
                 else:
-                    self.send_response(200); self.end_headers(); self.wfile.write(json.dumps({"text": " Готово. "}).encode())
+                    self.send_response(200); self.end_headers(); self.wfile.write(json.dumps({"text": " Готово. ", "language": "ru"}).encode())
             def log_message(self, *args):
                 pass
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         try:
             config = {"KWISPR_API_URL": f"http://127.0.0.1:{server.server_port}/ok", "KWISPR_MODEL": "whisper-large-v3-turbo",
-                      "KWISPR_WHISPER_PROMPT": "Привет!", "KWISPR_VOCABULARY": "Kwispr, @secret;type=text/plain", "OPENAI_API_KEY": "test-legacy-key"}
+                      "KWISPR_LANGUAGE": "ru", "KWISPR_WHISPER_PROMPT": "Привет!", "KWISPR_VOCABULARY": "Kwispr, @secret;type=text/plain", "OPENAI_API_KEY": "test-legacy-key"}
             self.assertEqual(pipeline._request_transcript(b"wav-content", config), "Готово.")
-            self.assertIn("Привет!\nKwispr, @secret;type=text/plain".encode(), requests[0])
+            self.assertIn(b"Kwispr, @secret;type=text/plain", requests[0])
+            self.assertNotIn("Привет!".encode(), requests[0])
+            self.assertNotIn(b'name="language"', requests[0])
             self.assertIn(b"wav-content", requests[0])
             self.assertEqual(authorization, ["Bearer test-legacy-key"])
+            self.assertEqual(pipeline._request_transcription(b"probe", config, language="en", vocabulary=False),
+                             {"text": "Готово.", "language": "ru"})
+            self.assertIn(b'name="language"\r\n\r\nen', requests[1])
+            self.assertNotIn(b'name="prompt"', requests[1])
             config["KWISPR_API_URL"] = f"http://127.0.0.1:{server.server_port}/redirect"
             with self.assertRaisesRegex(RuntimeError, "redirected"):
                 pipeline._request_transcript(b"audio", config)
@@ -123,19 +130,95 @@ class MeetingPipelineTest(unittest.TestCase):
             common = [patch.object(pipeline, "require_ready"), patch.object(pipeline, "_load_track", return_value=[0] * 160000),
                       patch.object(pipeline, "split_intervals", side_effect=lambda intervals, audio: intervals),
                       patch.object(pipeline, "_wav_slice", return_value=b"audio"), patch.object(pipeline.time, "sleep")]
-            from contextlib import ExitStack
             with ExitStack() as stack:
                 for item in common: stack.enter_context(item)
                 stack.enter_context(patch.object(pipeline, "_diarize", return_value=segments))
-                with patch.object(pipeline, "_request_transcript", side_effect=["first", RuntimeError("offline")]):
+                with patch.object(pipeline, "_request_transcription", side_effect=[{"text": "first"}, RuntimeError("offline")]):
                     with self.assertRaisesRegex(RuntimeError, "offline"):
                         pipeline.process_session(root, config)
                 self.assertEqual((root / "remote.wav").read_bytes(), b"fixture")
-                with patch.object(pipeline, "_request_transcript", return_value="retry") as request:
+                with patch.object(pipeline, "_request_transcription", return_value={"text": "retry"}) as request:
                     result = pipeline.process_session(root, config)
                 self.assertEqual(request.call_count, 3)  # remaining remote + two mic spans
                 document = json.loads(Path(result["transcript_json"]).read_text())
                 self.assertIn("first", [row["text"] for row in document["utterances"]])
+
+    @contextmanager
+    def processing_fixture(self, remote, microphone=()):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            for name in ("remote.wav", "microphone.wav"):
+                (root / name).write_bytes(b"fixture")
+            pipeline.atomic_json(root / "session.json", {"title": "Call", "speakers": 2})
+            config = {"KWISPR_API_URL": "http://127.0.0.1:19650/v1/audio/transcriptions"}
+            for item in [patch.object(pipeline, "require_ready"), patch.object(pipeline, "_load_track", return_value=[0] * 800000),
+                         patch.object(pipeline, "split_intervals", side_effect=lambda intervals, audio: intervals),
+                         patch.object(pipeline, "_wav_slice", return_value=b"audio"), patch.object(pipeline.time, "sleep"),
+                         patch.object(pipeline, "_diarize", side_effect=[remote, microphone])]:
+                stack.enter_context(item)
+            yield root, config
+
+    def test_auto_tracks_follow_long_turn_language_switches_and_anchor_short_turns(self):
+        segments = [{"start": start, "end": end, "speaker": "speaker_01"}
+                    for start, end in [(0, 5), (6, 7), (8, 13), (14, 15)]]
+        responses = [{"text": "English sentence", "language": "en"}, {"text": "Yes", "language": "en"},
+                     {"text": "Русская реплика with React", "language": "ru"}, {"text": "Да", "language": "ru"}]
+        with self.processing_fixture(segments) as (root, config):
+            config.update(KWISPR_LANGUAGE="zh", KWISPR_WHISPER_PROMPT="ignored dictation context")
+            with patch.object(pipeline, "_request_transcription", side_effect=responses) as request:
+                pipeline.process_session(root, config)
+            self.assertEqual([call.kwargs["language"] for call in request.call_args_list], ["", "en", "", "ru"])
+            document = json.loads((root / "transcript.json").read_text())
+            self.assertEqual(document["track_languages"]["remote"]["detected"], ["en", "ru"])
+            self.assertEqual(document["utterances"][2]["text"], "Русская реплика with React")
+
+    def test_explicit_languages_are_independent_for_the_two_tracks(self):
+        segments = [{"start": 0, "end": 5, "speaker": "speaker_01"}]
+        with self.processing_fixture(segments, segments) as (root, config):
+            config.update(KWISPR_MEETING_REMOTE_LANGUAGE="en", KWISPR_MEETING_MIC_LANGUAGE="ru", KWISPR_LANGUAGE="zh")
+            with patch.object(pipeline, "_request_transcription", side_effect=[{"text": "Hello"}, {"text": "Привет"}]) as request:
+                pipeline.process_session(root, config)
+            self.assertEqual([call.kwargs["language"] for call in request.call_args_list], ["en", "ru"])
+            document = json.loads((root / "transcript.json").read_text())
+            self.assertEqual(document["track_languages"]["remote"]["requested"], "en")
+            self.assertEqual(document["track_languages"]["microphone"]["requested"], "ru")
+
+    def test_short_first_turn_uses_unprompted_representative_probe(self):
+        segments = [{"start": 0, "end": 1, "speaker": "speaker_01"},
+                    {"start": 2, "end": 14, "speaker": "speaker_01"}]
+        responses = [{"text": "Probe text is not an output", "language": "en"},
+                     {"text": "Yes", "language": "en"}, {"text": "Longer actual turn", "language": "en"}]
+        with self.processing_fixture(segments) as (root, config):
+            with patch.object(pipeline, "_request_transcription", side_effect=responses) as request:
+                pipeline.process_session(root, config)
+            self.assertFalse(request.call_args_list[0].kwargs["vocabulary"])
+            self.assertEqual(request.call_args_list[1].kwargs["language"], "en")
+            self.assertEqual(request.call_args_list[2].kwargs["language"], "")
+            document = json.loads((root / "transcript.json").read_text())
+            self.assertEqual([row["text"] for row in document["utterances"]], ["Yes", "Longer actual turn"])
+
+    def test_servers_without_language_metadata_keep_auto_and_retry_restores_context(self):
+        segments = [{"start": 0, "end": 5, "speaker": "speaker_01"},
+                    {"start": 6, "end": 7, "speaker": "speaker_01"}]
+        with self.processing_fixture(segments) as (root, config):
+            with patch.object(pipeline, "_request_transcription", side_effect=[{"text": "Long"}, {"text": "Short"}]) as request:
+                pipeline.process_session(root, config)
+            self.assertEqual([call.kwargs["language"] for call in request.call_args_list], ["", ""])
+        with self.processing_fixture(segments) as (root, config):
+            with patch.object(pipeline, "_request_transcription", side_effect=[{"text": "Long", "language": "en"}, RuntimeError("offline")]):
+                with self.assertRaisesRegex(RuntimeError, "offline"):
+                    pipeline.process_session(root, config)
+            with patch.object(pipeline, "_request_transcription", return_value={"text": "Retry", "language": "en"}) as request:
+                pipeline.process_session(root, config)
+            self.assertEqual(request.call_count, 1)
+            self.assertEqual(request.call_args.kwargs["language"], "en")
+
+    def test_fingerprint_tracks_meeting_languages_not_dictation_hints(self):
+        with self.processing_fixture([]) as (root, config):
+            original = pipeline._fingerprint(root, config, {})
+            self.assertEqual(original, pipeline._fingerprint(root, {**config, "KWISPR_LANGUAGE": "ru", "KWISPR_WHISPER_PROMPT": "Example"}, {}))
+            for key, value in [("KWISPR_MEETING_MIC_LANGUAGE", "ru"), ("KWISPR_MEETING_REMOTE_LANGUAGE", "en"), ("KWISPR_VOCABULARY", "React")]:
+                self.assertNotEqual(original, pipeline._fingerprint(root, {**config, key: value}, {}))
 
     def test_unconfigured_runtime_is_actionable(self):
         with tempfile.TemporaryDirectory() as temporary:

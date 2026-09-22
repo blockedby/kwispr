@@ -82,6 +82,19 @@ def runtime_dir(config=None):
     return Path(override).expanduser() if override else Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "kwispr/meeting-runtime"
 
 
+def meeting_language(config: dict[str, str], track: str) -> str:
+    """Select a meeting track language independently of ordinary dictation."""
+    if track not in {"microphone", "remote"}:
+        raise ConfigError("Unknown meeting audio track.")
+    key = "KWISPR_MEETING_MIC_LANGUAGE" if track == "microphone" else "KWISPR_MEETING_REMOTE_LANGUAGE"
+    language = config.get(key, "").strip().lower()
+    if language in {"", "auto"}:
+        return ""
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*", language):
+        raise ConfigError(f"{key} must be Auto or a language code, such as ru or en.")
+    return language
+
+
 def speaker_count(value: str | int) -> int:
     try:
         count = int(value)
