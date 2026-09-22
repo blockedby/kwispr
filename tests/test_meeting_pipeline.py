@@ -85,7 +85,11 @@ class MeetingPipelineTest(unittest.TestCase):
     def test_local_http_payload_keeps_vocabulary_without_dictation_language_or_prompt(self):
         requests = []
         authorization = []
+        health_requests = []
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                health_requests.append(self.path)
+                self.send_response(404); self.end_headers()
             def do_POST(self):
                 requests.append(self.rfile.read(int(self.headers["Content-Length"])))
                 authorization.append(self.headers.get("Authorization"))
@@ -106,6 +110,7 @@ class MeetingPipelineTest(unittest.TestCase):
             self.assertNotIn(b'name="language"', requests[0])
             self.assertIn(b"wav-content", requests[0])
             self.assertEqual(authorization, ["Bearer test-legacy-key"])
+            self.assertEqual(health_requests, [])  # Default behavior has no probe.
             self.assertEqual(pipeline._request_transcription(b"probe", config, language="en", vocabulary=False),
                              {"text": "Готово.", "language": "ru"})
             self.assertIn(b'name="language"\r\n\r\nen', requests[1])
@@ -118,6 +123,95 @@ class MeetingPipelineTest(unittest.TestCase):
                 pipeline._request_transcript(b"audio", config)
         finally:
             server.shutdown(); server.server_close(); thread.join()
+
+    @contextmanager
+    def language_api(self, health):
+        observed = {"health": [], "audio": [], "authorization": []}
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                observed["health"].append(self.path)
+                observed["authorization"].append(self.headers.get("Authorization"))
+                if health.get("redirect") and self.path == "/health":
+                    self.send_response(307); self.send_header("Location", "/forwarded"); self.end_headers()
+                    return
+                self.send_response(health.get("status", 200)); self.end_headers()
+                self.wfile.write(json.dumps(health.get("body", {})).encode())
+            def do_POST(self):
+                observed["audio"].append(self.rfile.read(int(self.headers["Content-Length"])))
+                observed["authorization"].append(self.headers.get("Authorization"))
+                self.send_response(200); self.end_headers()
+                self.wfile.write(json.dumps({"text": "Обсудим React components.", "language": "ru"}).encode())
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}/v1/audio/transcriptions", observed
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_allowed_languages_probe_once_preserves_config_and_explicit_language(self):
+        with self.language_api({"body": {"capabilities": {"whisper_allowed_languages": True}}}) as (url, observed):
+            config = {"KWISPR_API_URL": url, "KWISPR_WHISPER_ALLOWED_LANGUAGES": " RU, en, ru ",
+                      "KWISPR_VOCABULARY": "React, Kwispr", "KWISPR_API_KEY": "private-test-key"}
+            with patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:1", "no_proxy": ""}):
+                prepared = pipeline._prepare_language_policy(config)
+                answer = pipeline._request_transcription(b"audio", prepared, language="en")
+                pipeline._request_transcription(b"audio", prepared, vocabulary=False)
+            self.assertNotIn("_meeting_language_policy", config)
+            self.assertEqual(observed["health"], ["/health"])
+            self.assertEqual(answer["text"], "Обсудим React components.")  # No text/script filtering.
+            for body in observed["audio"]:
+                self.assertIn(b'name="allowed_languages"\r\n\r\nru,en', body)
+            self.assertIn(b'name="language"\r\n\r\nen', observed["audio"][0])
+            self.assertIn(b"React, Kwispr", observed["audio"][0])
+            self.assertNotIn(b'name="prompt"', observed["audio"][1])
+            self.assertEqual(observed["authorization"], ["Bearer private-test-key"] * 3)
+
+    def test_allowed_language_old_server_and_health_redirect_fall_back_without_field(self):
+        for health in ({"body": {"capabilities": {}}}, {"status": 404},
+                       {"body": {"capabilities": {"whisper_allowed_languages": "true"}}},
+                       {"redirect": True, "body": {"capabilities": {"whisper_allowed_languages": True}}}):
+            with self.subTest(health=health), self.language_api(health) as (url, observed):
+                config = {"KWISPR_API_URL": url, "KWISPR_WHISPER_ALLOWED_LANGUAGES": "ru,en"}
+                answer = pipeline._request_transcription(b"audio", config)
+                self.assertEqual(answer["language"], "ru")
+                self.assertEqual(observed["health"], ["/health"])
+                self.assertNotIn(b'name="allowed_languages"', observed["audio"][0])
+
+    def test_non_whisper_model_ignores_language_candidates_and_cloud_is_rejected_before_probe(self):
+        with self.language_api({}) as (url, observed):
+            pipeline._request_transcription(b"audio", {"KWISPR_API_URL": url, "KWISPR_MODEL": "parakeet-tdt-0.6b-v3",
+                                                     "KWISPR_WHISPER_ALLOWED_LANGUAGES": "ru,en"})
+            self.assertEqual(observed["health"], [])
+            self.assertNotIn(b'name="allowed_languages"', observed["audio"][0])
+        with patch.object(pipeline.urllib.request, "build_opener") as build:
+            with self.assertRaises(ValueError):
+                pipeline._prepare_language_policy({"KWISPR_API_URL": "https://api.openai.com/v1/audio/transcriptions",
+                                                   "KWISPR_WHISPER_ALLOWED_LANGUAGES": "ru,en"})
+            build.assert_not_called()
+
+    def test_server_upgrade_invalidates_unrestricted_checkpoint(self):
+        segments = [{"start": 0, "end": 5, "speaker": "speaker_01"}]
+        health = {"body": {"capabilities": {}}}
+        with self.language_api(health) as (url, observed), self.processing_fixture(segments) as (root, config):
+            config.update(KWISPR_API_URL=url, KWISPR_WHISPER_ALLOWED_LANGUAGES="ru,en")
+            with patch.object(pipeline, "_diarize", side_effect=[segments, [], segments, []]):
+                pipeline.process_session(root, config)
+                old_signature = pipeline.read_json(root / "processing-checkpoint.json", {})["signature"]
+                self.assertNotIn(b'name="allowed_languages"', observed["audio"][0])
+                health["body"]["capabilities"]["whisper_allowed_languages"] = True
+                pipeline.process_session(root, config)
+                new_signature = pipeline.read_json(root / "processing-checkpoint.json", {})["signature"]
+                self.assertNotEqual(old_signature, new_signature)
+                self.assertIn(b'name="allowed_languages"\r\n\r\nru,en', observed["audio"][1])
+                pipeline.process_session(root, config)
+                self.assertEqual(len(observed["audio"]), 2)  # Same effective policy resumes.
+                self.assertEqual(len(observed["health"]), 3)  # Recheck once each run.
+                document = pipeline.read_json(root / "transcript.json", {})
+                self.assertEqual(document["language_policy"], {"configured_allowed_languages": "ru,en",
+                    "effective_allowed_languages": "ru,en", "supported": True})
+                self.assertEqual(document["utterances"][0]["text"], "Обсудим React components.")
 
     def test_failed_processing_keeps_progress_and_retry_skips_completed_turn(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -217,7 +311,8 @@ class MeetingPipelineTest(unittest.TestCase):
         with self.processing_fixture([]) as (root, config):
             original = pipeline._fingerprint(root, config, {})
             self.assertEqual(original, pipeline._fingerprint(root, {**config, "KWISPR_LANGUAGE": "ru", "KWISPR_WHISPER_PROMPT": "Example"}, {}))
-            for key, value in [("KWISPR_MEETING_MIC_LANGUAGE", "ru"), ("KWISPR_MEETING_REMOTE_LANGUAGE", "en"), ("KWISPR_VOCABULARY", "React")]:
+            for key, value in [("KWISPR_MEETING_MIC_LANGUAGE", "ru"), ("KWISPR_MEETING_REMOTE_LANGUAGE", "en"),
+                               ("KWISPR_VOCABULARY", "React"), ("KWISPR_WHISPER_ALLOWED_LANGUAGES", "ru,en")]:
                 self.assertNotEqual(original, pipeline._fingerprint(root, {**config, key: value}, {}))
 
     def test_unconfigured_runtime_is_actionable(self):

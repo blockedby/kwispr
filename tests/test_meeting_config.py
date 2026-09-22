@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from kwispr_meetings.config import ConfigError, load_config, meeting_language, output_dir, speaker_count, validate_local_backend
+from kwispr_meetings.config import ConfigError, allowed_whisper_languages, load_config, meeting_language, output_dir, speaker_count, validate_local_backend
 
 
 class MeetingConfigTests(unittest.TestCase):
@@ -14,9 +14,18 @@ class MeetingConfigTests(unittest.TestCase):
         self.assertEqual(meeting_language(config, "remote"), "en-us")
         self.assertEqual(meeting_language({"KWISPR_LANGUAGE": "ru"}, "remote"), "")
         self.assertEqual(meeting_language({"KWISPR_MEETING_REMOTE_LANGUAGE": "AUTO"}, "remote"), "")
+        self.assertEqual(meeting_language({"KWISPR_MEETING_REMOTE_LANGUAGE": "en-x-test"}, "remote"), "en-x-test")
         for value in ("English", "en ru", "x", "../../ru"):
             with self.assertRaises(ConfigError):
                 meeting_language({"KWISPR_MEETING_REMOTE_LANGUAGE": value}, "remote")
+
+    def test_allowed_language_candidates_validate_and_normalize(self):
+        self.assertEqual(allowed_whisper_languages({}), "")
+        self.assertEqual(allowed_whisper_languages({"KWISPR_WHISPER_ALLOWED_LANGUAGES": "  "}), "")
+        self.assertEqual(allowed_whisper_languages({"KWISPR_WHISPER_ALLOWED_LANGUAGES": " RU, en,ru, EN-x-test "}), "ru,en,en-x-test")
+        for value in ("ru,,en", "ru,", ",en", "English", "en ru", "x", "ru\0", "en-123456789", "ru," * 400):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                allowed_whisper_languages({"KWISPR_WHISPER_ALLOWED_LANGUAGES": value})
 
     def test_literal_quotes_preserve_dictionary_without_shell_execution(self):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {}, clear=True):
