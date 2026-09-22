@@ -1,6 +1,7 @@
 #include "ui/MeetingDialog.h"
 #include "config/EnvFile.h"
 
+#include <QAbstractItemView>
 #include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
@@ -135,6 +136,10 @@ private slots:
     void unavailableSavedSourceNeedsExplicitSelection();
     void deviceDefaultsAreAnnotatedWithoutChangingSavedSelections();
     void longSelectedDeviceNamesRemainVisible();
+    void meetingLanguagesAreIndependentAndPersistOnStart();
+    void retryPersistsLanguageCorrectionsWithoutChangingDeviceChoices();
+    void invalidLanguageDoesNotStartRecording();
+    void openSavedFolderUsesInjectedFileManagerAndReportsErrors();
     void disappearingWorkerDoesNotTrapWindowInStartingState();
     void modelSetupIsAsynchronousAndReportsFailure();
     void pollingDoesNotOverlapOrRunWhileHidden();
@@ -361,6 +366,126 @@ void MeetingDialogTest::longSelectedDeviceNamesRemainVisible()
     QCOMPARE(mic->currentData().toString(), QStringLiteral("mic.long"));
 }
 
+void MeetingDialogTest::meetingLanguagesAreIndependentAndPersistOnStart()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    QVERIFY(writeFile(fixture.configPath(), "KWISPR_LANGUAGE=ru\nKWISPR_WHISPER_PROMPT='Keep punctuation.'\nKWISPR_VOCABULARY='Kwispr|Codex'\n"));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    QTRY_VERIFY(control<QPushButton>(dialog, "meetingStart")->isEnabled());
+    auto *micLanguage = control<QComboBox>(dialog, "meetingMicrophoneLanguage");
+    auto *remoteLanguage = control<QComboBox>(dialog, "meetingRemoteLanguage");
+    QCOMPARE(micLanguage->currentText(), QStringLiteral("Auto"));
+    QCOMPARE(remoteLanguage->currentText(), QStringLiteral("Auto"));
+    micLanguage->setFocus();
+    QTest::keyClick(micLanguage, Qt::Key_Down, Qt::AltModifier);
+    QTRY_VERIFY(micLanguage->view()->isVisible());
+    const QString screenshotDir = qEnvironmentVariable("KWISPR_MEETING_SCREENSHOTS");
+    if (!screenshotDir.isEmpty()) {
+        QDir().mkpath(screenshotDir);
+        QVERIFY(micLanguage->view()->window()->grab().save(QDir(screenshotDir).filePath(QStringLiteral("meeting-language-picker.png"))));
+    }
+    QTest::keyClick(micLanguage->view(), Qt::Key_Down);
+    QTest::keyClick(micLanguage->view(), Qt::Key_Return);
+    QCOMPARE(micLanguage->currentData().toString(), QStringLiteral("ru"));
+    remoteLanguage->setCurrentIndex(remoteLanguage->findData(QStringLiteral("en")));
+    control<QPushButton>(dialog, "meetingStart")->click();
+    QTRY_VERIFY(control<QPushButton>(dialog, "meetingStop")->isEnabled());
+    QVERIFY(!micLanguage->isEnabled());
+    QVERIFY(!remoteLanguage->isEnabled());
+    EnvFile env;
+    QVERIFY(env.load(fixture.configPath()));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_MIC_LANGUAGE")), QStringLiteral("ru"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_REMOTE_LANGUAGE")), QStringLiteral("en"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("ru"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_WHISPER_PROMPT")), QStringLiteral("Keep punctuation."));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_VOCABULARY")), QStringLiteral("Kwispr|Codex"));
+    control<QPushButton>(dialog, "meetingStop")->click();
+    QTRY_VERIFY(!dialog.recordingActive());
+    MeetingDialog reopened(fixture.dir.path(), fixture.configPath());
+    QCOMPARE(control<QComboBox>(reopened, "meetingMicrophoneLanguage")->currentData().toString(), QStringLiteral("ru"));
+    QCOMPARE(control<QComboBox>(reopened, "meetingRemoteLanguage")->currentData().toString(), QStringLiteral("en"));
+}
+
+void MeetingDialogTest::retryPersistsLanguageCorrectionsWithoutChangingDeviceChoices()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    QVERIFY(fixture.setState(QStringLiteral("failed")));
+    QVERIFY(writeFile(fixture.configPath(), "KWISPR_LANGUAGE=ru\nKWISPR_MEETING_MIC_SOURCE=unplugged-microphone\nKWISPR_MEETING_MIC_LANGUAGE=ru\nKWISPR_MEETING_REMOTE_LANGUAGE=en\n"));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    QTRY_VERIFY(control<QPushButton>(dialog, "meetingRetry")->isEnabled());
+    auto *micLanguage = control<QComboBox>(dialog, "meetingMicrophoneLanguage");
+    auto *remoteLanguage = control<QComboBox>(dialog, "meetingRemoteLanguage");
+    micLanguage->setEditText(QStringLiteral(" DE "));
+    remoteLanguage->setCurrentIndex(remoteLanguage->findData(QString()));
+    control<QPushButton>(dialog, "meetingRetry")->click();
+    QTRY_COMPARE(control<QLabel>(dialog, "meetingStatus")->text(), QStringLiteral("Transcript saved"));
+    EnvFile env;
+    QVERIFY(env.load(fixture.configPath()));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_MIC_LANGUAGE")), QStringLiteral("de"));
+    QVERIFY(env.contains(QStringLiteral("KWISPR_MEETING_REMOTE_LANGUAGE")));
+    QVERIFY(env.value(QStringLiteral("KWISPR_MEETING_REMOTE_LANGUAGE")).isEmpty());
+    QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_MIC_SOURCE")), QStringLiteral("unplugged-microphone"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("ru"));
+    MeetingDialog reopened(fixture.dir.path(), fixture.configPath());
+    QCOMPARE(control<QComboBox>(reopened, "meetingMicrophoneLanguage")->currentText(), QStringLiteral("de"));
+    QCOMPARE(control<QComboBox>(reopened, "meetingRemoteLanguage")->currentText(), QStringLiteral("Auto"));
+}
+
+void MeetingDialogTest::invalidLanguageDoesNotStartRecording()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    QTRY_VERIFY(control<QPushButton>(dialog, "meetingStart")->isEnabled());
+    control<QComboBox>(dialog, "meetingMicrophoneLanguage")->setEditText(QStringLiteral("not a language code"));
+    control<QPushButton>(dialog, "meetingStart")->click();
+    QVERIFY(control<QLabel>(dialog, "meetingError")->text().contains(QStringLiteral("enter a language code")));
+    QVERIFY(fixture.calls(QStringLiteral("start")).isEmpty());
+    QVERIFY(!dialog.recordingActive());
+}
+
+void MeetingDialogTest::openSavedFolderUsesInjectedFileManagerAndReportsErrors()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    const QString sessionDir = fixture.dir.filePath(QStringLiteral("saved meeting"));
+    QVERIFY(QDir().mkpath(sessionDir));
+    QVERIFY(fixture.setState(QStringLiteral("complete")));
+    QString requestedFolder;
+    MeetingDialog::FolderOpenCompletion pending;
+    int calls = 0;
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath(), nullptr,
+                         [&](const QString &folder, MeetingDialog::FolderOpenCompletion complete) {
+        ++calls;
+        requestedFolder = folder;
+        pending = std::move(complete);
+    });
+    dialog.show();
+    auto *open = control<QPushButton>(dialog, "meetingOpenFolder");
+    QTRY_VERIFY(open->isEnabled());
+    open->click();
+    QCOMPARE(calls, 1);
+    QCOMPARE(requestedFolder, sessionDir);
+    QVERIFY(!open->isEnabled());
+    QCOMPARE(open->text(), QStringLiteral("Opening folder…"));
+    open->click();
+    QCOMPARE(calls, 1);
+    QVERIFY(pending);
+    pending(false, QStringLiteral("Fixture file manager unavailable"));
+    QVERIFY(open->isEnabled());
+    QVERIFY(control<QLabel>(dialog, "meetingError")->text().contains(QStringLiteral("file manager unavailable")));
+    open->click();
+    QCOMPARE(calls, 2);
+    pending(true, QString());
+    QVERIFY(open->isEnabled());
+    QVERIFY(control<QLabel>(dialog, "meetingError")->text().isEmpty());
+}
+
 void MeetingDialogTest::modelSetupIsAsynchronousAndReportsFailure()
 {
     WorkerFixture fixture;
@@ -474,7 +599,7 @@ void MeetingDialogTest::narrowLayoutKeepsActionsReachable()
     QTest::keyClick(mic, Qt::Key_Down);
     QCOMPARE(mic->currentIndex(), 0);
     QTest::keyClick(mic, Qt::Key_Tab);
-    QCOMPARE(dialog.focusWidget(), control<QComboBox>(dialog, "meetingMonitor"));
+    QCOMPARE(dialog.focusWidget(), control<QComboBox>(dialog, "meetingMicrophoneLanguage"));
 }
 
 QTEST_MAIN(MeetingDialogTest)

@@ -6,7 +6,9 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QDesktopServices>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusPendingCallWatcher>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -18,8 +20,10 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QProcess>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QShowEvent>
 #include <QSpinBox>
@@ -72,12 +76,80 @@ void fillSources(QComboBox *combo, const QJsonArray &sources, const QString &sel
     // An unplugged preferred source must not silently select a different device.
     combo->setCurrentIndex(selected.isEmpty() ? (combo->count() ? 0 : -1) : selectedIndex);
 }
+
+QComboBox *languageCombo(QWidget *parent, const QString &objectName)
+{
+    auto *combo = new QComboBox(parent);
+    combo->setObjectName(objectName);
+    combo->setEditable(true);
+    combo->setInsertPolicy(QComboBox::NoInsert);
+    combo->addItem(QCoreApplication::translate("MeetingDialog", "Auto"), QString());
+    combo->addItem(QCoreApplication::translate("MeetingDialog", "Russian (ru)"), QStringLiteral("ru"));
+    combo->addItem(QCoreApplication::translate("MeetingDialog", "English (en)"), QStringLiteral("en"));
+    combo->lineEdit()->setMaxLength(32);
+    combo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    return combo;
 }
 
-MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *parent)
+QString languageCode(const QComboBox *combo)
+{
+    const int index = combo->currentIndex();
+    if (index >= 0 && combo->currentText() == combo->itemText(index)) {
+        return combo->itemData(index).toString();
+    }
+    const QString text = combo->currentText().trimmed().toLower();
+    return text == QStringLiteral("auto") ? QString() : text;
+}
+
+void selectLanguage(QComboBox *combo, const QString &code)
+{
+    const QString normalized = code.trimmed().toLower();
+    const int index = combo->findData(normalized == QStringLiteral("auto") ? QString() : normalized);
+    if (index >= 0) {
+        combo->setCurrentIndex(index);
+    } else {
+        combo->setEditText(normalized);
+    }
+}
+
+void showFolderInFileManager(QObject *owner, const QString &folder, MeetingDialog::FolderOpenCompletion complete)
+{
+    const QString path = QFileInfo(folder).absoluteFilePath();
+    auto message = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.FileManager1"),
+                                                 QStringLiteral("/org/freedesktop/FileManager1"),
+                                                 QStringLiteral("org.freedesktop.FileManager1"),
+                                                 QStringLiteral("ShowFolders"));
+    message.setArguments({QStringList{QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded)}, QString()});
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message, 5000), owner);
+    QObject::connect(watcher, &QDBusPendingCallWatcher::finished, owner,
+                     [path, complete = std::move(complete)](QDBusPendingCallWatcher *call) {
+        const QDBusMessage reply = call->reply();
+        call->deleteLater();
+        if (reply.type() != QDBusMessage::ErrorMessage) {
+            complete(true, QString());
+            return;
+        }
+        // A generic file URL launcher can select an editor registered for
+        // inode/directory. Fall back only to known file-manager executables.
+        for (const auto &name : {QStringLiteral("dolphin"), QStringLiteral("nautilus"), QStringLiteral("thunar"),
+                                 QStringLiteral("nemo"), QStringLiteral("pcmanfm-qt"), QStringLiteral("pcmanfm")}) {
+            const QString program = QStandardPaths::findExecutable(name);
+            if (!program.isEmpty() && QProcess::startDetached(program, {path})) {
+                complete(true, QString());
+                return;
+            }
+        }
+        complete(false, QCoreApplication::translate("MeetingDialog", "Could not open a file manager for %1: %2")
+                            .arg(path, reply.errorMessage()));
+    });
+}
+}
+
+MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *parent, FolderOpener folderOpener)
     : QDialog(parent)
     , m_runtimeRoot(std::move(runtimeRoot))
     , m_configPath(std::move(configPath))
+    , m_folderOpener(std::move(folderOpener))
     , m_command(new QProcess(this))
     , m_statusProcess(new QProcess(this))
     , m_sourcesProcess(new QProcess(this))
@@ -87,6 +159,11 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     , m_statusTimeout(new QTimer(this))
     , m_sourcesTimeout(new QTimer(this))
 {
+    if (!m_folderOpener) {
+        m_folderOpener = [this](const QString &folder, FolderOpenCompletion complete) {
+            showFolderInFileManager(this, folder, std::move(complete));
+        };
+    }
     setWindowTitle(tr("Meetings"));
     setWindowFlag(Qt::WindowMinimizeButtonHint);
     setModal(false);
@@ -142,6 +219,8 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     m_micDetailsLabel = wrapLabel(QString(), body);
     m_micDetailsLabel->setObjectName(QStringLiteral("meetingMicrophoneDetails"));
     form->addRow(m_micDetailsLabel);
+    m_micLanguageCombo = languageCombo(body, QStringLiteral("meetingMicrophoneLanguage"));
+    form->addRow(tr("Your speech &language"), m_micLanguageCombo);
     m_monitorCombo = new QComboBox(body);
     m_monitorCombo->setObjectName(QStringLiteral("meetingMonitor"));
     m_monitorCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -152,6 +231,9 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     m_monitorDetailsLabel = wrapLabel(QString(), body);
     m_monitorDetailsLabel->setObjectName(QStringLiteral("meetingMonitorDetails"));
     form->addRow(m_monitorDetailsLabel);
+    m_remoteLanguageCombo = languageCombo(body, QStringLiteral("meetingRemoteLanguage"));
+    form->addRow(tr("Other speakers' la&nguage"), m_remoteLanguageCombo);
+    form->addRow(wrapLabel(tr("Use Auto, or type a language code such as de. These choices do not change dictation."), body));
     for (auto *detail : {m_micDetailsLabel, m_monitorDetailsLabel}) {
         auto policy = detail->sizePolicy();
         policy.setHorizontalPolicy(QSizePolicy::Ignored);
@@ -219,10 +301,16 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     m_savedMic = env.value(QStringLiteral("KWISPR_MEETING_MIC_SOURCE"));
     m_savedMonitor = env.value(QStringLiteral("KWISPR_MEETING_MONITOR_SOURCE"));
     m_speakersSpin->setValue(env.value(QStringLiteral("KWISPR_MEETING_SPEAKERS"), QStringLiteral("0")).toInt());
+    selectLanguage(m_micLanguageCombo, env.value(QStringLiteral("KWISPR_MEETING_MIC_LANGUAGE")));
+    selectLanguage(m_remoteLanguageCombo, env.value(QStringLiteral("KWISPR_MEETING_REMOTE_LANGUAGE")));
 
     connect(m_startButton, &QPushButton::clicked, this, &MeetingDialog::startMeeting);
     connect(m_stopButton, &QPushButton::clicked, this, [this] { runCommand({QStringLiteral("stop")}, QStringLiteral("stopping")); });
-    connect(m_retryButton, &QPushButton::clicked, this, [this] { runCommand({QStringLiteral("process"), m_sessionDir}, QStringLiteral("processing")); });
+    connect(m_retryButton, &QPushButton::clicked, this, [this] {
+        if (saveChoices(true)) {
+            runCommand({QStringLiteral("process"), m_sessionDir}, QStringLiteral("processing"));
+        }
+    });
     connect(m_refreshButton, &QPushButton::clicked, this, &MeetingDialog::loadSources);
     connect(m_setupButton, &QPushButton::clicked, this, &MeetingDialog::setupModels);
     connect(m_micCombo, &QComboBox::currentIndexChanged, this, [this] { updateUi(); });
@@ -236,12 +324,7 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
             m_outputEdit->setText(path);
         }
     });
-    connect(m_openFolderButton, &QPushButton::clicked, this, [this] {
-        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(m_sessionDir))) {
-            m_error = tr("Could not open the saved folder: %1").arg(m_sessionDir);
-            updateUi();
-        }
-    });
+    connect(m_openFolderButton, &QPushButton::clicked, this, &MeetingDialog::openSavedFolder);
 
     m_pollTimer->setInterval(1000);
     connect(m_pollTimer, &QTimer::timeout, this, &MeetingDialog::refreshStatus);
@@ -506,18 +589,55 @@ void MeetingDialog::setupModels()
     updateUi();
 }
 
-bool MeetingDialog::saveChoices()
+void MeetingDialog::openSavedFolder()
 {
+    if (m_folderOpenBusy || m_sessionDir.isEmpty() || !QFileInfo(m_sessionDir).isDir()) {
+        return;
+    }
+    m_folderOpenBusy = true;
+    m_error.clear();
+    updateUi();
+    QPointer<MeetingDialog> dialog(this);
+    m_folderOpener(m_sessionDir, [dialog](bool success, const QString &error) {
+        if (!dialog) {
+            return;
+        }
+        dialog->m_folderOpenBusy = false;
+        if (!success) {
+            dialog->m_error = error;
+        }
+        dialog->updateUi();
+    });
+}
+
+bool MeetingDialog::saveChoices(bool languagesOnly)
+{
+    const QString micLanguage = languageCode(m_micLanguageCombo);
+    const QString remoteLanguage = languageCode(m_remoteLanguageCombo);
+    static const QRegularExpression languagePattern(QStringLiteral("^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$"));
+    for (auto *combo : {m_micLanguageCombo, m_remoteLanguageCombo}) {
+        const QString code = languageCode(combo);
+        if (!code.isEmpty() && !languagePattern.match(code).hasMatch()) {
+            m_error = tr("Choose Auto or enter a language code, such as ru, en, or de.");
+            combo->setFocus();
+            updateUi();
+            return false;
+        }
+    }
     EnvFile env;
     if (QFileInfo::exists(m_configPath) && !env.load(m_configPath)) {
         m_error = tr("Could not read settings: %1").arg(env.errorString());
         updateUi();
         return false;
     }
-    env.setValue(QStringLiteral("KWISPR_MEETING_OUTPUT_DIR"), m_outputEdit->text().trimmed());
-    env.setValue(QStringLiteral("KWISPR_MEETING_MIC_SOURCE"), m_micCombo->currentData().toString());
-    env.setValue(QStringLiteral("KWISPR_MEETING_MONITOR_SOURCE"), m_monitorCombo->currentData().toString());
-    env.setValue(QStringLiteral("KWISPR_MEETING_SPEAKERS"), QString::number(m_speakersSpin->value()));
+    if (!languagesOnly) {
+        env.setValue(QStringLiteral("KWISPR_MEETING_OUTPUT_DIR"), m_outputEdit->text().trimmed());
+        env.setValue(QStringLiteral("KWISPR_MEETING_MIC_SOURCE"), m_micCombo->currentData().toString());
+        env.setValue(QStringLiteral("KWISPR_MEETING_MONITOR_SOURCE"), m_monitorCombo->currentData().toString());
+        env.setValue(QStringLiteral("KWISPR_MEETING_SPEAKERS"), QString::number(m_speakersSpin->value()));
+    }
+    env.setValue(QStringLiteral("KWISPR_MEETING_MIC_LANGUAGE"), micLanguage);
+    env.setValue(QStringLiteral("KWISPR_MEETING_REMOTE_LANGUAGE"), remoteLanguage);
     if (!QDir().mkpath(QFileInfo(m_configPath).absolutePath()) || !env.save(m_configPath)) {
         m_error = tr("Could not save meeting settings: %1").arg(env.errorString());
         updateUi();
@@ -555,7 +675,7 @@ void MeetingDialog::updateUi()
     const bool capturing = captureActive();
     const bool processing = m_state == QStringLiteral("processing");
     const bool editable = !capturing && !processing && !m_commandBusy && !m_setupBusy;
-    for (QWidget *field : QList<QWidget *>{m_titleEdit, m_micCombo, m_monitorCombo, m_outputEdit, m_speakersSpin, m_browseButton}) {
+    for (QWidget *field : QList<QWidget *>{m_titleEdit, m_micCombo, m_monitorCombo, m_micLanguageCombo, m_remoteLanguageCombo, m_outputEdit, m_speakersSpin, m_browseButton}) {
         field->setEnabled(editable);
     }
     m_refreshButton->setEnabled(editable && m_sourcesProcess->state() == QProcess::NotRunning);
@@ -563,7 +683,8 @@ void MeetingDialog::updateUi()
     m_startButton->setEnabled(editable && m_statusKnown && m_sourcesLoaded && m_micCombo->currentIndex() >= 0 && m_monitorCombo->currentIndex() >= 0 && !m_outputEdit->text().trimmed().isEmpty());
     m_stopButton->setEnabled(m_state == QStringLiteral("recording") && !m_commandBusy);
     m_retryButton->setEnabled(m_state == QStringLiteral("failed") && !m_sessionDir.isEmpty() && !m_commandBusy && !m_setupBusy);
-    m_openFolderButton->setEnabled(!m_sessionDir.isEmpty() && QFileInfo(m_sessionDir).isDir());
+    m_openFolderButton->setEnabled(!m_folderOpenBusy && !m_sessionDir.isEmpty() && QFileInfo(m_sessionDir).isDir());
+    m_openFolderButton->setText(m_folderOpenBusy ? tr("Opening folder…") : tr("Open saved folder"));
     m_progress->setVisible(m_commandBusy || m_setupBusy || processing || (m_state == QStringLiteral("loading") && m_statusError.isEmpty()) || m_state == QStringLiteral("starting") || m_state == QStringLiteral("stopping"));
 
     QString status = tr("Ready to record");
@@ -614,6 +735,9 @@ void MeetingDialog::updateDeviceDetails()
             lines.append(tr("System default: %1").arg(defaultDescription));
         }
         details->setText(lines.join(QLatin1Char('\n')));
+        // QFormLayout can otherwise compress wrapped device names when the
+        // form grows taller than its scroll viewport.
+        details->setMinimumHeight(lines.isEmpty() ? 0 : details->heightForWidth(combo->width()));
         details->setVisible(!lines.isEmpty());
         combo->setToolTip(selected.isEmpty() ? QString() : selected + QLatin1Char('\n') + source);
         combo->setAccessibleDescription(systemDefault.isEmpty() ? selected : tr("Selected: %1. System default: %2").arg(selected, defaultDescription));
