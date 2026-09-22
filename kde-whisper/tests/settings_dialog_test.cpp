@@ -6,6 +6,7 @@
 
 #include <QtTest/QtTest>
 #include <QAbstractButton>
+#include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -100,6 +101,11 @@ private slots:
     void dictationHintsFollowModelCapabilitiesAndPreserveDrafts();
     void invalidDictationSettingsKeepDraftAndEnv();
     void dictationSettingsFitScrollableWindows();
+    void autoDetectionCandidatesSaveReloadAndPreserveOverrides();
+    void invalidAutoDetectionCandidatesKeepDraftAndEnv();
+    void oversizedLoadedCandidatesRequireCorrection();
+    void punctuationExamplesFollowLanguageOnlyOnClick();
+    void autoDetectionCandidatesFitScrollableWindows();
     void backendRowsAreContextSensitiveAndPreserveDrafts();
     void lanOptInUpdatesListenAddress();
     void invalidLoadedPortRequiresExplicitCorrection();
@@ -146,6 +152,148 @@ static KwisprSettings localSettings()
     return settings;
 }
 
+void SettingsDialogTest::autoDetectionCandidatesSaveReloadAndPreserveOverrides()
+{
+    EnvFile env;
+    env.setValue(QStringLiteral("KWISPR_MEETING_MIC_LANGUAGE"), QStringLiteral("ru"));
+    env.setValue(QStringLiteral("KWISPR_MEETING_REMOTE_LANGUAGE"), QStringLiteral("en"));
+    SettingsDialog dialog(localSettings(), sampleCatalog(), {}, &env);
+    auto *candidates = dialog.findChild<QComboBox *>("allowedLanguagesEdit");
+    QVERIFY(candidates);
+    QVERIFY(candidates->isEditable());
+    QCOMPARE(candidates->lineEdit()->maxLength(), 1024);
+    QCOMPARE(candidates->currentData().toString(), QString());
+    candidates->setCurrentIndex(candidates->findData(QStringLiteral("ru,en")));
+    QCOMPARE(dialog.currentSettings().language, QStringLiteral("en"));
+    auto *backend = dialog.findChild<QComboBox *>("backendCombo");
+    backend->setCurrentText(QStringLiteral("OpenAI"));
+    QVERIFY(candidates->isHidden() || !candidates->isVisibleTo(&dialog));
+    backend->setCurrentText(QStringLiteral("Local STT"));
+    QCOMPARE(dialog.currentSettings().whisperAllowedLanguages, QStringLiteral("ru,en"));
+    QVERIFY2(dialog.save(), qPrintable(dialog.lastError()));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES")), QStringLiteral("ru,en"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("en"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_MIC_LANGUAGE")), QStringLiteral("ru"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_REMOTE_LANGUAGE")), QStringLiteral("en"));
+    SettingsDialog restored(KwisprSettings::fromEnv(env), sampleCatalog(), {}, &env);
+    auto *restoredCandidates = restored.findChild<QComboBox *>("allowedLanguagesEdit");
+    QCOMPARE(restoredCandidates->currentData().toString(), QStringLiteral("ru,en"));
+    restoredCandidates->setEditText(QStringLiteral(" RU, en-US, ru "));
+    QVERIFY(restored.save());
+    QCOMPARE(env.value(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES")), QStringLiteral("ru,en-us"));
+    restoredCandidates->setCurrentIndex(restoredCandidates->findData(QString()));
+    // Editing a preset leaves its index unchanged, so reselect it explicitly.
+    restoredCandidates->setEditText(restoredCandidates->itemText(0));
+    QVERIFY(restored.save());
+    QVERIFY(env.value(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES")).isEmpty());
+}
+
+void SettingsDialogTest::invalidAutoDetectionCandidatesKeepDraftAndEnv()
+{
+    EnvFile env;
+    env.setValue(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES"), QStringLiteral("ru,en"));
+    KwisprSettings settings = localSettings();
+    settings.whisperAllowedLanguages = QStringLiteral("ru,en");
+    SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    auto *candidates = dialog.findChild<QComboBox *>("allowedLanguagesEdit");
+    auto *error = dialog.findChild<QLabel *>("allowedLanguagesError");
+    QSignalSpy saved(&dialog, &SettingsDialog::settingsSaved);
+    for (const QString &invalid : {QStringLiteral("ru,,en"), QStringLiteral("English"), QStringLiteral("ru;en")}) {
+        candidates->setEditText(invalid);
+        QVERIFY(!dialog.save());
+        QCOMPARE(saved.count(), 0);
+        QCOMPARE(candidates->currentText(), invalid);
+        QCOMPARE(env.value(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES")), QStringLiteral("ru,en"));
+        QVERIFY(error->isVisible());
+        QVERIFY(error->text().contains(QStringLiteral("comma-separated")));
+        QVERIFY(candidates->hasFocus() || candidates->lineEdit()->hasFocus());
+    }
+    candidates->setEditText(QStringLiteral("ru,en"));
+    QVERIFY(!error->isVisible());
+    QVERIFY(dialog.save());
+    QCOMPARE(saved.count(), 1);
+}
+
+void SettingsDialogTest::oversizedLoadedCandidatesRequireCorrection()
+{
+    KwisprSettings settings = localSettings();
+    settings.whisperAllowedLanguages = QStringLiteral("ru,").repeated(340) + QStringLiteral("en-US");
+    EnvFile env;
+    settings.writeTo(env);
+    SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+    auto *candidates = dialog.findChild<QComboBox *>("allowedLanguagesEdit");
+    QCOMPARE(candidates->currentText().size(), 1024);
+    QVERIFY(!dialog.save());
+    QCOMPARE(env.value(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES")), settings.whisperAllowedLanguages);
+    candidates->setCurrentIndex(candidates->findData(QStringLiteral("ru,en")));
+    QVERIFY(dialog.save());
+    QCOMPARE(env.value(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES")), QStringLiteral("ru,en"));
+}
+
+void SettingsDialogTest::punctuationExamplesFollowLanguageOnlyOnClick()
+{
+    KwisprSettings settings = localSettings();
+    settings.language.clear();
+    settings.whisperPrompt = QStringLiteral("My custom style.");
+    SettingsDialog dialog(settings, sampleCatalog(), {});
+    auto *candidates = dialog.findChild<QComboBox *>("allowedLanguagesEdit");
+    auto *language = dialog.findChild<QComboBox *>("languageEdit");
+    auto *context = dialog.findChild<QPlainTextEdit *>("whisperPromptEdit");
+    auto *preset = dialog.findChild<QPushButton *>("punctuationPresetButton");
+    candidates->setCurrentIndex(candidates->findData(QStringLiteral("ru,en")));
+    QCOMPARE(context->toPlainText(), settings.whisperPrompt);
+    QVERIFY(preset->text().contains(QStringLiteral("RU + EN")));
+    preset->click();
+    QCOMPARE(context->toPlainText(), QStringLiteral("Привет! Давай проверим pull request: сначала code review, потом тесты. Looks good! What should we fix?"));
+    language->setCurrentIndex(language->findData(QStringLiteral("en")));
+    QVERIFY(context->toPlainText().contains(QStringLiteral("Привет!")));
+    preset->click();
+    QVERIFY(context->toPlainText().startsWith(QStringLiteral("Hello!")));
+    language->setCurrentIndex(language->findData(QStringLiteral("ru")));
+    QVERIFY(context->toPlainText().startsWith(QStringLiteral("Hello!")));
+    preset->click();
+    QVERIFY(context->toPlainText().startsWith(QStringLiteral("Привет! Да,")));
+    language->setCurrentIndex(language->findData(QString()));
+    candidates->setEditText(QStringLiteral("EN-us, RU"));
+    QVERIFY(preset->text().contains(QStringLiteral("RU + EN")));
+    candidates->setEditText(QStringLiteral("ru"));
+    QVERIFY(!preset->text().contains(QStringLiteral("RU + EN")));
+}
+
+void SettingsDialogTest::autoDetectionCandidatesFitScrollableWindows()
+{
+    KwisprSettings settings = localSettings();
+    settings.language.clear();
+    settings.whisperAllowedLanguages = QStringLiteral("ru,en");
+    SettingsDialog dialog(settings, sampleCatalog(), {});
+    dialog.show();
+    auto *scroll = dialog.findChild<QScrollArea *>("settingsScrollArea");
+    auto *candidates = dialog.findChild<QComboBox *>("allowedLanguagesEdit");
+    auto *buttons = dialog.findChild<QDialogButtonBox *>("buttonBox");
+    const QString snapshots = qEnvironmentVariable("KWISPR_TEST_SNAPSHOT_DIR");
+    for (const QSize &size : {QSize(520, 560), QSize(760, 720)}) {
+        dialog.resize(size);
+        QTest::qWait(10);
+        QCOMPARE(dialog.size(), size);
+        QCOMPARE(scroll->horizontalScrollBar()->maximum(), 0);
+        QVERIFY(dialog.rect().contains(QRect(buttons->mapTo(&dialog, QPoint()), buttons->size())));
+        scroll->ensureWidgetVisible(candidates);
+        candidates->setFocus();
+        QTest::keyClick(candidates, Qt::Key_Down, Qt::AltModifier);
+        QTRY_VERIFY(candidates->view()->isVisible());
+        QTest::keyClick(candidates->view(), Qt::Key_Up);
+        QTest::keyClick(candidates->view(), Qt::Key_Return);
+        QCOMPARE(dialog.currentSettings().whisperAllowedLanguages, QString());
+        candidates->setCurrentIndex(candidates->findData(QStringLiteral("ru,en")));
+        if (!snapshots.isEmpty()) {
+            QVERIFY(QDir().mkpath(snapshots));
+            QVERIFY(dialog.grab().save(QDir(snapshots).filePath(QStringLiteral("language-candidates-%1x%2.png").arg(size.width()).arg(size.height()))));
+        }
+    }
+}
+
 void SettingsDialogTest::dictationSettingsSaveReloadAndClear()
 {
     EnvFile env;
@@ -154,7 +302,7 @@ void SettingsDialogTest::dictationSettingsSaveReloadAndClear()
     auto *context = dialog.findChild<QPlainTextEdit *>("whisperPromptEdit");
     vocabulary->setPlainText(QStringLiteral("Kwispr\nOpenRouter\nИмя проекта"));
     dialog.findChild<QPushButton *>("punctuationPresetButton")->click();
-    QVERIFY(context->toPlainText().contains(QStringLiteral("Привет!")));
+    QVERIFY(context->toPlainText().contains(QStringLiteral("Hello!")));
     dialog.findChild<QSpinBox *>("stopDelaySpin")->setValue(400);
     dialog.findChild<QCheckBox *>("vadEnabledCheck")->setChecked(true);
     dialog.findChild<QCheckBox *>("preserveAudioTailCheck")->setChecked(true);

@@ -146,6 +146,8 @@ bool SettingsDialog::save()
     m_lastError.clear();
     m_dictationErrorLabel->clear();
     m_dictationErrorLabel->hide();
+    m_allowedLanguagesError->clear();
+    m_allowedLanguagesError->hide();
     if (m_modelOperationBusy) {
         m_lastError = QStringLiteral("Wait for the current model operation to finish before saving settings.");
         m_modelStatusLabel->setText(m_lastError);
@@ -187,7 +189,12 @@ bool SettingsDialog::save()
         m_modelStatusLabel->setText(m_lastError);
         m_dictationErrorLabel->setText(m_lastError);
         m_dictationErrorLabel->show();
-        if (settings.combinedWhisperPrompt().toUcs4().size() > 4096) {
+        if (!KwisprSettings::validWhisperAllowedLanguages(settings.whisperAllowedLanguages)) {
+            m_allowedLanguagesError->setText(errors.first());
+            m_allowedLanguagesError->show();
+            setBackendRowVisible(m_allowedLanguagesRow, m_allowedLanguagesLabel, true);
+            m_allowedLanguagesCombo->setFocus(Qt::OtherFocusReason);
+        } else if (settings.combinedWhisperPrompt().toUcs4().size() > 4096) {
             m_vocabularyEdit->setFocus(Qt::OtherFocusReason);
         } else if (settings.stopDelayMs < 0 || settings.stopDelayMs > 2000) {
             m_stopDelaySpin->setFocus(Qt::OtherFocusReason);
@@ -375,6 +382,34 @@ void SettingsDialog::buildUi()
     m_languageLabel = formLabel(QStringLiteral("Language"), QStringLiteral("languageLabel"), backendGroup);
     m_backendForm->addRow(m_languageLabel, m_languageCombo);
 
+    m_allowedLanguagesRow = new QWidget(backendGroup);
+    auto *allowedLanguagesLayout = new QVBoxLayout(m_allowedLanguagesRow);
+    allowedLanguagesLayout->setContentsMargins(0, 0, 0, 0);
+    m_allowedLanguagesCombo = new QComboBox(m_allowedLanguagesRow);
+    m_allowedLanguagesCombo->setObjectName(QStringLiteral("allowedLanguagesEdit"));
+    m_allowedLanguagesCombo->setEditable(true);
+    m_allowedLanguagesCombo->setInsertPolicy(QComboBox::NoInsert);
+    m_allowedLanguagesCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_allowedLanguagesCombo->setMinimumContentsLength(14);
+    m_allowedLanguagesCombo->lineEdit()->setMaxLength(1024);
+    m_allowedLanguagesCombo->lineEdit()->setPlaceholderText(QStringLiteral("Comma-separated codes, e.g. ru,en"));
+    m_allowedLanguagesCombo->addItem(QStringLiteral("All languages"), QString());
+    m_allowedLanguagesCombo->addItem(QStringLiteral("Russian + English (ru,en)"), QStringLiteral("ru,en"));
+    m_allowedLanguagesCombo->setAccessibleName(QStringLiteral("Auto-detection candidates"));
+    allowedLanguagesLayout->addWidget(m_allowedLanguagesCombo);
+    auto *allowedLanguagesHint = new QLabel(QStringLiteral("Limits local Whisper Auto detection in dictation and meetings. An explicit language overrides it; mixed-language words are kept. Requires an updated local runtime."), m_allowedLanguagesRow);
+    allowedLanguagesHint->setWordWrap(true);
+    m_allowedLanguagesCombo->setAccessibleDescription(allowedLanguagesHint->text());
+    allowedLanguagesLayout->addWidget(allowedLanguagesHint);
+    m_allowedLanguagesError = new QLabel(m_allowedLanguagesRow);
+    m_allowedLanguagesError->setObjectName(QStringLiteral("allowedLanguagesError"));
+    m_allowedLanguagesError->setWordWrap(true);
+    m_allowedLanguagesError->hide();
+    allowedLanguagesLayout->addWidget(m_allowedLanguagesError);
+    m_allowedLanguagesLabel = formLabel(QStringLiteral("Auto-detection candidates"), QStringLiteral("allowedLanguagesLabel"), backendGroup);
+    m_allowedLanguagesLabel->setBuddy(m_allowedLanguagesCombo);
+    m_backendForm->addRow(m_allowedLanguagesLabel, m_allowedLanguagesRow);
+
     m_promptEdit = new QPlainTextEdit(backendGroup);
     m_promptEdit->setObjectName(QStringLiteral("promptEdit"));
     m_promptEdit->setMinimumHeight(80);
@@ -533,7 +568,17 @@ void SettingsDialog::buildUi()
         updateDictationControls();
     });
     connect(m_punctuationPresetButton, &QPushButton::clicked, this, [this]() {
-        m_whisperPromptEdit->setPlainText(QStringLiteral("Привет! Да, всё хорошо. Давай обсудим эту задачу: сначала проверим код, потом запустим тесты. Что нужно исправить?"));
+        m_whisperPromptEdit->setPlainText(usesBilingualPunctuationExample()
+            ? QStringLiteral("Привет! Давай проверим pull request: сначала code review, потом тесты. Looks good! What should we fix?")
+            : baseLanguage(selectedLanguageCode()) == QLatin1String("en")
+                ? QStringLiteral("Hello! Yes, all is well. Let's discuss this task: first review the code, then run the tests. What should we fix?")
+                : QStringLiteral("Привет! Да, всё хорошо. Давай обсудим эту задачу: сначала проверим код, потом запустим тесты. Что нужно исправить?"));
+    });
+    connect(m_languageCombo, &QComboBox::currentTextChanged, this, &SettingsDialog::updateDictationControls);
+    connect(m_allowedLanguagesCombo, &QComboBox::currentTextChanged, this, [this]() {
+        m_allowedLanguagesNeedsCorrection = false;
+        m_allowedLanguagesError->hide();
+        updateDictationControls();
     });
     connect(m_stopDelaySpin, qOverload<int>(&QSpinBox::valueChanged), this, [this]() {
         m_stopDelayNeedsCorrection = false;
@@ -608,6 +653,15 @@ void SettingsDialog::loadFromSettings(const KwisprSettings &settings)
         populateModels(settings.model);
     }
     populateLanguageChoices(settings.language);
+    const QString candidates = KwisprSettings::normalizedWhisperAllowedLanguages(settings.whisperAllowedLanguages);
+    const int candidateIndex = m_allowedLanguagesCombo->findData(candidates);
+    if (candidateIndex >= 0) {
+        m_allowedLanguagesCombo->setCurrentIndex(candidateIndex);
+    } else {
+        m_allowedLanguagesCombo->setEditText(candidates);
+    }
+    // QLineEdit limits new input; keep an oversized saved value invalid until edited.
+    m_allowedLanguagesNeedsCorrection = settings.whisperAllowedLanguages.size() > 1024;
     m_promptEdit->setPlainText(settings.transcriptionPrompt);
     m_whisperPromptEdit->setPlainText(settings.whisperPrompt);
     m_vocabularyEdit->setPlainText(KwisprSettings::normalizedVocabulary(settings.vocabulary).split(QStringLiteral(", ")).join(QLatin1Char('\n')));
@@ -767,6 +821,30 @@ QString SettingsDialog::formatEta(qint64 seconds)
                         : QStringLiteral("%1h %2m").arg(hours).arg(minutes);
 }
 
+QString SettingsDialog::selectedAllowedLanguages() const
+{
+    if (m_allowedLanguagesNeedsCorrection) {
+        return m_settings.whisperAllowedLanguages;
+    }
+    const int index = m_allowedLanguagesCombo->currentIndex();
+    const QString value = index >= 0 && m_allowedLanguagesCombo->currentText() == m_allowedLanguagesCombo->itemText(index)
+        ? m_allowedLanguagesCombo->itemData(index).toString()
+        : m_allowedLanguagesCombo->currentText();
+    return KwisprSettings::normalizedWhisperAllowedLanguages(value);
+}
+
+bool SettingsDialog::usesBilingualPunctuationExample() const
+{
+    if (!selectedLanguageCode().isEmpty() || !KwisprSettings::validWhisperAllowedLanguages(selectedAllowedLanguages())) {
+        return false;
+    }
+    QStringList languages;
+    for (const QString &code : selectedAllowedLanguages().split(QLatin1Char(','))) {
+        languages.append(baseLanguage(code));
+    }
+    return languages.contains(QStringLiteral("ru")) && languages.contains(QStringLiteral("en"));
+}
+
 void SettingsDialog::applyBackendPreset(const QString &backendLabel)
 {
     if (backendLabel == m_activeBackend) {
@@ -809,6 +887,10 @@ void SettingsDialog::updateBackendVisibility()
     setBackendRowVisible(m_modelEdit, m_modelLabel, !local);
     setBackendRowVisible(m_localModelRow, m_localModelLabel, local);
     setBackendRowVisible(m_languageCombo, m_languageLabel, openAi || (local && localLanguageVisible));
+    const bool localWhisper = local && (localModel ? localModel->engineType == QLatin1String("whisper.cpp")
+                                                  : selectedModelId().startsWith(QStringLiteral("whisper"), Qt::CaseInsensitive));
+    setBackendRowVisible(m_allowedLanguagesRow, m_allowedLanguagesLabel,
+                         localWhisper || !KwisprSettings::validWhisperAllowedLanguages(selectedAllowedLanguages()));
     setBackendRowVisible(m_promptEdit, m_promptLabel, openRouter);
     m_vadGroup->setVisible(local && m_localRuntimeInstalled);
     updateVadControls();
@@ -826,6 +908,11 @@ void SettingsDialog::updateDictationControls()
     m_vocabularyEdit->setEnabled(hintsSupported);
     m_whisperPromptEdit->setEnabled(hintsSupported && !openRouter);
     m_punctuationPresetButton->setEnabled(hintsSupported && !openRouter);
+    m_punctuationPresetButton->setText(usesBilingualPunctuationExample()
+        ? QStringLiteral("Use RU + EN punctuation example")
+        : baseLanguage(selectedLanguageCode()) == QLatin1String("en")
+            ? QStringLiteral("Use English punctuation example")
+            : QStringLiteral("Use Russian punctuation example"));
     m_dictationHintsLabel->setText(!hintsSupported
         ? QStringLiteral("This local model does not support vocabulary or style hints. Your entries are kept for Whisper models.")
         : openRouter
@@ -1130,6 +1217,7 @@ KwisprSettings SettingsDialog::settingsFromWidgets() const
     settings.apiKey = m_apiKeyEdit->text();
     settings.model = local ? selectedModelId() : m_modelEdit->text().trimmed();
     settings.language = selectedLanguageCode();
+    settings.whisperAllowedLanguages = selectedAllowedLanguages();
     settings.transcriptionPrompt = m_promptEdit->toPlainText();
     settings.whisperPrompt = m_whisperPromptEdit->toPlainText().simplified();
     settings.vocabulary = KwisprSettings::normalizedVocabulary(m_vocabularyEdit->toPlainText());

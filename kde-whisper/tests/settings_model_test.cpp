@@ -26,7 +26,74 @@ private slots:
     void vadValidationMatchesRuntimeRequirements();
     void dictationHintsRoundTripAndClearWithoutMultilineAssignments();
     void dictationValidationMatchesRuntimeLimits();
+    void autoDetectionCandidatesRoundTripNormalizeAndClear();
+    void autoDetectionCandidatesValidation_data();
+    void autoDetectionCandidatesValidation();
 };
+
+void SettingsModelTest::autoDetectionCandidatesRoundTripNormalizeAndClear()
+{
+    KwisprSettings settings;
+    settings.applyLocalPreset(QStringLiteral("whisper-large-v3-turbo"), QString(), QStringLiteral("en"));
+    QVERIFY(settings.whisperAllowedLanguages.isEmpty());
+    settings.whisperAllowedLanguages = QStringLiteral(" RU, en, ru, EN-us ");
+    EnvFile env;
+    env.setValue(QStringLiteral("KWISPR_MEETING_MIC_LANGUAGE"), QStringLiteral("ru"));
+    settings.writeTo(env);
+    QCOMPARE(env.value(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES")), QStringLiteral("ru,en,en-us"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("en"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_MIC_LANGUAGE")), QStringLiteral("ru"));
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("settings.env"));
+    QVERIFY(env.save(path));
+    EnvFile restored;
+    QVERIFY(restored.load(path));
+    settings = KwisprSettings::fromEnv(restored);
+    QCOMPARE(settings.whisperAllowedLanguages, QStringLiteral("ru,en,en-us"));
+    settings.whisperAllowedLanguages.clear();
+    settings.writeTo(restored);
+    QVERIFY(KwisprSettings::fromEnv(restored).whisperAllowedLanguages.isEmpty());
+}
+
+void SettingsModelTest::autoDetectionCandidatesValidation_data()
+{
+    QTest::addColumn<QString>("value");
+    QTest::addColumn<bool>("valid");
+    QTest::newRow("unrestricted") << QString() << true;
+    QTest::newRow("whitespace") << QStringLiteral("  ") << true;
+    QTest::newRow("mixed") << QStringLiteral(" RU , en , ru ") << true;
+    QTest::newRow("subtags") << QStringLiteral("en-US,eng,zh-Hant-12345678") << true;
+    QTest::newRow("empty-parts") << QStringLiteral("ru,,en") << false;
+    QTest::newRow("trailing-comma") << QStringLiteral("ru,en,") << false;
+    QTest::newRow("missing-comma") << QStringLiteral("ru en") << false;
+    QTest::newRow("non-ascii") << QStringLiteral("рус,en") << false;
+    QTest::newRow("short-code") << QStringLiteral("r,en") << false;
+    QTest::newRow("long-code") << QStringLiteral("russ,en") << false;
+    QTest::newRow("empty-subtag") << QStringLiteral("en-") << false;
+    QTest::newRow("long-subtag") << QStringLiteral("en-123456789") << false;
+    QTest::newRow("at-limit") << (QStringLiteral("ru,").repeated(339) + QStringLiteral("en-US-x")) << true;
+    QTest::newRow("over-limit") << (QStringLiteral("ru,").repeated(340) + QStringLiteral("en-US")) << false;
+}
+
+void SettingsModelTest::autoDetectionCandidatesValidation()
+{
+    QFETCH(QString, value);
+    QFETCH(bool, valid);
+    KwisprSettings settings;
+    settings.applyLocalPreset(QStringLiteral("whisper-large-v3-turbo"), QString(), QString());
+    EnvFile env;
+    settings.writeTo(env);
+    env.setValue(QStringLiteral("KWISPR_WHISPER_ALLOWED_LANGUAGES"), value);
+    settings = KwisprSettings::fromEnv(env);
+    QCOMPARE(settings.whisperAllowedLanguages, value);
+    QStringList errors;
+    QCOMPARE(settings.validate(&errors), valid);
+    if (!valid) {
+        QVERIFY(errors.join('\n').contains(QStringLiteral("Auto-detection candidates")));
+        QCOMPARE(KwisprSettings::normalizedWhisperAllowedLanguages(value), value);
+    }
+}
 
 void SettingsModelTest::dictationHintsRoundTripAndClearWithoutMultilineAssignments()
 {

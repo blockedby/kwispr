@@ -87,6 +87,8 @@ private:
     void populateModels(const QString &selectedModelId);
     void populateLanguageChoices(const QString &languageCode);
     QString selectedLanguageCode() const;
+    QString selectedAllowedLanguages() const;
+    bool usesBilingualPunctuationExample() const;
     static QString formatEta(qint64 seconds);
     void updateBackendVisibility();
     void updateModelControls();
@@ -148,6 +150,11 @@ private:
     QLabel *m_modelDownloadEtaLabel = nullptr;
     QComboBox *m_languageCombo = nullptr;
     QLabel *m_languageLabel = nullptr;
+    QWidget *m_allowedLanguagesRow = nullptr;
+    QComboBox *m_allowedLanguagesCombo = nullptr;
+    QLabel *m_allowedLanguagesLabel = nullptr;
+    QLabel *m_allowedLanguagesError = nullptr;
+    bool m_allowedLanguagesNeedsCorrection = false;
     QPlainTextEdit *m_promptEdit = nullptr;
     QLabel *m_promptLabel = nullptr;
     QPlainTextEdit *m_whisperPromptEdit = nullptr;
