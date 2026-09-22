@@ -10,6 +10,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf.h"
+#include "language-selection.h"
 #include "transcribe-arch.h"
 #include "transcribe-batch-util.h"
 #include "transcribe-debug.h"
@@ -1189,6 +1190,37 @@ WhisperSegmentResult whisper_retrieve_segment(const std::vector<int32_t> &  gene
 
 }  // namespace
 
+static transcribe_status resolve_whisper_run_ext(const transcribe_ext * ext,
+                                                 const transcribe_whisper_run_ext & defaults,
+                                                 const transcribe_whisper_run_ext *& options,
+                                                 const char *& allowed_languages) {
+    options = &defaults;
+    allowed_languages = nullptr;
+    if (ext == nullptr) {
+        return TRANSCRIBE_OK;
+    }
+    if (ext->size < sizeof(transcribe_ext)) {
+        return TRANSCRIBE_ERR_BAD_STRUCT_SIZE;
+    }
+    if (ext->kind == TRANSCRIBE_EXT_KIND_WHISPER_RUN_V2) {
+        const auto status = transcribe_ext_check(ext, TRANSCRIBE_EXT_KIND_WHISPER_RUN_V2,
+                                                sizeof(transcribe_whisper_run_ext_v2));
+        if (status != TRANSCRIBE_OK) {
+            return status;
+        }
+        const auto * extended = reinterpret_cast<const transcribe_whisper_run_ext_v2 *>(ext);
+        options = &extended->base;
+        allowed_languages = extended->allowed_languages;
+        return TRANSCRIBE_OK;
+    }
+    const auto status = transcribe_ext_check(ext, TRANSCRIBE_EXT_KIND_WHISPER_RUN,
+                                            sizeof(transcribe_whisper_run_ext));
+    if (status == TRANSCRIBE_OK) {
+        options = reinterpret_cast<const transcribe_whisper_run_ext *>(ext);
+    }
+    return status;
+}
+
 transcribe_status whisper_run(transcribe_session *          session,
                               const float *                 pcm,
                               int                           n_samples,
@@ -1446,17 +1478,19 @@ transcribe_status whisper_run(transcribe_session *          session,
     // through the whole seek loop, so reseeding per chunk would replay the
     // same prefix each window and destroy long-form determinism. seed == 0
     // draws OS entropy once, then the rng advances across chunks and tiers.
-    if (const transcribe_status st =
-            transcribe_ext_check(params != nullptr ? params->family : nullptr, TRANSCRIBE_EXT_KIND_WHISPER_RUN,
-                                 sizeof(struct transcribe_whisper_run_ext));
+    transcribe_whisper_run_ext default_wp;
+    transcribe_whisper_run_ext_init(&default_wp);
+    const transcribe_whisper_run_ext * wp;
+    const char * allowed_languages;
+    if (const auto st = resolve_whisper_run_ext(params != nullptr ? params->family : nullptr,
+                                              default_wp, wp, allowed_languages); st != TRANSCRIBE_OK) {
+        return st;
+    }
+    std::vector<size_t> language_candidates;
+    if (const auto st = resolve_language_candidates(allowed_languages, cm->lang_codes, language_candidates);
         st != TRANSCRIBE_OK) {
         return st;
     }
-    transcribe_whisper_run_ext default_wp;
-    transcribe_whisper_run_ext_init(&default_wp);
-    const transcribe_whisper_run_ext * wp = (params != nullptr && params->family != nullptr) ?
-                                                reinterpret_cast<const transcribe_whisper_run_ext *>(params->family) :
-                                                &default_wp;
     std::mt19937                       rng(wp->seed != 0 ? wp->seed : std::random_device{}());
 
     // Kwispr: ALL_SEGMENTS may carry only the caller's static prompt, without
@@ -1651,18 +1685,9 @@ transcribe_status whisper_run(transcribe_session *          session,
             const size_t row_bytes = static_cast<size_t>(vocab_size) * sizeof(float);
             ggml_backend_tensor_get(det_db.dumps.logits_raw, last_logits.data(), 0, row_bytes);
 
-            float best       = -INFINITY;
-            int   best_index = -1;
-            for (size_t i = 0; i < cm->lang_token_ids.size(); ++i) {
-                const int32_t id = cm->lang_token_ids[i];
-                if (id >= 0 && id < static_cast<int>(vocab_size)) {
-                    const float v = last_logits[static_cast<size_t>(id)];
-                    if (v > best) {
-                        best       = v;
-                        lang_token = id;
-                        best_index = static_cast<int>(i);
-                    }
-                }
+            const int best_index = best_language_candidate(cm->lang_token_ids, language_candidates, last_logits);
+            if (best_index >= 0) {
+                lang_token = cm->lang_token_ids[static_cast<size_t>(best_index)];
             }
             // Publish the detected ISO code only here, not in the user-hint
             // branch: the field means "what the model picked", not the hint.
@@ -2484,17 +2509,19 @@ transcribe_status whisper_run_batch(transcribe_session *          session,
     }
 
     // Resolve the whisper run-ext (NULL → shipping defaults).
-    if (const transcribe_status st =
-            transcribe_ext_check(params != nullptr ? params->family : nullptr, TRANSCRIBE_EXT_KIND_WHISPER_RUN,
-                                 sizeof(struct transcribe_whisper_run_ext));
+    transcribe_whisper_run_ext default_wp;
+    transcribe_whisper_run_ext_init(&default_wp);
+    const transcribe_whisper_run_ext * wp;
+    const char * allowed_languages;
+    if (const auto st = resolve_whisper_run_ext(params != nullptr ? params->family : nullptr,
+                                              default_wp, wp, allowed_languages); st != TRANSCRIBE_OK) {
+        return st;
+    }
+    std::vector<size_t> language_candidates;
+    if (const auto st = resolve_language_candidates(allowed_languages, cm->lang_codes, language_candidates);
         st != TRANSCRIBE_OK) {
         return st;
     }
-    transcribe_whisper_run_ext default_wp;
-    transcribe_whisper_run_ext_init(&default_wp);
-    const transcribe_whisper_run_ext * wp = (params != nullptr && params->family != nullptr) ?
-                                                reinterpret_cast<const transcribe_whisper_run_ext *>(params->family) :
-                                                &default_wp;
 
     // ---- Global gates: only what the batched graph genuinely can't do. ----
     // Segment timestamps, temperature>0 fallback, and initial_prompt are now
@@ -2763,15 +2790,9 @@ transcribe_status whisper_run_batch(transcribe_session *          session,
             std::vector<float> ll(static_cast<size_t>(vocab_size));
             ggml_backend_tensor_get(det.dumps.logits_raw, ll.data(), 0,
                                     static_cast<size_t>(vocab_size) * sizeof(float));
-            float best     = -INFINITY;
-            int   best_idx = -1;
-            for (size_t i = 0; i < cm->lang_token_ids.size(); ++i) {
-                const int32_t id = cm->lang_token_ids[i];
-                if (id >= 0 && id < static_cast<int>(vocab_size) && ll[static_cast<size_t>(id)] > best) {
-                    best       = ll[static_cast<size_t>(id)];
-                    lang_token = id;
-                    best_idx   = static_cast<int>(i);
-                }
+            const int best_idx = best_language_candidate(cm->lang_token_ids, language_candidates, ll);
+            if (best_idx >= 0) {
+                lang_token = cm->lang_token_ids[static_cast<size_t>(best_idx)];
             }
             if (best_idx >= 0 && static_cast<size_t>(best_idx) < cm->lang_codes.size()) {
                 det_lang[b] = cm->lang_codes[static_cast<size_t>(best_idx)];
@@ -3312,32 +3333,41 @@ transcribe_status whisper_run_batch(transcribe_session *          session,
     return TRANSCRIBE_OK;
 }
 
-// Kind+slot probe. Whisper ships only the WHISPER_RUN run-extension and
-// has no streaming surface, so the _STREAM slot is always false and the
-// _RUN slot accepts only WHISPER_RUN. There is currently no whisper
+// Kind+slot probe. Whisper accepts the original and optional Kwispr v2 extension.
+// It has no streaming surface, so the _STREAM slot is always false.
+// There is currently no whisper
 // variant that ships without the run-ext surface.
 static bool whisper_accepts_ext_kind(const transcribe_model * model, transcribe_ext_slot slot, uint32_t kind) {
     (void) model;
     if (slot != TRANSCRIBE_EXT_SLOT_RUN) {
         return false;
     }
-    return kind == TRANSCRIBE_EXT_KIND_WHISPER_RUN;
+    return kind == TRANSCRIBE_EXT_KIND_WHISPER_RUN || kind == TRANSCRIBE_EXT_KIND_WHISPER_RUN_V2;
 }
 
 // Pre-clear validation for the _RUN slot (see Arch::run_validate). Enforces the
-// per-kind minimum (full transcribe_whisper_run_ext) before the prior result
+// per-kind minimum and language candidates before the prior result
 // snapshot is cleared, so a too-small run ext is rejected without destroying
 // the prior transcript. whisper_run repeats this (defense in depth) before the
 // cast.
 //
-// Validates SHAPE only. The run-ext VALUE checks (prompt_tokens re-including <|startofprev|>,
+// Other run-ext value checks (prompt_tokens re-including <|startofprev|>,
 // disallowed specials in initial_prompt) live in whisper_run() and reject after
 // the snapshot is cleared — an accepted gap, since run() is one-shot with no
 // accumulating transcript to protect.
 static transcribe_status whisper_run_validate(const transcribe_session * ctx, const transcribe_run_params * params) {
-    (void) ctx;
-    return transcribe_ext_check(params != nullptr ? params->family : nullptr, TRANSCRIBE_EXT_KIND_WHISPER_RUN,
-                                sizeof(struct transcribe_whisper_run_ext));
+    transcribe_whisper_run_ext defaults;
+    transcribe_whisper_run_ext_init(&defaults);
+    const transcribe_whisper_run_ext * options;
+    const char * allowed_languages;
+    const auto status = resolve_whisper_run_ext(params != nullptr ? params->family : nullptr,
+                                                defaults, options, allowed_languages);
+    if (status != TRANSCRIBE_OK) {
+        return status;
+    }
+    const auto * model = static_cast<const WhisperModel *>(ctx->model);
+    std::vector<size_t> candidates;
+    return resolve_language_candidates(allowed_languages, model->lang_codes, candidates);
 }
 
 }  // namespace

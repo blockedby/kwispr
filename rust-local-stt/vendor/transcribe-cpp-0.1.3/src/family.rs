@@ -15,7 +15,7 @@ use std::ffi::CString;
 
 use transcribe_cpp_sys as sys;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Which windows receive the original Whisper prompt, independently of history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +44,10 @@ impl WhisperPromptCondition {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WhisperRunOptions {
     pub initial_prompt: Option<String>,
+    /// Restrict automatic language detection to these model language codes.
+    /// `None` is unrestricted; an explicit source language still takes precedence.
+    /// This does not restrict text tokens or request translation.
+    pub allowed_languages: Option<Vec<String>>,
     pub prompt_condition: Option<WhisperPromptCondition>,
     pub condition_on_prev_tokens: Option<bool>,
     pub temperature: Option<f32>,
@@ -109,6 +113,11 @@ pub(crate) enum RunExtRaw {
         ext: Box<sys::transcribe_whisper_run_ext>,
         _prompt: Option<CString>,
     },
+    WhisperV2 {
+        ext: Box<sys::transcribe_whisper_run_ext_v2>,
+        _prompt: Option<CString>,
+        _allowed_languages: CString,
+    },
 }
 
 impl RunExtRaw {
@@ -117,6 +126,9 @@ impl RunExtRaw {
             // `ext` is field 0, so &ext == &the family struct.
             RunExtRaw::Whisper { ext, .. } => {
                 (&**ext) as *const sys::transcribe_whisper_run_ext as *const sys::transcribe_ext
+            }
+            RunExtRaw::WhisperV2 { ext, .. } => {
+                (&**ext) as *const sys::transcribe_whisper_run_ext_v2 as *const sys::transcribe_ext
             }
         }
     }
@@ -150,6 +162,40 @@ impl RunExtension {
                 set(&mut ext.max_prev_context_tokens, o.max_prev_context_tokens);
                 set(&mut ext.seed, o.seed);
                 set(&mut ext.max_initial_timestamp, o.max_initial_timestamp);
+                if let Some(languages) = &o.allowed_languages {
+                    if languages.is_empty()
+                        || languages
+                            .iter()
+                            .any(|language| language.trim().is_empty() || language.contains(','))
+                    {
+                        return Err(Error::InvalidArgument(
+                            "allowed_languages must contain nonempty language codes".into(),
+                        ));
+                    }
+                    let csv = languages
+                        .iter()
+                        .map(|language| language.trim())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    if csv.len() > 1024 {
+                        return Err(Error::InvalidArgument(
+                            "allowed_languages must be at most 1024 bytes".into(),
+                        ));
+                    }
+                    let allowed_languages = CString::new(csv)?;
+                    let mut extended: sys::transcribe_whisper_run_ext_v2 =
+                        unsafe { std::mem::zeroed() };
+                    unsafe { sys::transcribe_whisper_run_ext_v2_init(&mut extended) };
+                    let header = extended.base.ext;
+                    extended.base = ext;
+                    extended.base.ext = header;
+                    extended.allowed_languages = allowed_languages.as_ptr();
+                    return Ok(RunExtRaw::WhisperV2 {
+                        ext: Box::new(extended),
+                        _prompt: prompt,
+                        _allowed_languages: allowed_languages,
+                    });
+                }
                 Ok(RunExtRaw::Whisper {
                     ext: Box::new(ext),
                     _prompt: prompt,
@@ -248,7 +294,9 @@ mod tests {
         })
         .materialize()
         .unwrap();
-        let RunExtRaw::Whisper { ext, .. } = &raw;
+        let RunExtRaw::Whisper { ext, .. } = &raw else {
+            panic!("default ABI changed")
+        };
         assert_eq!(
             ext.prompt_condition,
             sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS
@@ -272,12 +320,108 @@ mod tests {
         let raw = RunExtension::Whisper(WhisperRunOptions::default())
             .materialize()
             .unwrap();
-        let RunExtRaw::Whisper { ext, .. } = &raw;
+        let RunExtRaw::Whisper { ext, .. } = &raw else {
+            panic!("default ABI changed")
+        };
         assert_eq!(
             ext.prompt_condition,
             sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT
         );
         assert!(ext.initial_prompt.is_null());
         assert!(!ext.condition_on_prev_tokens);
+    }
+
+    #[test]
+    fn allowed_languages_use_separate_abi_and_keep_owned_strings() {
+        let raw = RunExtension::Whisper(WhisperRunOptions {
+            initial_prompt: Some("Kwispr. Привет! Hello!".into()),
+            allowed_languages: Some(vec!["ru".into(), "en".into()]),
+            prompt_condition: Some(WhisperPromptCondition::AllSegments),
+            ..Default::default()
+        })
+        .materialize()
+        .unwrap();
+        let RunExtRaw::WhisperV2 { ext, .. } = &raw else {
+            panic!("missing v2 extension")
+        };
+        assert_eq!(ext.base.ext.kind, sys::TRANSCRIBE_EXT_KIND_WHISPER_RUN_V2);
+        assert_eq!(
+            ext.base.ext.size as usize,
+            std::mem::size_of::<sys::transcribe_whisper_run_ext_v2>()
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(ext.allowed_languages) }
+                .to_str()
+                .unwrap(),
+            "ru,en"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(ext.base.initial_prompt) }
+                .to_str()
+                .unwrap(),
+            "Kwispr. Привет! Hello!"
+        );
+        assert_eq!(
+            ext.base.prompt_condition,
+            sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS
+        );
+        assert_eq!(ext.base.no_speech_thold, 0.6);
+        assert_eq!(
+            unsafe { (*raw.ext_ptr()).kind },
+            sys::TRANSCRIBE_EXT_KIND_WHISPER_RUN_V2
+        );
+        // A pre-v2 library/consumer must reject this kind instead of silently
+        // running unrestricted language detection.
+        assert_eq!(
+            unsafe {
+                sys::transcribe_ext_check(
+                    raw.ext_ptr(),
+                    sys::TRANSCRIBE_EXT_KIND_WHISPER_RUN,
+                    std::mem::size_of::<sys::transcribe_whisper_run_ext>() as u64,
+                )
+            },
+            sys::transcribe_status::TRANSCRIBE_ERR_INVALID_ARG
+        );
+    }
+
+    #[test]
+    fn legacy_initializer_keeps_original_size_and_does_not_overwrite_tail() {
+        #[repr(C)]
+        struct Guarded {
+            ext: sys::transcribe_whisper_run_ext,
+            guard: [u8; 16],
+        }
+        let mut guarded = Guarded {
+            ext: unsafe { std::mem::zeroed() },
+            guard: [0xa5; 16],
+        };
+        unsafe { sys::transcribe_whisper_run_ext_init(&mut guarded.ext) };
+        assert_eq!(std::mem::size_of::<sys::transcribe_whisper_run_ext>(), 80);
+        assert_eq!(guarded.ext.ext.size, 80);
+        assert_eq!(guarded.ext.ext.kind, sys::TRANSCRIBE_EXT_KIND_WHISPER_RUN);
+        assert_eq!(guarded.guard, [0xa5; 16]);
+    }
+
+    #[test]
+    fn allowed_languages_reject_empty_ambiguous_and_oversized_lists() {
+        for languages in [
+            vec![],
+            vec!["".into()],
+            vec!["ru,en".into()],
+            vec!["x".repeat(1025)],
+        ] {
+            let result = RunExtension::Whisper(WhisperRunOptions {
+                allowed_languages: Some(languages),
+                ..Default::default()
+            })
+            .materialize();
+            assert!(matches!(result, Err(Error::InvalidArgument(_))));
+        }
+        let result = RunExtension::Whisper(WhisperRunOptions {
+            allowed_languages: Some(vec!["ru\0en".into()]),
+            ..Default::default()
+        })
+        .materialize();
+        assert!(matches!(result, Err(Error::Nul(_))));
     }
 }

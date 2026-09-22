@@ -20,8 +20,8 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 use transcribe_cpp::{
-    Backend, Model, ModelOptions, RunExtension, RunOptions, Session, Transcript, WhisperPromptCondition,
-    WhisperRunOptions,
+    Backend, Model, ModelOptions, RunExtension, RunOptions, Session, Transcript,
+    WhisperPromptCondition, WhisperRunOptions,
 };
 use transcribe_rs::vad::{SileroVad, SmoothedVad, Vad};
 
@@ -30,6 +30,7 @@ static SESSION_CACHE: Lazy<Mutex<HashMap<String, Session>>> =
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_FFMPEG_TIMEOUT_SECONDS: u64 = 30;
 const MAX_PROMPT_CHARS: usize = 4096;
+const MAX_ALLOWED_LANGUAGES_BYTES: usize = 1024;
 
 fn max_upload_bytes() -> usize {
     env::var("KWISPR_MAX_UPLOAD_BYTES")
@@ -92,6 +93,7 @@ struct Health {
 #[derive(Serialize)]
 struct RuntimeCapabilities {
     whisper_prompt: bool,
+    whisper_allowed_languages: bool,
     preserve_audio_tail: bool,
 }
 #[derive(Default, Serialize)]
@@ -210,6 +212,7 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         vad: state.vad.clone(),
         capabilities: RuntimeCapabilities {
             whisper_prompt: true,
+            whisper_allowed_languages: true,
             preserve_audio_tail: true,
         },
     })
@@ -222,6 +225,7 @@ async fn transcribe(
     let mut mp = mp.map_err(ApiError::multipart_rejection)?;
     let mut model = None;
     let mut lang = None;
+    let mut allowed_languages_csv = None;
     let mut prompt = None;
     let mut preserve_audio_tail = false;
     let mut format = "json".to_string();
@@ -230,6 +234,10 @@ async fn transcribe(
         match field.name().unwrap_or("") {
             "model" => model = Some(field.text().await.map_err(ApiError::multipart_error)?),
             "language" => lang = Some(field.text().await.map_err(ApiError::multipart_error)?),
+            "allowed_languages" => {
+                allowed_languages_csv =
+                    Some(field.text().await.map_err(ApiError::multipart_error)?);
+            }
             "prompt" => {
                 prompt = normalize_prompt(&field.text().await.map_err(ApiError::multipart_error)?)?;
             }
@@ -261,6 +269,7 @@ async fn transcribe(
         file.ok_or_else(|| ApiError::bad_request(anyhow!("missing audio file field: file")))?;
     let info = resolve_model(&state.catalog, &model_id)?;
     let language = effective_language(&info, lang.as_deref())?;
+    let allowed_languages = effective_allowed_languages(&info, allowed_languages_csv.as_deref())?;
     validate_prompt_support(&info, prompt.as_deref())?;
     let audio = decode_audio(&bytes).await.map_err(ApiError::bad_request)?;
     let preprocessed =
@@ -275,6 +284,7 @@ async fn transcribe(
             preprocessed.samples,
             language,
             prompt,
+            allowed_languages,
         )
     })
     .await
@@ -395,6 +405,47 @@ fn base_language(language: &str) -> &str {
     language.split_once('-').map_or(language, |(base, _)| base)
 }
 
+fn effective_allowed_languages(
+    info: &ModelInfo,
+    requested: Option<&str>,
+) -> std::result::Result<Option<Vec<String>>, ApiError> {
+    let Some(csv) = requested else {
+        return Ok(None);
+    };
+    if info.architecture != "whisper" {
+        return Err(ApiError::bad_request(anyhow!(
+            "allowed_languages is only supported by Whisper models"
+        )));
+    }
+    if csv.len() > MAX_ALLOWED_LANGUAGES_BYTES {
+        return Err(ApiError::bad_request(anyhow!(
+            "allowed_languages must be at most {MAX_ALLOWED_LANGUAGES_BYTES} bytes"
+        )));
+    }
+    let mut languages = Vec::new();
+    for language in csv.split(',').map(str::trim) {
+        let mut parts = language.split('-');
+        let base = parts.next().unwrap_or_default();
+        if !(2..=3).contains(&base.len())
+            || !base.bytes().all(|byte| byte.is_ascii_alphabetic())
+            || !parts.all(|part| {
+                (1..=8).contains(&part.len())
+                    && part.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+        {
+            return Err(ApiError::bad_request(anyhow!(
+                "allowed_languages must be a nonempty comma-separated list of language codes"
+            )));
+        }
+        let canonical = effective_language(info, Some(language))?
+            .expect("a validated language code is not auto");
+        if !languages.contains(&canonical) {
+            languages.push(canonical);
+        }
+    }
+    Ok(Some(languages))
+}
+
 fn normalize_prompt(value: &str) -> std::result::Result<Option<String>, ApiError> {
     if value.contains('\0') {
         return Err(ApiError::bad_request(anyhow!(
@@ -440,6 +491,7 @@ fn transcribe_blocking(
     audio: Vec<f32>,
     language: Option<String>,
     prompt: Option<String>,
+    allowed_languages: Option<Vec<String>>,
 ) -> std::result::Result<Transcription, ApiError> {
     let mut cache = SESSION_CACHE
         .lock()
@@ -451,28 +503,36 @@ fn transcribe_blocking(
         );
     }
     let session = cache.get_mut(&info.slug).expect("cached session");
-    let options = run_options(language, prompt);
-    let result = session
-        .run(&audio, &options)
-        .map_err(|error| {
-            ApiError::runtime(anyhow!("transcribe-cpp transcription failed: {error}"))
-        })?;
+    let options = run_options(language, prompt, allowed_languages);
+    let result = session.run(&audio, &options).map_err(|error| {
+        ApiError::runtime(anyhow!("transcribe-cpp transcription failed: {error}"))
+    })?;
     Ok(Transcription::from_result(result, options.language))
 }
 
-fn run_options(language: Option<String>, prompt: Option<String>) -> RunOptions {
+fn run_options(
+    language: Option<String>,
+    prompt: Option<String>,
+    allowed_languages: Option<Vec<String>>,
+) -> RunOptions {
+    let family = if prompt.is_none() && allowed_languages.is_none() {
+        None
+    } else {
+        let mut options = WhisperRunOptions {
+            allowed_languages,
+            ..Default::default()
+        };
+        if let Some(prompt) = prompt {
+            options.initial_prompt = Some(prompt);
+            // Preserve caller context on every window without generated history.
+            options.prompt_condition = Some(WhisperPromptCondition::AllSegments);
+            options.condition_on_prev_tokens = Some(false);
+        }
+        Some(RunExtension::Whisper(options))
+    };
     RunOptions {
         language,
-        family: prompt.map(|prompt| {
-            RunExtension::Whisper(WhisperRunOptions {
-                initial_prompt: Some(prompt),
-                // Preserve the caller's vocabulary/style on every window,
-                // without feeding generated text back into later windows.
-                prompt_condition: Some(WhisperPromptCondition::AllSegments),
-                condition_on_prev_tokens: Some(false),
-                ..Default::default()
-            })
-        }),
+        family,
         ..Default::default()
     }
 }
@@ -1166,7 +1226,9 @@ mod tests {
             Some("zh")
         );
         assert_eq!(
-            run_options(Some("zh".into()), None).language.as_deref(),
+            run_options(Some("zh".into()), None, None)
+                .language
+                .as_deref(),
             Some("zh")
         );
     }
@@ -1185,6 +1247,76 @@ mod tests {
             serde_json::to_value(response).unwrap(),
             serde_json::json!({"text": "Привет, друг!", "language": "ru"})
         );
+    }
+
+    #[test]
+    fn allowed_languages_normalize_catalog_codes_without_forcing_language() {
+        let languages =
+            effective_allowed_languages(&test_model(), Some(" RU , en-US,ru ")).unwrap();
+        assert_eq!(languages, Some(vec!["ru".into(), "en".into()]));
+        let options = run_options(None, None, languages.clone());
+        assert_eq!(options.language, None);
+        assert_eq!(options.task, transcribe_cpp::Task::Transcribe);
+        assert_eq!(options.target_language, None);
+        assert_eq!(
+            options.family,
+            Some(RunExtension::Whisper(WhisperRunOptions {
+                allowed_languages: languages.clone(),
+                ..Default::default()
+            }))
+        );
+        // An explicit source language remains stronger than the auto candidates.
+        let hinted = run_options(Some("en".into()), None, Some(vec!["ru".into()]));
+        assert_eq!(hinted.language.as_deref(), Some("en"));
+        let prompted = run_options(None, Some("Hello. Привет!".into()), languages);
+        let Some(RunExtension::Whisper(whisper)) = prompted.family else {
+            panic!("missing Whisper options")
+        };
+        assert_eq!(
+            whisper.prompt_condition,
+            Some(WhisperPromptCondition::AllSegments)
+        );
+        assert_eq!(whisper.condition_on_prev_tokens, Some(false));
+        assert_eq!(
+            whisper.allowed_languages,
+            Some(vec!["ru".into(), "en".into()])
+        );
+    }
+
+    #[test]
+    fn allowed_languages_reject_invalid_empty_and_unsupported_requests() {
+        for invalid in [
+            "",
+            " ",
+            "ru,",
+            ",en",
+            "ru,,en",
+            "ru;en",
+            "r",
+            "russ",
+            "ru_zz",
+            "en-",
+            "en-123456789",
+            "ru\0en",
+            "xx",
+        ] {
+            let error = effective_allowed_languages(&test_model(), Some(invalid)).unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST, "{invalid:?}");
+        }
+        assert!(effective_allowed_languages(&test_model(), Some(&"r".repeat(1025))).is_err());
+        assert_eq!(
+            effective_allowed_languages(&test_model(), None).unwrap(),
+            None
+        );
+        let mut other_model = test_model();
+        other_model.architecture = "gigaam".into();
+        assert_eq!(
+            effective_allowed_languages(&other_model, None).unwrap(),
+            None
+        );
+        let error = effective_allowed_languages(&other_model, Some("ru")).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("only supported by Whisper"));
     }
 
     #[test]
@@ -1249,7 +1381,7 @@ mod tests {
     fn prompt_is_forwarded_to_every_window_without_generated_history() {
         let prompt = normalize_prompt("  Kwispr, Подман. Привет, друг!  ").unwrap();
         validate_prompt_support(&test_model(), prompt.as_deref()).unwrap();
-        let options = run_options(Some("ru".into()), prompt);
+        let options = run_options(Some("ru".into()), prompt, None);
         assert_eq!(options.language.as_deref(), Some("ru"));
         assert_eq!(
             options.family,
@@ -1262,7 +1394,7 @@ mod tests {
         );
         // A later prompt-free request must not inherit context from the
         // session cache or force family-specific defaults.
-        assert_eq!(run_options(None, None).family, None);
+        assert_eq!(run_options(None, None, None).family, None);
         assert_eq!(normalize_prompt("  \n\t ").unwrap(), None);
     }
 

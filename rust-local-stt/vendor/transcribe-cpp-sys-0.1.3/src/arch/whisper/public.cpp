@@ -74,6 +74,16 @@ extern "C" void transcribe_whisper_run_ext_init(struct transcribe_whisper_run_ex
     p->max_initial_timestamp   = 1.0f;
 }
 
+extern "C" void transcribe_whisper_run_ext_v2_init(struct transcribe_whisper_run_ext_v2 * p) {
+    if (p == nullptr) {
+        return;
+    }
+    std::memset(p, 0, sizeof(*p));
+    transcribe_whisper_run_ext_init(&p->base);
+    p->base.ext.size = sizeof(*p);
+    p->base.ext.kind = TRANSCRIBE_EXT_KIND_WHISPER_RUN_V2;
+}
+
 // Chunk-trace accessors.
 extern "C" int transcribe_get_whisper_chunk_count(const struct transcribe_session * session) {
     const auto * wc = maybe_whisper_context(session);

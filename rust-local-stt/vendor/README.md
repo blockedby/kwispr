@@ -1,4 +1,4 @@
-# Pinned transcription dependency patch
+# Pinned transcription dependency patches
 
 These sources are the crates.io distributions of `transcribe-cpp` and
 `transcribe-cpp-sys` **0.1.3**, from upstream
@@ -30,7 +30,7 @@ original punctuation example and vocabulary on every window avoids that
 feedback mechanism. Upstream 0.1.3 has the necessary prefix construction but
 rejects that option combination, and its safe Rust API omits the prompt mode.
 
-The narrow changes are:
+The original static-prompt changes are:
 
 1. `transcribe-cpp/src/family.rs` exposes the native prompt mode as the typed
    `WhisperPromptCondition` enum and optional `WhisperRunOptions.prompt_condition`
@@ -50,6 +50,45 @@ unchanged. This is a decoder-context fix, not transcript deduplication.
 `kwispr-static-prompt.patch` records the complete diff from the original four
 upstream source/header files for review.
 
+## Optional language-detection candidates
+
+`kwispr-allowed-languages.patch` applies after the static-prompt patch. It adds
+an optional `WhisperRunOptions.allowed_languages` list and a distinct native
+`WHR2` run extension. The original `WHRN` struct and initializer keep their
+80-byte ABI. The v2 struct embeds that base and adds an owned-for-the-call CSV
+pointer; its separate initializer and kind prevent old libraries from silently
+ignoring the new option. Requests without the list still use the original kind.
+
+Both serial and batch detection use `language-selection.h` to select the
+highest language-token logit among the validated candidates. A supplied source
+language wins over the candidates. Unknown languages, empty entries and lists
+over 1024 bytes are rejected. This changes language identification only: text
+token sampling, task selection, prompts, thresholds and audio windows retain
+their existing behavior. A first-window language hint remains in use for the
+whole native run, so restricting detection cannot guarantee perfect mixed
+Russian/English transcription within one window.
+
+The HTTP runtime exposes `allowed_languages=ru,en` as an optional multipart
+field for Whisper models and advertises `whisper_allowed_languages` in health
+capabilities. It canonicalizes case/region codes against the model catalog;
+the native layer independently validates against the loaded model. Omission
+keeps unrestricted detection; `language` remains an explicit override.
+
+The new FFI declarations were regenerated with the actual upstream generators
+from commit `a94e021ef658dc7c788837341a13f6acea3baf3c`, after copying the patched
+Whisper header into that checkout:
+
+```sh
+python3 bindings/python/_generate/generate.py
+cargo run --locked -p xtask -- bindgen
+```
+
+The upstream Python generator computes the normalized ABI digest
+`2839898fc84a0f5a`; Rust bindgen 0.72.1 emits the committed declarations and
+layout assertions. No generated layouts are edited by hand. The original
+unpatched checkout passed `cargo run --locked -p xtask -- bindgen --check`
+before regeneration.
+
 ## Validation
 
 Run in the project's Podman builder from `rust-local-stt/`:
@@ -57,6 +96,11 @@ Run in the project's Podman builder from `rust-local-stt/`:
 ```sh
 cargo test --release --locked --no-default-features -p kwispr-local-stt -p transcribe-cpp --lib --bins
 cargo build --release --locked
+c++ -std=c++17 -Wall -Wextra -Werror \
+  -Ivendor/transcribe-cpp-sys-0.1.3/include \
+  -Ivendor/transcribe-cpp-sys-0.1.3/src \
+  tests/whisper-language-selection.cpp -o /tmp/kwispr-whisper-language-test
+/tmp/kwispr-whisper-language-test
 ```
 
 The native prefix assembly is internal and has no model-free public test hook.
@@ -65,4 +109,8 @@ recording longer than two 30-second windows against the rebuilt runtime and
 check repetition, punctuation, vocabulary and final words. Also check genuine
 spoken repetition and a later prompt-free request. Keep private recordings out
 of the repository. Replace this patch with a verified upstream implementation
-when the equivalent independent prompt/history controls are available.
+when equivalent independent prompt/history controls and language candidates
+are available. Language-list tests cover the actual shared candidate selector,
+legacy ABI guard bytes, v2 materialization and default behavior. Before enabling
+the option, also compare real RU, EN and mixed speech with and without it;
+unit tests establish mechanism correctness, not recognition quality.

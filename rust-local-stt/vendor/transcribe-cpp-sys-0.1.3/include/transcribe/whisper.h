@@ -36,6 +36,8 @@ extern "C" {
 
 /* 'WHRN' little-endian = 0x4E524857 */
 #define TRANSCRIBE_EXT_KIND_WHISPER_RUN 0x4E524857u
+/* Kwispr 'WHR2': optional language-detection candidates; WHRN is unchanged. */
+#define TRANSCRIBE_EXT_KIND_WHISPER_RUN_V2 0x32524857u
 
 /*
  * Sentinels for "disabled" on threshold fields. Never rely on 0.0 as a
@@ -150,6 +152,26 @@ struct transcribe_whisper_run_ext {
 
 /* Fills ext.size/kind and the Whisper decoding recipe defaults. */
 TRANSCRIBE_API void transcribe_whisper_run_ext_init(struct transcribe_whisper_run_ext * ext);
+
+/*
+ * Additive Kwispr extension. The original struct and its initializer retain
+ * their ABI. Use this kind only when restricting automatic language detection.
+ * Libraries without WHR2 support reject it instead of ignoring the restriction.
+ */
+struct transcribe_whisper_run_ext_v2 {
+    struct transcribe_whisper_run_ext base;
+    /*
+     * Optional comma-separated model language codes, e.g. "ru,en". NULL keeps
+     * unrestricted detection; empty/unknown entries are rejected. At most 1024
+     * bytes. The caller keeps this string alive through run/run_batch.
+     * A valid explicit run_params.language hint overrides this candidate list.
+     * Only language identification is restricted: task and text vocabulary are
+     * unchanged, so this neither requests translation nor filters transcript text.
+     */
+    const char * allowed_languages;
+};
+
+TRANSCRIBE_API void transcribe_whisper_run_ext_v2_init(struct transcribe_whisper_run_ext_v2 * ext);
 
 /* ----------------------------------------------------------------------- */
 /* Whisper decoding trace                                                  */
