@@ -370,6 +370,49 @@ class KwisprShellContractTest(unittest.TestCase):
                 self.assertEqual(h.clipboard_text(), transcript)
                 self.assertEqual(wav.with_suffix(".txt").read_text(), transcript)
 
+    def test_known_subtitle_credit_is_trimmed_only_as_a_standalone_trailing_line(self) -> None:
+        cases = (
+            ("Spoken sentence. Субтитры сделал DimaTorzok.", "Spoken sentence.", "C"),
+            ("Говорил prefix.\nСУБТИТРЫ СДЕЛАЛ ДИМА ТОРЖОК!!!  ", "Говорил prefix.", "C.UTF-8"),
+            ("Субтитры сделал Дима Торжок!", "", "C.UTF-8"),
+        )
+        for transcript, expected, locale in cases:
+            with self.subTest(transcript=transcript, locale=locale), KwisprScriptHarness() as h:
+                wav = h.make_wav()
+                h.write_config(
+                    KWISPR_API_URL="http://localhost:19650/v1/audio/transcriptions",
+                    KWISPR_AUTOPASTE="0",
+                )
+                h.fake_curl_response(200, {"text": transcript})
+                result = h.run("retry", str(wav), env_overrides={"LC_ALL": locale})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(h.clipboard_text(), expected)
+                if expected:
+                    self.assertEqual(wav.with_suffix(".txt").read_text(), expected)
+                else:
+                    self.assertFalse(wav.with_suffix(".txt").exists())
+
+    def test_known_credit_mention_generic_name_and_following_speech_are_preserved(self) -> None:
+        transcripts = (
+            "Он произнёс: «Субтитры сделал Дима Торжок».",
+            "Важно: Субтитры сделал Дима Торжок, а потом продолжил.",
+            "Субтитры сделал Иван.",
+            "Subtitles by DimaTorzok.",
+            "Субтитры сделал Дима Торжок — вот так звучит фраза.",
+        )
+        for transcript in transcripts:
+            with self.subTest(transcript=transcript), KwisprScriptHarness() as h:
+                wav = h.make_wav()
+                h.write_config(
+                    KWISPR_API_URL="http://localhost:19650/v1/audio/transcriptions",
+                    KWISPR_AUTOPASTE="0",
+                )
+                h.fake_curl_response(200, {"text": transcript})
+                result = h.run("retry", str(wav))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(h.clipboard_text(), transcript)
+                self.assertEqual(wav.with_suffix(".txt").read_text(), transcript)
+
     def test_whitespace_only_local_response_is_no_speech(self) -> None:
         with KwisprScriptHarness() as h:
             wav = h.make_wav()

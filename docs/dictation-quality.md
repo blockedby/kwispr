@@ -54,7 +54,7 @@ KWISPR_PRESERVE_AUDIO_TAIL=1
 
 All new features are opt-in. An empty sample and vocabulary, zero delay, and disabled ending preservation retain the original request behavior.
 
-Recognized text is preserved without keyword-based cleanup. Mentioning subtitles, credits, music, or closing phrases must not remove that speech or the sentences after it.
+Dictation removes only the known terminal credit lines `Субтитры сделал DimaTorzok` and `Субтитры сделал Дима Торжок` (case-insensitive, with optional final punctuation) when they appear as a standalone final sentence or line. The spoken prefix and its punctuation are kept. Other mentions of subtitles, credits, music, closing phrases, these names, or any text that follows a mention remain unchanged.
 
 ## Local API
 
