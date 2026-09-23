@@ -52,6 +52,70 @@ class MeetingConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(config)
 
+    def test_explicit_meeting_overrides_isolate_local_meetings_from_cloud_dictation(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {}, clear=True):
+            config = Path(temporary) / "config.env"
+            config.write_text(
+                "KWISPR_BACKEND='openrouter-chat'\n"
+                "KWISPR_API_URL='https://openrouter.ai/api/v1/chat/completions'\n"
+                "KWISPR_MODEL='google/gemini-3.8-flash'\n"
+                "KWISPR_API_KEY='global-dictation-key'\n"
+                "OPENAI_API_KEY='global-openai-key'\n"
+                "KWISPR_MEETING_BACKEND='openai-transcriptions'\n"
+                "KWISPR_MEETING_API_URL='http://127.0.0.1:19650/v1/audio/transcriptions'\n"
+                "KWISPR_MEETING_MODEL='whisper-large-v3-turbo'\n"
+                "KWISPR_MEETING_API_KEY=''\n"
+                "KWISPR_MEETING_LOCAL_STT_CONFIGURED='1'\n"
+            )
+            values = load_config(config)
+            self.assertEqual(values["KWISPR_BACKEND"], "openai-transcriptions")
+            self.assertEqual(values["KWISPR_API_URL"], "http://127.0.0.1:19650/v1/audio/transcriptions")
+            self.assertEqual(values["KWISPR_MODEL"], "whisper-large-v3-turbo")
+            self.assertEqual(values["KWISPR_API_KEY"], "")
+            self.assertEqual(values["OPENAI_API_KEY"], "")
+            self.assertEqual(values["KWISPR_LOCAL_STT_CONFIGURED"], "1")
+            validate_local_backend(values)
+
+    def test_meeting_override_environment_wins_and_absence_preserves_cloud_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.env"
+            config.write_text(
+                "KWISPR_BACKEND='openrouter-chat'\n"
+                "KWISPR_API_URL='https://openrouter.ai/api/v1/chat/completions'\n"
+                "KWISPR_MODEL='google/gemini-3.8-flash'\n"
+                "KWISPR_MEETING_BACKEND='openai-transcriptions'\n"
+                "KWISPR_MEETING_API_URL='http://127.0.0.1:19650/file-config'\n"
+            )
+            with patch.dict(os.environ, {"KWISPR_MEETING_API_URL": "http://localhost:19650/env-config"}, clear=True):
+                values = load_config(config)
+                self.assertEqual(values["KWISPR_API_URL"], "http://localhost:19650/env-config")
+                validate_local_backend(values)
+            with patch.dict(os.environ, {}, clear=True):
+                values = load_config(config)
+                self.assertEqual(values["KWISPR_API_URL"], "http://127.0.0.1:19650/file-config")
+                validate_local_backend(values)
+                cloud_config = Path(temporary) / "cloud.env"
+                cloud_config.write_text(
+                    "KWISPR_BACKEND='openrouter-chat'\n"
+                    "KWISPR_API_URL='https://openrouter.ai/api/v1/chat/completions'\n"
+                    "KWISPR_MODEL='google/gemini-3.8-flash'\n"
+                )
+                values = load_config(cloud_config)
+                self.assertEqual(values["KWISPR_BACKEND"], "openrouter-chat")
+                with self.assertRaises(ConfigError):
+                    validate_local_backend(values)
+
+    def test_meeting_cloud_endpoint_remains_rejected_even_with_local_backend_override(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {}, clear=True):
+            config = Path(temporary) / "config.env"
+            config.write_text(
+                "KWISPR_BACKEND='openrouter-chat'\n"
+                "KWISPR_MEETING_BACKEND='openai-transcriptions'\n"
+                "KWISPR_MEETING_API_URL='https://api.openai.com/v1/audio/transcriptions'\n"
+            )
+            with self.assertRaises(ConfigError):
+                validate_local_backend(load_config(config))
+
     def test_local_endpoint_is_required_no_cloud_fallback(self):
         for url in ("http://127.0.0.1:19650/v1/audio/transcriptions", "http://localhost:1/x", "http://[::1]:1/x"):
             validate_local_backend({"KWISPR_API_URL": url})

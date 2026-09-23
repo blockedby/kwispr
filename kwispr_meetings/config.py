@@ -41,6 +41,24 @@ def load_config(path: Path | None = None) -> dict[str, str]:
             config[key] = parts[0] if parts else ""
     config.update({key: value for key, value in os.environ.items()
                    if key.startswith("KWISPR_") or key == "OPENAI_API_KEY"})
+    # Meetings can keep a local recognition endpoint while ordinary dictation
+    # opts into a separate backend. Presence, including an empty value, matters
+    # so a meeting API key can explicitly clear a key inherited from dictation.
+    meeting_overrides = {
+        "KWISPR_MEETING_BACKEND": "KWISPR_BACKEND",
+        "KWISPR_MEETING_API_URL": "KWISPR_API_URL",
+        "KWISPR_MEETING_MODEL": "KWISPR_MODEL",
+        "KWISPR_MEETING_API_KEY": "KWISPR_API_KEY",
+        "KWISPR_MEETING_LOCAL_STT_CONFIGURED": "KWISPR_LOCAL_STT_CONFIGURED",
+    }
+    for meeting_key, general_key in meeting_overrides.items():
+        if meeting_key in config:
+            config[general_key] = config[meeting_key]
+            if meeting_key == "KWISPR_MEETING_API_KEY":
+                # Pipeline key selection falls back to OPENAI_API_KEY when the
+                # Kwispr key is empty. Suppress that fallback for explicit
+                # meeting-key overrides, including an intentional blank.
+                config["OPENAI_API_KEY"] = ""
     return config
 
 
