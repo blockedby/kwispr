@@ -33,12 +33,15 @@ class Response:
 
 
 class Opener:
-    def __init__(self, replies):
+    def __init__(self, replies, on_open=None):
         self.replies = iter(replies)
         self.requests = []
+        self.on_open = on_open
 
     def open(self, request, timeout):
         self.requests.append((request, timeout))
+        if self.on_open:
+            self.on_open(request)
         return Response(next(self.replies))
 
 
@@ -175,12 +178,61 @@ class MeetingAudioBenchmarkTests(unittest.TestCase):
         payload = json.loads(request.data)
         self.assertEqual(request.full_url, benchmark.ENDPOINTS["chat"])
         self.assertEqual(payload["max_tokens"], 1024)
+        self.assertNotIn("reasoning", payload)
         self.assertEqual(payload["messages"][0]["content"][0]["text"], benchmark.PROMPT)
         self.assertEqual(payload["messages"][0]["content"][1]["type"], "input_audio")
         saved = json.loads(next((self.root / "openrouter-results").glob("*.json")).read_text())
         self.assertEqual(saved["finish_reason"], "length")
         self.assertTrue(saved["incomplete"])
         self.assertEqual(saved["score"], {"status": "not_evaluated", "reason": "incomplete"})
+
+    def test_chat_settings_change_identity_and_are_saved_before_http(self):
+        clip = self.add_clip()
+        manifest = self.manifest()
+        legacy_fields = {"mode": "chat", "model": "provider/model", "clip_id": clip["id"],
+                         "sha256": clip["sha256"], "prompt_variant": benchmark.PROMPT_VARIANT}
+        legacy_identity = hashlib.sha256(json.dumps(legacy_fields, sort_keys=True).encode()).hexdigest()
+        self.assertEqual(benchmark._identity("chat", "provider/model", clip), legacy_identity)
+        self.assertEqual(benchmark._identity("chat", "provider/model", clip, 1024, None), legacy_identity)
+        self.assertNotEqual(benchmark._identity("chat", "provider/model", clip, 4096, "minimal"), legacy_identity)
+        args = ["--manifest", str(manifest), "--mode", "chat", "--model", "provider/model", "--execute"]
+        default_opener = Opener([{"choices": [{"message": {"content": "one"}, "finish_reason": "stop"}],
+                                  "usage": {"cost": 0.01}}])
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "fixture-secret"}), \
+             patch.object(benchmark.urllib.request, "build_opener", return_value=default_opener), \
+             redirect_stdout(io.StringIO()):
+            benchmark.main(args)
+        seen_markers = []
+        output = self.root / "openrouter-results"
+
+        def observe(_request):
+            seen_markers.extend(json.loads(path.read_text()) for path in output.glob("*.attempt"))
+
+        tuned_opener = Opener([{"choices": [{"message": {"content": "two"}, "finish_reason": "stop"}],
+                                "usage": {"cost": 0.02}}], on_open=observe)
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "fixture-secret"}), \
+             patch.object(benchmark.urllib.request, "build_opener", return_value=tuned_opener), \
+             redirect_stdout(io.StringIO()):
+            benchmark.main(args + ["--max-output-tokens", "4096", "--reasoning-effort", "minimal"])
+        self.assertEqual(len(tuned_opener.requests), 1)
+        payload = json.loads(tuned_opener.requests[0][0].data)
+        self.assertEqual(payload["max_tokens"], 4096)
+        self.assertEqual(payload["reasoning"], {"effort": "minimal"})
+        self.assertEqual(seen_markers[0]["request_options"],
+                         {"max_output_tokens": 4096, "reasoning_effort": "minimal"})
+        results = [json.loads(path.read_text()) for path in output.glob("*.json")]
+        self.assertEqual(len(results), 2)
+        self.assertEqual({result["identity"] for result in results},
+                         {legacy_identity, benchmark._identity("chat", "provider/model", clip, 4096, "minimal")})
+        self.assertIn({"max_output_tokens": 4096, "reasoning_effort": "minimal"},
+                      [result["request_options"] for result in results])
+        self.assertEqual(list(output.glob("*.attempt")), [])
+
+    def test_chat_only_settings_rejected_for_transcription(self):
+        self.add_clip()
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            benchmark.main(["--manifest", str(self.manifest()), "--mode", "transcription",
+                            "--model", "provider/model", "--reasoning-effort", "minimal"])
 
     def test_scoring_needs_reviewed_reference_and_handles_empty_reference(self):
         clip = self.add_clip(reference="Привет, мир!", reviewed=True)
