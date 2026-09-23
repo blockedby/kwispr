@@ -17,7 +17,7 @@ import wave
 from pathlib import Path
 from .config import allowed_whisper_languages, meeting_language, runtime_dir
 
-PIPELINE_VERSION = 5
+PIPELINE_VERSION = 6
 SHORT_TURN_SECONDS = 4.0
 MODEL_FILES = {
     "segmentation.onnx": (5992913, "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"),
@@ -172,6 +172,21 @@ def plan_transcription_intervals(intervals):
             index += 2
         result.append(current)
         index += 1
+    return result
+
+
+def plan_single_speaker_intervals(intervals):
+    """Group continuous remote speech when one remote speaker was specified.
+
+    Native speaker IDs may change within that voice, but a silent gap still
+    separates ASR requests. The identity overlay retains the original spans.
+    """
+    result = []
+    for interval in intervals:
+        if result and interval["start"] <= result[-1]["end"]:
+            result[-1]["end"] = max(result[-1]["end"], interval["end"])
+        else:
+            result.append({"start": interval["start"], "end": interval["end"]})
     return result
 
 
@@ -431,7 +446,8 @@ def process_session(session_dir, config, progress_callback=None):
             diarization["tracks"][track] = speech_intervals(segments, duration, track == "microphone")
             atomic_json(diarization_path, diarization)
         track_intervals = diarization["tracks"][track]
-        planned = plan_transcription_intervals(track_intervals)
+        planned = (plan_single_speaker_intervals(track_intervals)
+                   if track == "remote" and speakers == 1 else plan_transcription_intervals(track_intervals))
         if track == "remote" and speakers > 0:
             if "refined_remote" not in diarization:
                 refined, report = _refine_remote_speakers(audio, track_intervals, speakers, config, progress_callback)
