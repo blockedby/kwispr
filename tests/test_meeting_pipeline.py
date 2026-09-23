@@ -272,7 +272,7 @@ class MeetingPipelineTest(unittest.TestCase):
             document = pipeline.read_json(root / "transcript.json", {})
             self.assertEqual(document["diarization_report"], report)
             remote = next(row for row in document["utterances"] if row["track"] == "remote")
-            self.assertEqual(remote["speaker_assignment"], "uncertain")
+            self.assertEqual(remote["source_intervals"][0]["speaker_assignment"], "uncertain")
             self.assertEqual(remote["text"], "Сохранённая речь")
             self.assertIn("не удалось надёжно подтвердить", (root / "transcript.md").read_text())
 

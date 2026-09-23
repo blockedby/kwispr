@@ -17,7 +17,7 @@ import wave
 from pathlib import Path
 from .config import allowed_whisper_languages, meeting_language, runtime_dir
 
-PIPELINE_VERSION = 4
+PIPELINE_VERSION = 5
 SHORT_TURN_SECONDS = 4.0
 MODEL_FILES = {
     "segmentation.onnx": (5992913, "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"),
@@ -183,6 +183,26 @@ def _slice_transcription_interval(interval, start, end):
         result["source_intervals"] = sources
         result["speakers"] = sorted({speaker for source in sources for speaker in source["speakers"]})
         result["speaker_grouped"] = len(sources) > 1 and len(result["speakers"]) > 1
+    return result
+
+
+def assign_transcription_speakers(planned, identities):
+    """Annotate acoustic phrases without cutting them at uncertain identities.
+
+    Speaker refinement may split a native phrase into short confident/unknown
+    ranges. Those are useful annotations, not safe boundaries for decoding
+    words. Keep the planned audio spans and the exact refined identity ranges.
+    """
+    result = []
+    for interval in planned:
+        sources = [{**row, "start": max(interval["start"], row["start"]),
+                    "end": min(interval["end"], row["end"])}
+                   for row in identities if row["end"] > interval["start"] and row["start"] < interval["end"]]
+        if not sources:
+            raise RuntimeError("Speaker refinement lost a speech interval")
+        speakers = sorted({speaker for row in sources for speaker in row["speakers"]})
+        result.append({"start": interval["start"], "end": interval["end"], "speakers": speakers,
+                       "speaker_grouped": len(speakers) > 1, "source_intervals": sources})
     return result
 
 
@@ -411,13 +431,14 @@ def process_session(session_dir, config, progress_callback=None):
             diarization["tracks"][track] = speech_intervals(segments, duration, track == "microphone")
             atomic_json(diarization_path, diarization)
         track_intervals = diarization["tracks"][track]
+        planned = plan_transcription_intervals(track_intervals)
         if track == "remote" and speakers > 0:
             if "refined_remote" not in diarization:
                 refined, report = _refine_remote_speakers(audio, track_intervals, speakers, config, progress_callback)
                 diarization.update(refined_remote=refined, refinement_report=report)
                 atomic_json(diarization_path, diarization)
-            track_intervals = diarization["refined_remote"]
-        intervals = split_intervals(plan_transcription_intervals(track_intervals), audio)
+            planned = assign_transcription_speakers(planned, diarization["refined_remote"])
+        intervals = split_intervals(planned, audio)
         explicit_language = meeting_language(config, track)
         fallback_language = ""
         detected_languages = []

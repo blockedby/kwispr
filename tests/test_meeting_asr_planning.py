@@ -16,6 +16,28 @@ def span(start, end, *speakers):
 
 
 class MeetingAsrPlanningTests(unittest.TestCase):
+    def test_refinement_annotations_do_not_break_a_grouped_acoustic_phrase(self):
+        native = [span(0, 2, "a"), span(2, 2.3, "a", "b"), span(2.3, 5, "a")]
+        refined = [span(0, 1.9, "speaker_01"), span(1.9, 2, "speaker_unknown"),
+                   span(2, 2.3, "speaker_unknown"), span(2.3, 2.4, "speaker_unknown"),
+                   span(2.4, 5, "speaker_01")]
+        before = copy.deepcopy(refined)
+        planned = pipeline.assign_transcription_speakers(pipeline.plan_transcription_intervals(native), refined)
+        self.assertEqual(len(planned), 1)
+        self.assertEqual((planned[0]["start"], planned[0]["end"]), (0, 5))
+        self.assertEqual(planned[0]["source_intervals"], refined)
+        self.assertEqual(planned[0]["speakers"], ["speaker_01", "speaker_unknown"])
+        self.assertEqual(refined, before)
+
+    def test_identity_overlay_clips_shared_range_to_each_acoustic_phrase(self):
+        planned = [span(0, 2, "native_a"), span(3, 5, "native_b")]
+        identities = [span(0, 2, "speaker_01"), span(3, 4, "speaker_02"), span(4, 5, "speaker_unknown")]
+        result = pipeline.assign_transcription_speakers(planned, identities)
+        self.assertEqual([r["source_intervals"] for r in result], [identities[:1], identities[1:]])
+        self.assertFalse(result[0]["speaker_grouped"])
+        self.assertTrue(result[1]["speaker_grouped"])
+        self.assertEqual(pipeline._slice_transcription_interval(result[1], 4, 5)["speakers"], ["speaker_unknown"])
+
     def test_short_uncertain_identity_keeps_context_and_exact_unknown_span(self):
         sources = [span(0, 2, "speaker_01"), span(2, 2.3, "speaker_unknown"), span(2.3, 4, "speaker_01")]
         planned = pipeline.plan_transcription_intervals(sources)
