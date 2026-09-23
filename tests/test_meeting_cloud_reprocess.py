@@ -136,6 +136,88 @@ class CloudReprocessTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 cloud.main(self.args("--execute"))
 
+    def test_continue_skips_unknown_and_processes_later_batches_and_session(self):
+        wav(self.session / "microphone.wav", 17)
+        wav(self.session / "remote.wav", 4)
+        second = self.root / "second-meeting"
+        second.mkdir()
+        (second / "session.json").write_text('{"title":"Second"}')
+        wav(second / "microphone.wav", 4)
+        wav(second / "remote.wav", 4)
+        argv = ["--session", str(self.session), "--session", str(second),
+                "--output-root", str(self.output), "--plan", str(self.plan),
+                "--key-file", str(self.key), "--execute", "--continue-on-error"]
+        count = 0
+        def response(*args, **kwargs):
+            nonlocal count
+            count += 1
+            if count == 1:
+                raise RuntimeError("OpenRouter returned HTTP 429; no automatic retry")
+            return "fixture transcript", "stop", {"cost": 0.001}, None
+        with mock.patch.object(cloud, "WINDOW", 4), \
+             mock.patch.object(cloud.benchmark, "_request", side_effect=response) as request:
+            with self.assertRaises(SystemExit):
+                cloud.main(argv)
+            self.assertEqual(request.call_count, 8)
+            with mock.patch.object(cloud.benchmark, "_request", side_effect=AssertionError("charged again")):
+                with self.assertRaises(SystemExit):
+                    cloud.main(argv)
+        outputs = [json.loads(path.read_text()) for path in self.output.glob("*/transcript.json")]
+        self.assertEqual(sorted(doc["complete"] for doc in outputs), [False, True])
+        self.assertEqual(sum(row["incomplete"] for doc in outputs for row in doc["utterances"]), 1)
+        markers = list(self.output.glob("*/results/*.attempt"))
+        self.assertEqual(len(markers), 1)
+        diagnostic = markers[0].with_suffix(".diagnostic")
+        self.assertEqual(json.loads(diagnostic.read_text()),
+                         {"exception_class": "RuntimeError", "http_status": 429, "timeout": False})
+        self.assertNotIn("fixture-secret", diagnostic.read_text())
+        self.assertNotIn("OpenRouter returned", diagnostic.read_text())
+        self.assertEqual(len(list(self.output.glob("*/results/*.json"))), 7)
+
+    def test_continue_after_incomplete_response_and_respect_unknown_reserve(self):
+        wav(self.session / "microphone.wav", 12)
+        wav(self.session / "remote.wav", 0)
+        answers = iter([RuntimeError("OpenRouter request failed or redirected; no automatic retry"),
+                        ("partial", "length", {"cost": 0.01}, None)])
+        def response(*args, **kwargs):
+            value = next(answers)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        with mock.patch.object(cloud, "WINDOW", 4), \
+             mock.patch.object(cloud.benchmark, "_request", side_effect=response) as request:
+            with self.assertRaises(SystemExit):
+                cloud.main(self.args("--execute", "--continue-on-error", "--budget-usd", "0.11"))
+            self.assertEqual(request.call_count, 2)
+        output = next(self.output.iterdir())
+        document = json.loads((output / "transcript.json").read_text())
+        self.assertFalse(document["complete"])
+        self.assertTrue(all(row["incomplete"] for row in document["utterances"]))
+        self.assertEqual(len(list((output / "results").glob("*.attempt"))), 1)
+        self.assertEqual(len(list((output / "results").glob("*.json"))), 1)
+
+    def test_existing_unknown_reserve_limits_other_session_before_http(self):
+        wav(self.session / "microphone.wav", 2)
+        wav(self.session / "remote.wav", 0)
+        second = self.root / "second-meeting"
+        second.mkdir()
+        (second / "session.json").write_text('{"title":"Second"}')
+        wav(second / "microphone.wav", 2)
+        wav(second / "remote.wav", 0)
+        output, _, _, items = cloud._session_items(self.session, self.output, cloud._plan(self.plan))
+        (output / "results").mkdir(parents=True)
+        cloud.benchmark._private_json(cloud._marker_path(output, items[0]), {"identity": items[0]["identity"]})
+        with mock.patch.object(cloud.benchmark, "_request", side_effect=AssertionError("budget failed")):
+            with self.assertRaises(SystemExit):
+                cloud.main(["--session", str(self.session), "--session", str(second),
+                            "--output-root", str(self.output), "--plan", str(self.plan),
+                            "--key-file", str(self.key), "--execute", "--continue-on-error",
+                            "--budget-usd", "0.09"])
+        docs = [json.loads(path.read_text()) for path in self.output.glob("*/transcript.json")]
+        self.assertEqual(len(docs), 2)
+        self.assertTrue(all(not doc["complete"] for doc in docs))
+        self.assertFalse(list(self.output.glob("*/results/*.json")))
+
 
 if __name__ == "__main__":
     unittest.main()

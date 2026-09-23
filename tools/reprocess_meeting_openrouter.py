@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import sys
 import urllib.request
+import urllib.error
 import uuid
 import wave
 
@@ -27,6 +28,7 @@ RATE = 16000
 WINDOW = 45 * RATE
 RESERVE = 0.05
 TRACKS = (("microphone", "self", "Я"), ("remote", "speaker_01", "Собеседник 1"))
+UNKNOWN = object()
 
 
 def _sha_file(path):
@@ -129,10 +131,28 @@ def _marker_path(output, item):
     return output / "results" / (item["identity"] + ".attempt")
 
 
-def _cached(output, item, plan):
+def _diagnostic_path(output, item):
+    return output / "results" / (item["identity"] + ".diagnostic")
+
+
+def _safe_diagnostic(error):
+    status = error.code if isinstance(error, urllib.error.HTTPError) else None
+    # The shared request helper converts HTTPError to this fixed, sanitized text.
+    if status is None and type(error) is RuntimeError:
+        match = re.fullmatch(r"OpenRouter returned HTTP ([0-9]{3}); no automatic retry", str(error))
+        if match:
+            status = int(match.group(1))
+    reason = error.reason if isinstance(error, urllib.error.URLError) else None
+    return {"exception_class": type(error).__name__, "http_status": status,
+            "timeout": isinstance(error, TimeoutError) or isinstance(reason, TimeoutError)}
+
+
+def _cached(output, item, plan, continue_on_error=False):
     path, marker = _result_path(output, item), _marker_path(output, item)
     if not path.exists():
         if marker.exists():
+            if continue_on_error:
+                return UNKNOWN
             raise RuntimeError("Unresolved attempt marker; request outcome unknown")
         return None
     result = json.loads(path.read_text(encoding="utf-8"))
@@ -147,20 +167,24 @@ def _cached(output, item, plan):
 def _send(output, item, plan, key):
     marker = _marker_path(output, item)
     benchmark._private_json(marker, {"identity": item["identity"], "chunk_id": item["chunk_id"]})
-    raw = _chunk_bytes(Path(item["source_path"]), item["first_frame"], item["last_frame"])
-    if hashlib.sha256(raw).hexdigest() != item["chunk_sha256"]:
-        raise RuntimeError("Source changed after planning")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), benchmark.NoRedirect())
-    text, finish, usage, generation = benchmark._request(
-        opener, key, "chat", plan["model"], raw, plan["max_output_tokens"], plan["reasoning_effort"])
-    result = {"identity": item["identity"], "item": item, "plan": plan, "text": text,
-              "finish_reason": finish, "incomplete": finish != "stop", "usage": usage,
-              "generation_id": generation}
-    benchmark._atomic_json(_result_path(output, item), result)
-    marker.unlink()
-    benchmark._sync_directory(marker.parent)
-    benchmark._cost(usage)
-    return result
+    try:
+        raw = _chunk_bytes(Path(item["source_path"]), item["first_frame"], item["last_frame"])
+        if hashlib.sha256(raw).hexdigest() != item["chunk_sha256"]:
+            raise RuntimeError("Source changed after planning")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), benchmark.NoRedirect())
+        text, finish, usage, generation = benchmark._request(
+            opener, key, "chat", plan["model"], raw, plan["max_output_tokens"], plan["reasoning_effort"])
+        result = {"identity": item["identity"], "item": item, "plan": plan, "text": text,
+                  "finish_reason": finish, "incomplete": finish != "stop", "usage": usage,
+                  "generation_id": generation}
+        benchmark._atomic_json(_result_path(output, item), result)
+        marker.unlink()
+        benchmark._sync_directory(marker.parent)
+        benchmark._cost(usage)
+        return result
+    except Exception as error:
+        benchmark._atomic_json(_diagnostic_path(output, item), _safe_diagnostic(error))
+        raise
 
 
 def _private_text(path, content):
@@ -222,33 +246,39 @@ def run(args):
         return 0
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     spent = 0.0
+    unknown_reserved = 0.0
     inventory = []
     for output, metadata, sources, items in prepared:
         output.mkdir(mode=0o700, exist_ok=True)
         (output / "results").mkdir(mode=0o700, exist_ok=True)
         results = {}
         pending = []
+        unknown = 0
         for item in items:
-            cached = _cached(output, item, plan)
+            cached = _cached(output, item, plan, args.continue_on_error)
             if cached is None:
                 pending.append(item)
+            elif cached is UNKNOWN:
+                unknown += 1
+                unknown_reserved += RESERVE
             else:
                 results[item["identity"]] = cached
                 spent += benchmark._cost(cached["usage"])
-        inventory.append((output, metadata, sources, items, results, pending))
-    if spent >= args.budget_usd:
+        inventory.append((output, metadata, sources, items, results, pending, unknown))
+    if spent >= args.budget_usd and not args.continue_on_error:
         raise RuntimeError("Cached usage reaches soft budget")
     key = benchmark.read_key_file(args.key_file)[0] if args.key_file else os.environ.get("OPENROUTER_API_KEY", "")
-    if any(pending for _, _, _, _, _, pending in inventory) and not key:
+    if any(pending for _, _, _, _, _, pending, _ in inventory) and not key:
         raise RuntimeError("OpenRouter key is required for --execute")
-    for output, metadata, sources, items, results, pending in inventory:
+    any_incomplete = False
+    for output, metadata, sources, items, results, pending, unknown in inventory:
         for track in sources.values():
             if _sha_file(Path(track["path"])) != track["sha256"]:
                 raise RuntimeError("Source changed after planning")
         with ThreadPoolExecutor(max_workers=4) as pool:
             while pending:
                 count = min(4, len(pending))
-                while count and spent + RESERVE * count >= args.budget_usd:
+                while count and spent + unknown_reserved + RESERVE * count >= args.budget_usd:
                     count -= 1
                 if not count:
                     break
@@ -263,18 +293,24 @@ def run(args):
                         if result["incomplete"]:
                             failure = "Incomplete model response saved; no automatic retry"
                     except Exception:
+                        unknown += 1
+                        unknown_reserved += RESERVE
                         failure = "Request outcome requires inspection; no automatic retry"
-                if failure:
+                if failure and not args.continue_on_error:
                     _publish(output, metadata, sources, items, results)
                     raise RuntimeError(failure)
         complete = _publish(output, metadata, sources, items, results)
+        any_incomplete |= not complete
         print(json.dumps({"session_id": output.name, "chunks": len(items),
                           "completed": sum(not row["incomplete"] for row in results.values()),
-                          "complete": complete, "spent_usd": round(spent, 6)}, sort_keys=True))
-        if not complete:
+                          "complete": complete, "unknown_attempts": unknown,
+                          "spent_usd": round(spent, 6)}, sort_keys=True))
+        if not complete and not args.continue_on_error:
             if any(result["incomplete"] for result in results.values()):
                 raise RuntimeError("Cached incomplete response retained; no automatic retry")
             raise RuntimeError("Soft budget stopped before all windows were requested")
+    if any_incomplete:
+        raise RuntimeError("One or more session transcripts are incomplete; inspect attempt markers and diagnostics")
     return 0
 
 
@@ -285,6 +321,8 @@ def main(argv=None):
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--key-file", type=Path)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--continue-on-error", action="store_true",
+                        help="Skip unknown attempts and continue other windows; exit nonzero if incomplete")
     parser.add_argument("--budget-usd", type=float, default=1.5)
     args = parser.parse_args(argv)
     try:
