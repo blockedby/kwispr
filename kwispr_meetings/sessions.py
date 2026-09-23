@@ -276,7 +276,8 @@ def stop() -> dict[str, Any]:
         return public_status(session)
 
 
-def retry(directory: Path, config: dict[str, str]) -> dict[str, Any]:
+def retry(directory: Path, config: dict[str, str], speakers: int | None = None) -> dict[str, Any]:
+    count = speaker_count(speakers) if speakers is not None else None
     ready(config)
     directory = directory.expanduser().resolve()
     with control_lock() as root:
@@ -289,6 +290,8 @@ def retry(directory: Path, config: dict[str, str]) -> dict[str, Any]:
         for track in ("microphone.wav", "remote.wav"):
             if not (directory / track).is_file() or (directory / track).stat().st_size <= 44:
                 raise SessionError(f"The meeting does not have a usable {track}; recorded files were kept.")
+        if count is not None:
+            session["speakers"] = count
         session.update(token=uuid.uuid4().hex, session_dir=str(directory), state="processing",
                        message="Preparing transcription…", updated_at=now(), stop_requested=False)
         atomic_json(directory / "session.json", session)
@@ -437,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
     capture.add_argument("--title", default="")
     process = sub.add_parser("process")
     process.add_argument("session_dir", type=Path)
+    process.add_argument("--speakers", type=int)
     process.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     internal = sub.add_parser("_worker", help=argparse.SUPPRESS)
     internal.add_argument("session_dir", type=Path)
@@ -455,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "start":
             result = start(load_config(), args.mic, args.monitor, args.output_dir, args.speakers, args.title)
         else:
-            result = retry(args.session_dir, load_config())
+            result = retry(args.session_dir, load_config(), args.speakers)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except (SessionError, ConfigError, OSError, RuntimeError) as error:

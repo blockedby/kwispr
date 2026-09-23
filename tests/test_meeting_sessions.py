@@ -146,15 +146,22 @@ class DetachedMeetingTests(unittest.TestCase):
 
     def test_processing_failure_retains_audio_and_retry_works(self):
         self.env['FAIL_PIPELINE']='1'
-        state = self.run_cli('start')
+        state = self.run_cli('start', '--speakers', '2')
         self.run_cli('stop')
         failed = self.wait_state({'failed'})
         self.assertIn('Deliberate processing failure',failed['message'])
         directory = Path(state['session_dir'])
         before = {name:(directory/name).read_bytes() for name in ['microphone.wav','remote.wav']}
+        saved_session = (directory/'session.json').read_bytes()
+        for count in ('-1', '17'):
+            self.assertIn('Speaker count', self.run_cli('process', str(directory), '--speakers', count, ok=False)['message'])
+            self.assertEqual((directory/'session.json').read_bytes(), saved_session)
+            self.assertEqual(before, {name:(directory/name).read_bytes() for name in before})
         del self.env['FAIL_PIPELINE']
-        self.assertEqual(self.run_cli('process',str(directory))['state'],'processing')
+        self.assertEqual(self.run_cli('process',str(directory))['speakers'], 2)
         self.wait_state({'complete'})
+        self.assertEqual(self.run_cli('process',str(directory),'--speakers','3')['speakers'], 3)
+        self.assertEqual(self.wait_state({'complete'})['speakers'], 3)
         self.assertEqual(before,{name:(directory/name).read_bytes() for name in before})
 
     def test_start_failure_and_missing_setup_never_capture(self):

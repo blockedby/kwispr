@@ -57,6 +57,7 @@ private:
     QString m_error;
     QString m_statusError;
     QString m_sessionDir;
+    QString m_speakersSessionDir;
     QString m_transcriptPath;
     QString m_startedAt;
     QString m_activeMic;
