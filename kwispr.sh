@@ -256,6 +256,33 @@ stop_recording() {
 # Transcription
 # -----------------------------------------------------------------------------
 
+trim_known_subtitle_credit_tail() {
+  local text="$1"
+  local suffix_pattern='Субтитры[[:blank:]]+сделал[[:blank:]]+(DimaTorzok|Дима[[:blank:]]+Торжок)[.!?,;:…]*[[:space:]]*$'
+  local suffix prefix trimmed_prefix separator
+  local restore_nocase=0
+
+  if ! shopt -q nocasematch; then
+    shopt -s nocasematch
+    restore_nocase=1
+  fi
+  if [[ "$text" =~ $suffix_pattern ]]; then
+    suffix="${BASH_REMATCH[0]}"
+    prefix="${text:0:${#text}-${#suffix}}"
+    trimmed_prefix="${prefix%"${prefix##*[![:space:]]}"}"
+    separator="${prefix:${#trimmed_prefix}}"
+    # The marker must be a standalone final sentence/line. This leaves quoted
+    # or discussed mentions, generic subtitle references, and following speech.
+    if [[ -z "$trimmed_prefix" || "$separator" == *$'\n'* || "$separator" == *$'\r'* || "$trimmed_prefix" =~ [.!?…]$ ]]; then
+      text="$trimmed_prefix"
+    fi
+  fi
+  if (( restore_nocase )); then
+    shopt -u nocasematch
+  fi
+  printf '%s' "$text"
+}
+
 transcribe() {
   local wav="$1"
   local txt="${wav%.wav}.txt"
@@ -374,9 +401,10 @@ transcribe() {
   esac
   rm -f "$response"
 
-  # Keep the model's text intact. Words such as "subtitles" and closing
-  # phrases can be real speech; a text-only filter cannot distinguish them
-  # from hallucinations and must never delete the rest of a dictation.
+  text="$(trim_known_subtitle_credit_tail "$text")"
+
+  # Keep model text intact apart from the exact known terminal credit above.
+  # Broader subtitle/closing-phrase filters can delete real speech and its tail.
   if [[ -z "${text//[[:space:]]/}" ]]; then
     # Local VAD servers may intentionally return an empty transcript for
     # silence/no-speech audio. Treat that as a clean skip instead of an API
