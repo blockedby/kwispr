@@ -308,7 +308,8 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     connect(m_stopButton, &QPushButton::clicked, this, [this] { runCommand({QStringLiteral("stop")}, QStringLiteral("stopping")); });
     connect(m_retryButton, &QPushButton::clicked, this, [this] {
         if (saveChoices(true)) {
-            runCommand({QStringLiteral("process"), m_sessionDir}, QStringLiteral("processing"));
+            runCommand({QStringLiteral("process"), m_sessionDir,
+                        QStringLiteral("--speakers"), QString::number(m_speakersSpin->value())}, QStringLiteral("processing"));
         }
     });
     connect(m_refreshButton, &QPushButton::clicked, this, &MeetingDialog::loadSources);
@@ -545,6 +546,16 @@ void MeetingDialog::applyStatus(const QJsonObject &status)
     m_state = state;
     m_message = status.value(QStringLiteral("message")).toString();
     m_sessionDir = status.value(QStringLiteral("session_dir")).toString();
+    if (!m_sessionDir.isEmpty() && m_speakersSessionDir != m_sessionDir) {
+        m_speakersSessionDir = m_sessionDir;
+        const QJsonValue savedSpeakers = status.value(QStringLiteral("speakers"));
+        if (savedSpeakers.isDouble()) {
+            const int count = savedSpeakers.toInt(-1);
+            if (count >= m_speakersSpin->minimum() && count <= m_speakersSpin->maximum()) {
+                m_speakersSpin->setValue(count);
+            }
+        }
+    }
     m_transcriptPath = status.value(QStringLiteral("transcript_path")).toString();
     m_startedAt = status.value(QStringLiteral("started_at")).toString();
     m_activeMic = status.value(QStringLiteral("mic_source")).toString();

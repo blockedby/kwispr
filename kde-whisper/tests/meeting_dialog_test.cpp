@@ -111,13 +111,15 @@ print('Fixture meeting models ready', flush=True)
         return result;
     }
 
-    bool setState(const QString &state, const QString &message = QString())
+    bool setState(const QString &state, const QString &message = QString(), int speakers = -1)
     {
-        return writeFile(dir.filePath(QStringLiteral("state.json")), QJsonDocument(QJsonObject{
+        QJsonObject saved{
             {QStringLiteral("state"), state},
             {QStringLiteral("session_dir"), dir.filePath(QStringLiteral("saved meeting"))},
             {QStringLiteral("message"), message},
-        }).toJson());
+        };
+        if (speakers >= 0) saved.insert(QStringLiteral("speakers"), speakers);
+        return writeFile(dir.filePath(QStringLiteral("state.json")), QJsonDocument(saved).toJson());
     }
 };
 
@@ -140,6 +142,7 @@ private slots:
     void longSelectedDeviceNamesRemainVisible();
     void meetingLanguagesAreIndependentAndPersistOnStart();
     void retryPersistsLanguageCorrectionsWithoutChangingDeviceChoices();
+    void retryKeepsEditedSpeakerCountAcrossPolling();
     void invalidLanguageDoesNotStartRecording();
     void openSavedFolderUsesInjectedFileManagerAndReportsErrors();
     void disappearingWorkerDoesNotTrapWindowInStartingState();
@@ -272,7 +275,7 @@ void MeetingDialogTest::failedTranscriptionCanRetry()
     QVERIFY(control<QLabel>(dialog, "meetingMessage")->text().contains(QStringLiteral("Missing meeting model")));
     retry->click();
     QTRY_COMPARE(control<QLabel>(dialog, "meetingStatus")->text(), QStringLiteral("Transcript saved"));
-    QCOMPARE(fixture.calls(QStringLiteral("process")).first(), QJsonArray({QStringLiteral("process"), fixture.dir.filePath(QStringLiteral("saved meeting"))}));
+    QCOMPARE(fixture.calls(QStringLiteral("process")).first(), QJsonArray({QStringLiteral("process"), fixture.dir.filePath(QStringLiteral("saved meeting")), QStringLiteral("--speakers"), QStringLiteral("0")}));
     QVERIFY(control<QPushButton>(dialog, "meetingOpenFolder")->isEnabled());
     QVERIFY(!retry->isEnabled());
 }
@@ -448,11 +451,14 @@ void MeetingDialogTest::retryPersistsLanguageCorrectionsWithoutChangingDeviceCho
 {
     WorkerFixture fixture;
     QVERIFY(fixture.create());
-    QVERIFY(fixture.setState(QStringLiteral("failed")));
-    QVERIFY(writeFile(fixture.configPath(), "KWISPR_LANGUAGE=ru\nKWISPR_MEETING_MIC_SOURCE=unplugged-microphone\nKWISPR_MEETING_MIC_LANGUAGE=ru\nKWISPR_MEETING_REMOTE_LANGUAGE=en\n"));
+    QVERIFY(fixture.setState(QStringLiteral("failed"), QString(), 4));
+    QVERIFY(writeFile(fixture.configPath(), "KWISPR_LANGUAGE=ru\nKWISPR_MEETING_MIC_SOURCE=unplugged-microphone\nKWISPR_MEETING_MIC_LANGUAGE=ru\nKWISPR_MEETING_REMOTE_LANGUAGE=en\nKWISPR_MEETING_SPEAKERS=1\n"));
     MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
     dialog.show();
     QTRY_VERIFY(control<QPushButton>(dialog, "meetingRetry")->isEnabled());
+    auto *speakers = control<QSpinBox>(dialog, "meetingSpeakers");
+    QCOMPARE(speakers->value(), 4);
+    speakers->setValue(2);
     auto *micLanguage = control<QComboBox>(dialog, "meetingMicrophoneLanguage");
     auto *remoteLanguage = control<QComboBox>(dialog, "meetingRemoteLanguage");
     micLanguage->setEditText(QStringLiteral(" DE "));
@@ -465,10 +471,28 @@ void MeetingDialogTest::retryPersistsLanguageCorrectionsWithoutChangingDeviceCho
     QVERIFY(env.contains(QStringLiteral("KWISPR_MEETING_REMOTE_LANGUAGE")));
     QVERIFY(env.value(QStringLiteral("KWISPR_MEETING_REMOTE_LANGUAGE")).isEmpty());
     QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_MIC_SOURCE")), QStringLiteral("unplugged-microphone"));
+    QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_SPEAKERS")), QStringLiteral("1"));
     QCOMPARE(env.value(QStringLiteral("KWISPR_LANGUAGE")), QStringLiteral("ru"));
+    QCOMPARE(fixture.calls(QStringLiteral("process")).first(), QJsonArray({QStringLiteral("process"), fixture.dir.filePath(QStringLiteral("saved meeting")), QStringLiteral("--speakers"), QStringLiteral("2")}));
     MeetingDialog reopened(fixture.dir.path(), fixture.configPath());
     QCOMPARE(control<QComboBox>(reopened, "meetingMicrophoneLanguage")->currentText(), QStringLiteral("de"));
     QCOMPARE(control<QComboBox>(reopened, "meetingRemoteLanguage")->currentText(), QStringLiteral("Auto"));
+}
+
+void MeetingDialogTest::retryKeepsEditedSpeakerCountAcrossPolling()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    QVERIFY(fixture.setState(QStringLiteral("failed"), QString(), 3));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    auto *speakers = control<QSpinBox>(dialog, "meetingSpeakers");
+    QTRY_COMPARE(speakers->value(), 3);
+    QVERIFY(speakers->isEnabled());
+    speakers->setValue(5);
+    QVERIFY(fixture.setState(QStringLiteral("failed"), QStringLiteral("Updated saved meeting status"), 1));
+    QTRY_VERIFY(control<QLabel>(dialog, "meetingMessage")->text().contains(QStringLiteral("Updated saved meeting status")));
+    QCOMPARE(speakers->value(), 5);
 }
 
 void MeetingDialogTest::invalidLanguageDoesNotStartRecording()
