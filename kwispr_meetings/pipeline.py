@@ -17,7 +17,7 @@ import wave
 from pathlib import Path
 from .config import allowed_whisper_languages, meeting_language, runtime_dir
 
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3
 SHORT_TURN_SECONDS = 4.0
 MODEL_FILES = {
     "segmentation.onnx": (5992913, "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"),
@@ -141,6 +141,48 @@ def speech_intervals(segments, duration, own_microphone=False):
     return rows
 
 
+def plan_transcription_intervals(intervals):
+    """Keep a continuing voice around a subsecond overlap in one ASR request.
+
+    Diarization still describes the exact speaker spans. A -> A+B -> A is a
+    single acoustic phrase when the overlap is shorter than a second; decoding
+    each boundary independently can feed Whisper only a fraction of a syllable.
+    A real A -> B change, a longer overlap, or a pause remains separate.
+    """
+    result = []
+    index = 0
+    while index < len(intervals):
+        current = dict(intervals[index])
+        anchor = set(current["speakers"])
+        while len(anchor) == 1 and index + 2 < len(intervals):
+            bridge, following = intervals[index + 1:index + 3]
+            if not (anchor < set(bridge["speakers"]) and set(following["speakers"]) == anchor
+                    and 0 < bridge["end"] - bridge["start"] < 1.0
+                    and 0 <= bridge["start"] - current["end"] <= 0.4
+                    and 0 <= following["start"] - bridge["end"] <= 0.4):
+                break
+            sources = current.get("source_intervals", [dict(current)])
+            sources = [*sources, dict(bridge), dict(following)]
+            current = {"start": current["start"], "end": following["end"],
+                       "speakers": sorted({speaker for source in sources for speaker in source["speakers"]}),
+                       "speaker_grouped": True, "source_intervals": sources}
+            index += 2
+        result.append(current)
+        index += 1
+    return result
+
+
+def _slice_transcription_interval(interval, start, end):
+    result = {**interval, "start": start, "end": end}
+    if "source_intervals" in interval:
+        sources = [{**source, "start": max(start, source["start"]), "end": min(end, source["end"])}
+                   for source in interval["source_intervals"] if source["end"] > start and source["start"] < end]
+        result["source_intervals"] = sources
+        result["speakers"] = sorted({speaker for source in sources for speaker in source["speakers"]})
+        result["speaker_grouped"] = len(sources) > 1 and len(result["speakers"]) > 1
+    return result
+
+
 def split_intervals(intervals, audio, maximum=45.0):
     """Bound inference jobs and split long turns near a quiet 100 ms frame."""
     import numpy as np
@@ -151,9 +193,9 @@ def split_intervals(intervals, audio, maximum=45.0):
             # Each sample remains assigned exactly once; don't drop the gap.
             candidates = np.arange(start + maximum - 5, start + maximum, 0.1)
             split = min(candidates, key=lambda t: float(np.mean(audio[int(t * 16000):int((t + .1) * 16000)] ** 2)))
-            result.append({**interval, "start": start, "end": float(split)})
+            result.append(_slice_transcription_interval(interval, start, float(split)))
             start = float(split)
-        result.append({**interval, "start": start, "end": end})
+        result.append(_slice_transcription_interval(interval, start, end))
     return result
 
 
@@ -295,7 +337,8 @@ def write_outputs(session_dir, session, rows, names=None, languages=None, langua
     for row in rows:
         for speaker in row["speakers"]:
             if speaker != "self":
-                labels.setdefault(speaker, "Собеседник " + str(int(speaker.rsplit("_", 1)[1])))
+                label = "Собеседник (голос не определён)" if speaker == "speaker_unknown" else "Собеседник " + str(int(speaker.rsplit("_", 1)[1]))
+                labels.setdefault(speaker, label)
     labels.update({key: value.strip() for key, value in names.items() if key in labels and isinstance(value, str) and value.strip()})
     ordered = sorted(rows, key=lambda row: (row["start"], row["end"], row["track"]))
     document = {"schema_version": 1, "title": session.get("title") or "Звонок", "started_at": session.get("started_at"),
@@ -308,7 +351,7 @@ def write_outputs(session_dir, session, rows, names=None, languages=None, langua
     for row in ordered:
         label = " + ".join(labels[speaker] for speaker in row["speakers"])
         if len(row["speakers"]) > 1:
-            label += " (говорят одновременно)"
+            label += " (несколько голосов внутри фрагмента)" if row.get("speaker_grouped") else " (говорят одновременно)"
         lines += [f"**[{timestamp(row['start'])}–{timestamp(row['end'])}] {_markdown_literal(label)}**", "",
                   _markdown_literal(row["text"]) or "[Речь обнаружена, текст не распознан]", ""]
     if not ordered:
@@ -320,7 +363,8 @@ def write_outputs(session_dir, session, rows, names=None, languages=None, langua
         stream.write("\n".join(lines)); stream.flush(); os.fsync(stream.fileno())
     temporary.replace(path)
     return {"transcript_path": str(path), "transcript_json": str(session_dir / "transcript.json"),
-            "speaker_count": len(labels) - (1 if "self" in labels else 0)}
+            "speaker_count": sum(speaker not in {"self", "speaker_unknown"} for speaker in labels),
+            "has_unknown_speaker": "speaker_unknown" in labels}
 
 
 def process_session(session_dir, config, progress_callback=None):
@@ -354,7 +398,7 @@ def process_session(session_dir, config, progress_callback=None):
             segments = _diarize(audio, config, 1 if track == "microphone" else speakers, progress_callback)
             diarization["tracks"][track] = speech_intervals(segments, duration, track == "microphone")
             atomic_json(diarization_path, diarization)
-        intervals = split_intervals(diarization["tracks"][track], audio)
+        intervals = split_intervals(plan_transcription_intervals(diarization["tracks"][track]), audio)
         explicit_language = meeting_language(config, track)
         fallback_language = ""
         detected_languages = []
@@ -410,8 +454,14 @@ def process_session(session_dir, config, progress_callback=None):
             if detected and interval["end"] - interval["start"] >= SHORT_TURN_SECONDS:
                 fallback_language = detected
             language_info["short_turn_fallback"] = fallback_language
+            source_metadata = {}
+            if "source_intervals" in interval:
+                source_metadata = {"speaker_grouped": interval["speaker_grouped"],
+                                   "source_intervals": [{**source, "start": source["start"] + offset,
+                                                         "end": source["end"] + offset}
+                                                        for source in interval["source_intervals"]]}
             all_rows.append({"start": round(interval["start"] + offset, 3), "end": round(interval["end"] + offset, 3),
-                             "speakers": interval["speakers"], "track": track, **result})
+                             "speakers": interval["speakers"], "track": track, **result, **source_metadata})
         del audio
     _notify(progress_callback, "Saving transcript files…")
     return write_outputs(session_dir, session, all_rows, read_json(session_dir / "speaker-names.json", {}),
