@@ -1,5 +1,10 @@
 # Transcription reliability verification — 2026-09-22
 
+Update on September 23: the RU/EN follow-up below was installed, and the running
+server's health endpoint confirmed `whisper_allowed_languages`. The recording
+and recovery follow-up is documented in [long-meeting-verification.md](long-meeting-verification.md).
+The sections below retain the September 22 deployment history.
+
 ## Installed recording build
 
 Commit `5945f8f` was installed and pushed to `main`. It includes the dictation
