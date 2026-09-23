@@ -17,7 +17,7 @@ import wave
 from pathlib import Path
 from .config import allowed_whisper_languages, meeting_language, runtime_dir
 
-PIPELINE_VERSION = 3
+PIPELINE_VERSION = 4
 SHORT_TURN_SECONDS = 4.0
 MODEL_FILES = {
     "segmentation.onnx": (5992913, "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"),
@@ -147,7 +147,9 @@ def plan_transcription_intervals(intervals):
     Diarization still describes the exact speaker spans. A -> A+B -> A is a
     single acoustic phrase when the overlap is shorter than a second; decoding
     each boundary independently can feed Whisper only a fraction of a syllable.
-    A real A -> B change, a longer overlap, or a pause remains separate.
+    A subsecond unknown identity between the same confident voice also retains
+    context without assigning that unknown span. A real A -> B change, a longer
+    overlap, or a pause remains separate.
     """
     result = []
     index = 0
@@ -156,7 +158,8 @@ def plan_transcription_intervals(intervals):
         anchor = set(current["speakers"])
         while len(anchor) == 1 and index + 2 < len(intervals):
             bridge, following = intervals[index + 1:index + 3]
-            if not (anchor < set(bridge["speakers"]) and set(following["speakers"]) == anchor
+            uncertain_bridge = bridge["speakers"] == ["speaker_unknown"] and anchor != {"speaker_unknown"}
+            if not ((anchor < set(bridge["speakers"]) or uncertain_bridge) and set(following["speakers"]) == anchor
                     and 0 < bridge["end"] - bridge["start"] < 1.0
                     and 0 <= bridge["start"] - current["end"] <= 0.4
                     and 0 <= following["start"] - bridge["end"] <= 0.4):
@@ -330,7 +333,7 @@ def _markdown_literal(text):
     return re.sub(r"([\\`*_{}\[\]<>#!|])", r"\\\1", " ".join(str(text).split()))
 
 
-def write_outputs(session_dir, session, rows, names=None, languages=None, language_policy=None):
+def write_outputs(session_dir, session, rows, names=None, languages=None, language_policy=None, diarization_report=None):
     session_dir = Path(session_dir)
     names = names or {}
     labels = {"self": "Я"}
@@ -343,15 +346,24 @@ def write_outputs(session_dir, session, rows, names=None, languages=None, langua
     ordered = sorted(rows, key=lambda row: (row["start"], row["end"], row["track"]))
     document = {"schema_version": 1, "title": session.get("title") or "Звонок", "started_at": session.get("started_at"),
                 "speakers": labels, "utterances": ordered, "track_languages": languages or {},
-                "language_policy": language_policy or {}}
+                "language_policy": language_policy or {}, "diarization_report": diarization_report or {}}
     atomic_json(session_dir / "transcript.json", document)
     lines = ["# " + _markdown_literal(document["title"]), ""]
     if document["started_at"]:
         lines += ["Начало: " + _markdown_literal(document["started_at"]), ""]
+    report = document["diarization_report"]
+    if report.get("warnings"):
+        lines += ["Разделение голосов неуверенное: заданное число собеседников не удалось надёжно подтвердить. "
+                  "Номера обозначают различимые голосовые профили; спорные участки отмечены отдельно.", ""]
+    if report.get("unknown_seconds", 0) > 0:
+        lines += ["Часть речи сохранена с отметкой «голос не определён». Это не дополнительный собеседник.", ""]
     for row in ordered:
         label = " + ".join(labels[speaker] for speaker in row["speakers"])
         if len(row["speakers"]) > 1:
-            label += " (несколько голосов внутри фрагмента)" if row.get("speaker_grouped") else " (говорят одновременно)"
+            if "speaker_unknown" in row["speakers"]:
+                label += " (часть фрагмента без уверенного определения голоса)"
+            else:
+                label += " (несколько голосов внутри фрагмента)" if row.get("speaker_grouped") else " (говорят одновременно)"
         lines += [f"**[{timestamp(row['start'])}–{timestamp(row['end'])}] {_markdown_literal(label)}**", "",
                   _markdown_literal(row["text"]) or "[Речь обнаружена, текст не распознан]", ""]
     if not ordered:
@@ -398,7 +410,14 @@ def process_session(session_dir, config, progress_callback=None):
             segments = _diarize(audio, config, 1 if track == "microphone" else speakers, progress_callback)
             diarization["tracks"][track] = speech_intervals(segments, duration, track == "microphone")
             atomic_json(diarization_path, diarization)
-        intervals = split_intervals(plan_transcription_intervals(diarization["tracks"][track]), audio)
+        track_intervals = diarization["tracks"][track]
+        if track == "remote" and speakers > 0:
+            if "refined_remote" not in diarization:
+                refined, report = _refine_remote_speakers(audio, track_intervals, speakers, config, progress_callback)
+                diarization.update(refined_remote=refined, refinement_report=report)
+                atomic_json(diarization_path, diarization)
+            track_intervals = diarization["refined_remote"]
+        intervals = split_intervals(plan_transcription_intervals(track_intervals), audio)
         explicit_language = meeting_language(config, track)
         fallback_language = ""
         detected_languages = []
@@ -454,15 +473,20 @@ def process_session(session_dir, config, progress_callback=None):
             if detected and interval["end"] - interval["start"] >= SHORT_TURN_SECONDS:
                 fallback_language = detected
             language_info["short_turn_fallback"] = fallback_language
-            source_metadata = {}
+            source_metadata = {key: interval[key] for key in ("speaker_assignment", "source_speakers") if key in interval}
             if "source_intervals" in interval:
-                source_metadata = {"speaker_grouped": interval["speaker_grouped"],
+                source_metadata.update({"speaker_grouped": interval["speaker_grouped"],
                                    "source_intervals": [{**source, "start": source["start"] + offset,
                                                          "end": source["end"] + offset}
-                                                        for source in interval["source_intervals"]]}
+                                                        for source in interval["source_intervals"]]})
             all_rows.append({"start": round(interval["start"] + offset, 3), "end": round(interval["end"] + offset, 3),
                              "speakers": interval["speakers"], "track": track, **result, **source_metadata})
         del audio
     _notify(progress_callback, "Saving transcript files…")
     return write_outputs(session_dir, session, all_rows, read_json(session_dir / "speaker-names.json", {}),
-                         track_languages, config["_meeting_language_policy"])
+                         track_languages, config["_meeting_language_policy"], diarization.get("refinement_report"))
+
+
+def _refine_remote_speakers(audio, intervals, speakers, config, callback):
+    from .diarization import refine_known_speakers
+    return refine_known_speakers(audio, intervals, speakers, runtime_dir(config) / "models/embedding.onnx", callback)

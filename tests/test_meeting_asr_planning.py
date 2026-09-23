@@ -16,6 +16,15 @@ def span(start, end, *speakers):
 
 
 class MeetingAsrPlanningTests(unittest.TestCase):
+    def test_short_uncertain_identity_keeps_context_and_exact_unknown_span(self):
+        sources = [span(0, 2, "speaker_01"), span(2, 2.3, "speaker_unknown"), span(2.3, 4, "speaker_01")]
+        planned = pipeline.plan_transcription_intervals(sources)
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0]["source_intervals"], sources)
+        self.assertEqual(planned[0]["speakers"], ["speaker_01", "speaker_unknown"])
+        sources[-1]["speakers"] = ["speaker_02"]
+        self.assertEqual(pipeline.plan_transcription_intervals(sources), sources)
+
     def test_short_overlap_bridges_keep_exact_sources_and_continuing_voice(self):
         intervals = [span(0, 2, "speaker_01"), span(2, 2.3, "speaker_01", "speaker_02"),
                      span(2.3, 2.4, "speaker_01"), span(2.4, 2.8, "speaker_01", "speaker_03"),
@@ -76,7 +85,7 @@ class MeetingAsrPlanningTests(unittest.TestCase):
             root = Path(temporary)
             for name in ["microphone.wav", "remote.wav"]:
                 (root / name).write_bytes(b"source-audio")
-            pipeline.atomic_json(root / "session.json", {"speakers": 2, "remote_offset_seconds": 0.125})
+            pipeline.atomic_json(root / "session.json", {"speakers": 0, "remote_offset_seconds": 0.125})
             config = {"KWISPR_API_URL": "http://127.0.0.1:19650/v1/audio/transcriptions"}
             for context in [patch.object(pipeline, "require_ready"),
                             patch.object(pipeline, "_load_track", return_value=[0] * 80000),

@@ -223,6 +223,7 @@ class MeetingPipelineTest(unittest.TestCase):
             segments = [{"start": 0, "end": 2, "speaker": "speaker_01"}, {"start": 3, "end": 5, "speaker": "speaker_02"}]
             common = [patch.object(pipeline, "require_ready"), patch.object(pipeline, "_load_track", return_value=[0] * 160000),
                       patch.object(pipeline, "split_intervals", side_effect=lambda intervals, audio: intervals),
+                      patch.object(pipeline, "_refine_remote_speakers", side_effect=lambda audio, rows, *args: (rows, {})),
                       patch.object(pipeline, "_wav_slice", return_value=b"audio"), patch.object(pipeline.time, "sleep")]
             with ExitStack() as stack:
                 for item in common: stack.enter_context(item)
@@ -248,9 +249,42 @@ class MeetingPipelineTest(unittest.TestCase):
             for item in [patch.object(pipeline, "require_ready"), patch.object(pipeline, "_load_track", return_value=[0] * 800000),
                          patch.object(pipeline, "split_intervals", side_effect=lambda intervals, audio: intervals),
                          patch.object(pipeline, "_wav_slice", return_value=b"audio"), patch.object(pipeline.time, "sleep"),
+                         patch.object(pipeline, "_refine_remote_speakers", side_effect=lambda audio, rows, *args: (rows, {})),
                          patch.object(pipeline, "_diarize", side_effect=[remote, microphone])]:
                 stack.enter_context(item)
             yield root, config
+
+    def test_known_remote_count_refinement_resumes_and_warns_without_inventing_speaker(self):
+        segments = [{"start": 0, "end": 5, "speaker": "speaker_01"}]
+        refined = [{"start": 0, "end": 5, "speakers": ["speaker_unknown"], "speaker_assignment": "uncertain"}]
+        report = {"status": "uncertain", "requested_speakers": 2, "supported_profiles": 0,
+                  "unknown_seconds": 5, "warnings": ["Insufficient voice separation"]}
+        with self.processing_fixture(segments, segments) as (root, config):
+            with patch.object(pipeline, "_refine_remote_speakers", return_value=(refined, report)) as refine, \
+                    patch.object(pipeline, "_request_transcription", return_value={"text": "Сохранённая речь", "language": "ru"}) as request:
+                first = pipeline.process_session(root, config)
+                pipeline.process_session(root, config)
+            self.assertEqual(refine.call_count, 1)
+            self.assertEqual(refine.call_args.args[2], 2)
+            self.assertEqual(request.call_count, 2)
+            self.assertEqual(first["speaker_count"], 0)
+            self.assertTrue(first["has_unknown_speaker"])
+            document = pipeline.read_json(root / "transcript.json", {})
+            self.assertEqual(document["diarization_report"], report)
+            remote = next(row for row in document["utterances"] if row["track"] == "remote")
+            self.assertEqual(remote["speaker_assignment"], "uncertain")
+            self.assertEqual(remote["text"], "Сохранённая речь")
+            self.assertIn("не удалось надёжно подтвердить", (root / "transcript.md").read_text())
+
+    def test_auto_count_leaves_native_diarization_unchanged(self):
+        segments = [{"start": 0, "end": 5, "speaker": "speaker_03"}]
+        with self.processing_fixture(segments) as (root, config):
+            pipeline.atomic_json(root / "session.json", {"speakers": 0})
+            with patch.object(pipeline, "_refine_remote_speakers") as refine, \
+                    patch.object(pipeline, "_request_transcription", return_value={"text": "Речь"}):
+                pipeline.process_session(root, config)
+            refine.assert_not_called()
+            self.assertEqual(pipeline.read_json(root / "transcript.json", {})["utterances"][0]["speakers"], ["speaker_03"])
 
     def test_auto_tracks_follow_long_turn_language_switches_and_anchor_short_turns(self):
         segments = [{"start": start, "end": end, "speaker": "speaker_01"}
