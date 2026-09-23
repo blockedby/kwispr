@@ -139,17 +139,24 @@ def score(text, clip, incomplete=False):
             "cer": _distance(reference, candidate) / len(reference)}
 
 
-def _identity(mode, model, clip):
+def _identity(mode, model, clip, max_output_tokens=1024, reasoning_effort=None):
     fields = {"mode": mode, "model": model, "clip_id": clip["id"], "sha256": clip["sha256"].lower(),
               "prompt_variant": PROMPT_VARIANT if mode == "chat" else "none"}
+    # Keep the original cache key for default settings and for transcription.
+    if mode == "chat" and max_output_tokens != 1024:
+        fields["max_output_tokens"] = max_output_tokens
+    if mode == "chat" and reasoning_effort is not None:
+        fields["reasoning_effort"] = reasoning_effort
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
 
 
-def _request(opener, key, mode, model, raw):
+def _request(opener, key, mode, model, raw, max_output_tokens=1024, reasoning_effort=None):
     audio = {"data": base64.b64encode(raw).decode("ascii"), "format": "wav"}
     if mode == "chat":
-        payload = {"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": [
+        payload = {"model": model, "max_tokens": max_output_tokens, "messages": [{"role": "user", "content": [
             {"type": "text", "text": PROMPT}, {"type": "input_audio", "input_audio": audio}]}]}
+        if reasoning_effort is not None:
+            payload["reasoning"] = {"effort": reasoning_effort}
     else:
         payload = {"model": model, "input_audio": audio}
     request = urllib.request.Request(ENDPOINTS[mode], data=json.dumps(payload).encode(),
@@ -226,6 +233,10 @@ def main(argv=None):
     parser.add_argument("--mode", choices=ENDPOINTS, required=True)
     parser.add_argument("--key-file", type=Path)
     parser.add_argument("--model", action="append", help="OpenRouter model ID; repeat to compare models")
+    parser.add_argument("--max-output-tokens", type=int, default=1024,
+                        help="Chat max_tokens (default: 1024); changes the cache identity")
+    parser.add_argument("--reasoning-effort", choices=("minimal", "low", "medium", "high"),
+                        help="Optional chat reasoning effort; omitted by default and changes the cache identity")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--max-cost-usd", type=float, default=0.25,
                         help="Soft total for selected clips/models; check actual cost between requests, not a hard cap")
@@ -233,6 +244,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not math.isfinite(args.max_cost_usd) or args.max_cost_usd <= 0:
         parser.error("Soft budget must be finite and positive")
+    if not 1 <= args.max_output_tokens <= 32768:
+        parser.error("Chat max output tokens must be between 1 and 32768")
+    if args.mode != "chat" and (args.max_output_tokens != 1024 or args.reasoning_effort is not None):
+        parser.error("Output tokens and reasoning effort apply only to chat mode")
+    request_options = ({"max_output_tokens": args.max_output_tokens, "reasoning_effort": args.reasoning_effort}
+                       if args.mode == "chat" else {})
     clips, audio, seconds = load_manifest(args.manifest)
     file_key, file_models = read_key_file(args.key_file) if args.key_file else ("", [])
     models = list(dict.fromkeys(args.model or file_models))
@@ -241,7 +258,8 @@ def main(argv=None):
         parser.error("Specify valid provider/model IDs with --model or MODELS: entries")
     print(json.dumps({"execute": args.execute, "mode": args.mode, "clips": len(clips),
                       "audio_seconds_per_model": round(seconds, 3), "models": models,
-                      "maximum_requests": len(clips) * len(models), "soft_budget_usd": args.max_cost_usd}))
+                      "maximum_requests": len(clips) * len(models), "soft_budget_usd": args.max_cost_usd,
+                      "request_options": request_options}))
     if not args.execute:
         print("Dry run only: no audio sent and no network request.")
         return
@@ -250,7 +268,7 @@ def main(argv=None):
     spent, pending = 0.0, []
     for model in models:
         for clip in clips:
-            identity = _identity(args.mode, model, clip)
+            identity = _identity(args.mode, model, clip, args.max_output_tokens, args.reasoning_effort)
             path = output / (identity + ".json")
             marker = path.with_suffix(".attempt")
             if path.exists():
@@ -261,7 +279,8 @@ def main(argv=None):
                         or not isinstance(previous.get("text"), str)):
                     raise RuntimeError("Invalid saved response identity")
                 spent += _cost(previous.get("usage"))
-                refreshed = {**previous, **_evaluation(previous["text"], clip, previous.get("incomplete") is True)}
+                refreshed = {**previous, "request_options": request_options,
+                             **_evaluation(previous["text"], clip, previous.get("incomplete") is True)}
                 if refreshed != previous:
                     _atomic_json(path, refreshed)
                 if marker.exists():
@@ -280,16 +299,19 @@ def main(argv=None):
         if spent >= args.max_cost_usd:
             raise RuntimeError("Soft budget reached; completed results retained")
         try:
-            _private_json(marker, {"identity": identity, "clip_id": clip["id"], "model": model, "mode": args.mode})
+            _private_json(marker, {"identity": identity, "clip_id": clip["id"], "model": model,
+                                   "mode": args.mode, "request_options": request_options})
         except FileExistsError:
             raise RuntimeError("Previous request outcome is unknown; inspect billing/results before manual resolution") from None
-        text, finish, usage, generation_id = _request(opener, key, args.mode, model, audio[clip["id"]])
+        text, finish, usage, generation_id = _request(opener, key, args.mode, model, audio[clip["id"]],
+                                                      args.max_output_tokens, args.reasoning_effort)
         incomplete = finish == "length" or (args.mode == "chat" and finish != "stop")
         _atomic_json(path, {"identity": identity, "mode": args.mode, "prompt_variant": PROMPT_VARIANT if args.mode == "chat" else "none",
                              "clip_id": clip["id"], "sha256": clip["sha256"].lower(), "model": model,
                              "text": text, "usage": usage,
                              "generation_id": generation_id, "finish_reason": finish,
-                             "incomplete": incomplete, **_evaluation(text, clip, incomplete)})
+                             "incomplete": incomplete, "request_options": request_options,
+                             **_evaluation(text, clip, incomplete)})
         marker.unlink()
         _sync_directory(output)
         spent += _cost(usage)
