@@ -113,6 +113,7 @@ class MeetingAudioBenchmarkTests(unittest.TestCase):
         self.assertEqual(json.loads(request.data)["input_audio"]["format"], "wav")
         saved = list((self.root / "openrouter-results").glob("*.json"))
         self.assertEqual(len(saved), 1)
+        self.assertEqual(list((self.root / "openrouter-results").glob("*.attempt")), [])
         self.assertEqual(json.loads(saved[0].read_text())["score"]["status"], "not_evaluated")
         opener = Opener([{"text": "two", "usage": {"cost": 0.01}}])
         with patch.dict("os.environ", {"OPENROUTER_API_KEY": "fixture-secret"}), \
@@ -120,6 +121,48 @@ class MeetingAudioBenchmarkTests(unittest.TestCase):
             benchmark.main(args[:-2] + ["0.20", "--execute"])
         self.assertEqual(len(opener.requests), 1)
         self.assertEqual(len(list((self.root / "openrouter-results").glob("*.json"))), 2)
+
+    def test_unknown_outcome_marker_prevents_an_automatic_repeat(self):
+        self.add_clip()
+        manifest = self.manifest()
+        args = ["--manifest", str(manifest), "--mode", "transcription", "--model", "provider/model", "--execute"]
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "fixture-secret"}), \
+             patch.object(benchmark, "_request", side_effect=RuntimeError("fixture interrupted")), \
+             redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "fixture interrupted"):
+            benchmark.main(args)
+        markers = list((self.root / "openrouter-results").glob("*.attempt"))
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(list((self.root / "openrouter-results").glob("*.json")), [])
+        with patch.object(benchmark.urllib.request, "build_opener", side_effect=AssertionError("network")), \
+             redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "outcome is unknown"):
+            benchmark.main(args)
+
+    def test_resume_refreshes_reviewed_reference_without_http_or_new_charge(self):
+        clip = self.add_clip(reference=None, reviewed=False)
+        manifest = self.manifest()
+        args = ["--manifest", str(manifest), "--mode", "transcription", "--model", "provider/model", "--execute"]
+        opener = Opener([{"text": "привет мир", "usage": {"cost": 0.03}}])
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "fixture-secret"}), \
+             patch.object(benchmark.urllib.request, "build_opener", return_value=opener), redirect_stdout(io.StringIO()):
+            benchmark.main(args)
+        result_path = next((self.root / "openrouter-results").glob("*.json"))
+        original = json.loads(result_path.read_text())
+        marker = result_path.with_suffix(".attempt")
+        marker.write_text("interrupted after save")
+        clip.update(local_text="новый локальный текст", reference="Привет, мир!", reference_reviewed=True)
+        self.manifest()
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": ""}), \
+             patch.object(benchmark.urllib.request, "build_opener", side_effect=AssertionError("network")), \
+             redirect_stdout(io.StringIO()):
+            benchmark.main(args)
+        refreshed = json.loads(result_path.read_text())
+        self.assertEqual(refreshed["text"], original["text"])
+        self.assertEqual(refreshed["usage"], original["usage"])
+        self.assertEqual(refreshed["identity"], original["identity"])
+        self.assertEqual(refreshed["local_text"], "новый локальный текст")
+        self.assertEqual(refreshed["reference"], "Привет, мир!")
+        self.assertEqual(refreshed["score"]["wer"], 0)
+        self.assertFalse(marker.exists())
 
     def test_chat_payload_and_incomplete_response_are_recorded_without_scoring(self):
         self.add_clip(reference="Привет, мир!", reviewed=True)

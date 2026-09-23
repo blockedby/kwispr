@@ -4,6 +4,8 @@
 Example: python3 tools/benchmark_meeting_audio.py --manifest clips/manifest.json \
     --key-file ~/.config/kwispr/openrouter-benchmark.key --mode chat
 Add --execute only after checking the models, clips, and account spending limit.
+The soft budget sums actual usage across the selected clips/models and is checked
+between requests; one request can exceed it. Set a separate account hard limit.
 """
 import argparse
 import base64
@@ -16,6 +18,7 @@ import re
 import urllib.error
 import urllib.request
 import unicodedata
+import uuid
 import wave
 
 ENDPOINTS = {"transcription": "https://openrouter.ai/api/v1/audio/transcriptions",
@@ -182,6 +185,32 @@ def _private_json(path, data):
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
         stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    _sync_directory(path.parent)
+
+
+def _sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_json(path, data):
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        _private_json(temporary, data)
+        os.replace(temporary, path)
+        _sync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _evaluation(text, clip, incomplete):
+    return {"local_text": clip["local_text"], "reference": clip["reference"],
+            "reference_reviewed": clip["reference_reviewed"], "score": score(text, clip, incomplete)}
 
 
 def _cost(usage):
@@ -198,7 +227,8 @@ def main(argv=None):
     parser.add_argument("--key-file", type=Path)
     parser.add_argument("--model", action="append", help="OpenRouter model ID; repeat to compare models")
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--max-cost-usd", type=float, default=0.25, help="Soft stop between requests, based on actual usage")
+    parser.add_argument("--max-cost-usd", type=float, default=0.25,
+                        help="Soft total for selected clips/models; check actual cost between requests, not a hard cap")
     parser.add_argument("--execute", action="store_true", help="Send verified clips to OpenRouter")
     args = parser.parse_args(argv)
     if not math.isfinite(args.max_cost_usd) or args.max_cost_usd <= 0:
@@ -215,9 +245,6 @@ def main(argv=None):
     if not args.execute:
         print("Dry run only: no audio sent and no network request.")
         return
-    key = file_key or os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("Set OPENROUTER_API_KEY or provide --key-file with a key")
     output = (args.output_dir or args.manifest.expanduser().resolve().parent / "openrouter-results").expanduser()
     output.mkdir(mode=0o700, parents=True, exist_ok=True)
     spent, pending = 0.0, []
@@ -225,27 +252,46 @@ def main(argv=None):
         for clip in clips:
             identity = _identity(args.mode, model, clip)
             path = output / (identity + ".json")
+            marker = path.with_suffix(".attempt")
             if path.exists():
                 previous = json.loads(path.read_text(encoding="utf-8"))
                 if (previous.get("identity") != identity or previous.get("clip_id") != clip["id"]
-                        or previous.get("model") != model or previous.get("mode") != args.mode):
+                        or previous.get("model") != model or previous.get("mode") != args.mode
+                        or previous.get("sha256") != clip["sha256"].lower()
+                        or not isinstance(previous.get("text"), str)):
                     raise RuntimeError("Invalid saved response identity")
                 spent += _cost(previous.get("usage"))
+                refreshed = {**previous, **_evaluation(previous["text"], clip, previous.get("incomplete") is True)}
+                if refreshed != previous:
+                    _atomic_json(path, refreshed)
+                if marker.exists():
+                    marker.unlink()
+                    _sync_directory(output)
             else:
-                pending.append((model, clip, identity, path))
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    for model, clip, identity, path in pending:
+                if marker.exists():
+                    raise RuntimeError("Previous request outcome is unknown; inspect billing/results before manual resolution")
+                pending.append((model, clip, identity, path, marker))
+    if pending:
+        key = file_key or os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if not key:
+            raise RuntimeError("Set OPENROUTER_API_KEY or provide --key-file with a key")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    for model, clip, identity, path, marker in pending:
         if spent >= args.max_cost_usd:
             raise RuntimeError("Soft budget reached; completed results retained")
+        try:
+            _private_json(marker, {"identity": identity, "clip_id": clip["id"], "model": model, "mode": args.mode})
+        except FileExistsError:
+            raise RuntimeError("Previous request outcome is unknown; inspect billing/results before manual resolution") from None
         text, finish, usage, generation_id = _request(opener, key, args.mode, model, audio[clip["id"]])
         incomplete = finish == "length" or (args.mode == "chat" and finish != "stop")
-        _private_json(path, {"identity": identity, "mode": args.mode, "prompt_variant": PROMPT_VARIANT if args.mode == "chat" else "none",
+        _atomic_json(path, {"identity": identity, "mode": args.mode, "prompt_variant": PROMPT_VARIANT if args.mode == "chat" else "none",
                              "clip_id": clip["id"], "sha256": clip["sha256"].lower(), "model": model,
-                             "local_text": clip["local_text"], "text": text, "usage": usage,
+                             "text": text, "usage": usage,
                              "generation_id": generation_id, "finish_reason": finish,
-                             "incomplete": incomplete,
-                             "reference": clip["reference"], "reference_reviewed": clip["reference_reviewed"],
-                             "score": score(text, clip, incomplete)})
+                             "incomplete": incomplete, **_evaluation(text, clip, incomplete)})
+        marker.unlink()
+        _sync_directory(output)
         spent += _cost(usage)
         print(json.dumps({"clip": clip["id"], "model": model, "actual_total_cost_usd": spent}))
     print("Finished. Cloud agreement is not a reviewed reference transcript.")
