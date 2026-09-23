@@ -145,7 +145,7 @@ class KwisprShellContractTest(unittest.TestCase):
                 KWISPR_TRANSCRIPTION_PROMPT="transcribe exactly",
                 KWISPR_AUTOPASTE="0",
             )
-            h.fake_curl_response(200, {"choices": [{"message": {"content": "hello"}}]})
+            h.fake_curl_response(200, {"choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}]})
 
             result = h.run("retry", str(wav))
 
@@ -155,11 +155,84 @@ class KwisprShellContractTest(unittest.TestCase):
             data_path = h.data_binary_path(args)
             payload = json.loads(data_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["model"], "openai/gpt-4o-mini-transcribe")
+            self.assertNotIn("max_tokens", payload)
+            self.assertNotIn("reasoning", payload)
             content = payload["messages"][0]["content"]
             self.assertEqual(content[0], {"type": "text", "text": "transcribe exactly"})
             self.assertEqual(content[1]["type"], "input_audio")
             self.assertEqual(content[1]["input_audio"]["format"], "wav")
             self.assertTrue(content[1]["input_audio"]["data"])
+
+    def test_openrouter_chat_controls_are_opt_in_and_validated(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav()
+            h.write_config(KWISPR_BACKEND="openrouter-chat",
+                           KWISPR_API_URL="https://openrouter.ai/api/v1/chat/completions",
+                           KWISPR_MODEL="google/gemini-flash", KWISPR_CHAT_MAX_TOKENS="8192",
+                           KWISPR_CHAT_REASONING_EFFORT="minimal", KWISPR_AUTOPASTE="0")
+            h.fake_curl_response(200, {"choices": [{"message": {"content": "готово"}, "finish_reason": "stop"}]})
+            result = h.run("retry", str(wav))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(h.data_binary_path(h.curl_invocations()[0]).read_text())
+            self.assertEqual(payload["max_tokens"], 8192)
+            self.assertEqual(payload["reasoning"], {"effort": "minimal"})
+            self.assertEqual(h.clipboard_text(), "готово")
+
+        for option in ({"KWISPR_CHAT_MAX_TOKENS": "0"}, {"KWISPR_CHAT_MAX_TOKENS": "32769"},
+                       {"KWISPR_CHAT_MAX_TOKENS": "bad"}, {"KWISPR_CHAT_REASONING_EFFORT": "maximum"},
+                       {"KWISPR_CHAT_ALLOW_EMPTY": "yes"}):
+            with self.subTest(option=option), KwisprScriptHarness() as h:
+                wav = h.make_wav()
+                h.write_config(KWISPR_BACKEND="openrouter-chat",
+                               KWISPR_API_URL="https://openrouter.ai/api/v1/chat/completions",
+                               KWISPR_AUTOPASTE="0", **option)
+                result = h.run("retry", str(wav))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(h.curl_invocations())
+
+    def test_openrouter_rejects_incomplete_or_non_string_response_without_pasting(self) -> None:
+        cases = ({"choices": [{"message": {"content": "partial"}, "finish_reason": "length"}]},
+                 {"choices": [{"message": {"content": "missing reason"}}]},
+                 {"choices": [{"message": {"content": ["not text"]}, "finish_reason": "stop"}]})
+        for body in cases:
+            with self.subTest(body=body), KwisprScriptHarness() as h:
+                wav = h.make_wav()
+                h.write_config(KWISPR_BACKEND="openrouter-chat",
+                               KWISPR_API_URL="https://openrouter.ai/api/v1/chat/completions",
+                               KWISPR_AUTOPASTE="0")
+                h.cache_dir.mkdir(parents=True)
+                (h.root / "clipboard.txt").write_text("previous clipboard", encoding="utf-8")
+                h.fake_curl_response(200, body)
+                result = h.run("retry", str(wav))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("incomplete or invalid", result.stderr)
+                self.assertEqual((h.cache_dir / "last-failed.txt").read_text().strip(), str(wav))
+                self.assertTrue(wav.exists())
+                self.assertFalse(wav.with_suffix(".txt").exists())
+                self.assertEqual(h.clipboard_text(), "previous clipboard")
+                self.assertNotIn("kwispr.sh retry", h.clipboard_text())
+
+    def test_complete_empty_chat_is_clean_silence_only_when_enabled(self) -> None:
+        for allow_empty in ("0", "1"):
+            with self.subTest(allow_empty=allow_empty), KwisprScriptHarness() as h:
+                wav = h.make_wav()
+                h.write_config(KWISPR_BACKEND="openrouter-chat",
+                               KWISPR_API_URL="https://openrouter.ai/api/v1/chat/completions",
+                               KWISPR_CHAT_ALLOW_EMPTY=allow_empty, KWISPR_AUTOPASTE="0")
+                h.cache_dir.mkdir(parents=True)
+                (h.root / "clipboard.txt").write_text("previous clipboard", encoding="utf-8")
+                (h.cache_dir / "last-failed.txt").write_text("stale.wav\n", encoding="utf-8")
+                h.fake_curl_response(200, {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]})
+                result = h.run("retry", str(wav))
+                self.assertEqual(result.returncode == 0, allow_empty == "1", result.stderr)
+                self.assertTrue(wav.exists())
+                self.assertFalse(wav.with_suffix(".txt").exists())
+                if allow_empty == "1":
+                    self.assertEqual(h.clipboard_text(), "previous clipboard")
+                    self.assertFalse((h.cache_dir / "last-failed.txt").exists())
+                else:
+                    self.assertIn("kwispr.sh retry", h.clipboard_text())
+                    self.assertEqual((h.cache_dir / "last-failed.txt").read_text().strip(), str(wav))
 
     def test_whisper_context_and_vocabulary_are_literal_form_strings(self) -> None:
         with KwisprScriptHarness() as h:
@@ -247,7 +320,7 @@ class KwisprShellContractTest(unittest.TestCase):
                 KWISPR_VOCABULARY=vocabulary, KWISPR_PRESERVE_AUDIO_TAIL="1",
                 KWISPR_AUTOPASTE="0",
             )
-            h.fake_curl_response(200, {"choices": [{"message": {"content": "Kwispr"}}]})
+            h.fake_curl_response(200, {"choices": [{"message": {"content": "Kwispr"}, "finish_reason": "stop"}]})
             result = h.run("retry", str(wav))
             self.assertEqual(result.returncode, 0, result.stderr)
             args = h.curl_invocations()[0]

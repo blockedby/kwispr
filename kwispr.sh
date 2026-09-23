@@ -112,6 +112,9 @@ load_env() {
   : "${KWISPR_AUDIO_FORMAT:=wav}"
   : "${KWISPR_PULSE_SOURCE:=default}"
   : "${KWISPR_TRANSCRIPTION_PROMPT:=Transcribe this audio exactly as spoken. The speech may be Russian, English, or mixed. Do not translate. Return only the transcript.}"
+  : "${KWISPR_CHAT_MAX_TOKENS:=}"
+  : "${KWISPR_CHAT_REASONING_EFFORT:=}"
+  : "${KWISPR_CHAT_ALLOW_EMPTY:=0}"
   : "${KWISPR_WHISPER_PROMPT:=}"
   : "${KWISPR_WHISPER_ALLOWED_LANGUAGES:=}"
   : "${KWISPR_VOCABULARY:=}"
@@ -127,6 +130,14 @@ load_env() {
     || die "KWISPR_PRESERVE_AUDIO_TAIL must be 0 or 1"
   [[ "$KWISPR_VOCABULARY" != *$'\n'* && "$KWISPR_VOCABULARY" != *$'\r'* ]] \
     || die "KWISPR_VOCABULARY must be a single line of comma-separated terms"
+  if [[ "$KWISPR_BACKEND" == "openrouter-chat" ]]; then
+    [[ -z "$KWISPR_CHAT_MAX_TOKENS" || ( "$KWISPR_CHAT_MAX_TOKENS" =~ ^[1-9][0-9]{0,4}$ && "$KWISPR_CHAT_MAX_TOKENS" -le 32768 ) ]] \
+      || die "KWISPR_CHAT_MAX_TOKENS must be empty or an integer from 1 to 32768"
+    [[ -z "$KWISPR_CHAT_REASONING_EFFORT" || "$KWISPR_CHAT_REASONING_EFFORT" =~ ^(minimal|low|medium|high)$ ]] \
+      || die "KWISPR_CHAT_REASONING_EFFORT must be empty, minimal, low, medium, or high"
+    [[ "$KWISPR_CHAT_ALLOW_EMPTY" == "0" || "$KWISPR_CHAT_ALLOW_EMPTY" == "1" ]] \
+      || die "KWISPR_CHAT_ALLOW_EMPTY must be 0 or 1"
+  fi
   # Restrict only automatic language selection, never the transcript's words.
   # The local runtime validates these codes against Whisper's language table.
   KWISPR_WHISPER_ALLOWED_LANGUAGES="${KWISPR_WHISPER_ALLOWED_LANGUAGES,,}"
@@ -363,8 +374,12 @@ transcribe() {
         --arg model "$KWISPR_MODEL" \
         --arg prompt "$chat_prompt" \
         --arg format "$KWISPR_AUDIO_FORMAT" \
+        --argjson max_tokens "${KWISPR_CHAT_MAX_TOKENS:-null}" \
+        --arg reasoning_effort "$KWISPR_CHAT_REASONING_EFFORT" \
         --rawfile audio "$audio_b64" \
-        '{model:$model,messages:[{role:"user",content:[{type:"text",text:$prompt},{type:"input_audio",input_audio:{data:$audio,format:$format}}]}]}' \
+        '{model:$model,messages:[{role:"user",content:[{type:"text",text:$prompt},{type:"input_audio",input_audio:{data:$audio,format:$format}}]}]}
+         + (if $max_tokens == null then {} else {max_tokens:$max_tokens} end)
+         + (if $reasoning_effort == "" then {} else {reasoning:{effort:$reasoning_effort}} end)' \
         > "$request_json"
       rm -f "$audio_b64"
       curl_args+=(
@@ -397,7 +412,17 @@ transcribe() {
   local text
   case "$KWISPR_BACKEND" in
     openai-transcriptions) text="$(jq -r '.text // empty' "$response")" ;;
-    openrouter-chat) text="$(jq -r '.choices[0].message.content // empty' "$response")" ;;
+    openrouter-chat)
+      if ! jq -e '.choices[0].finish_reason == "stop" and (.choices[0].message.content | type == "string")' "$response" >/dev/null 2>&1; then
+        printf '%s\n' "$wav" > "$LAST_FAILED"
+        rm -f "$response"
+        status "❌ Incomplete transcript" 5000
+        status_clear
+        echo "OpenRouter transcript was incomplete or invalid; audio was kept." >&2
+        return 1
+      fi
+      text="$(jq -r '.choices[0].message.content' "$response")"
+      ;;
   esac
   rm -f "$response"
 
@@ -409,8 +434,12 @@ transcribe() {
     # Local VAD servers may intentionally return an empty transcript for
     # silence/no-speech audio. Treat that as a clean skip instead of an API
     # failure that pollutes last-failed.txt and the clipboard.
-    if [[ "$KWISPR_BACKEND" == "openai-transcriptions" ]] && is_local_stt; then
+    if { [[ "$KWISPR_BACKEND" == "openai-transcriptions" ]] && is_local_stt; } \
+      || { [[ "$KWISPR_BACKEND" == "openrouter-chat" && "$KWISPR_CHAT_ALLOW_EMPTY" == "1" ]]; }; then
       rm -f "$txt"
+      if [[ "$KWISPR_BACKEND" == "openrouter-chat" ]]; then
+        rm -f "$LAST_FAILED"
+      fi
       status "⚠ No speech" 2000
       status_clear
       return 0

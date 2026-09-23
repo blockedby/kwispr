@@ -18,6 +18,8 @@ Use the punctuation sample button, or write a short example in the language you 
 
 `KWISPR_WHISPER_PROMPT` provides transcript-style context for Whisper. It is independent of `KWISPR_TRANSCRIPTION_PROMPT`, which remains the instruction field for OpenRouter. The application normalizes the sample to a single configuration line.
 
+For OpenRouter audio chat, `KWISPR_CHAT_MAX_TOKENS` optionally sets `max_tokens` (1–32768), and `KWISPR_CHAT_REASONING_EFFORT` optionally sends `reasoning.effort` as `minimal`, `low`, `medium`, or `high`. Both fields are omitted by default. A chat response must finish with `finish_reason=stop` and string transcript content; incomplete or malformed responses keep the WAV and failure marker without copying or pasting partial text. Set `KWISPR_CHAT_ALLOW_EMPTY=1` only when the chat prompt asks for an empty response on silence. A complete empty response then leaves the WAV and clipboard untouched and clears the failure marker; the default remains `0`.
+
 For Auto with Russian and English candidates, the sample button inserts a bilingual example:
 
 > Привет! Давай проверим pull request: сначала code review, потом тесты. Looks good! What should we fix?
