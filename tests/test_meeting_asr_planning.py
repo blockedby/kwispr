@@ -16,6 +16,70 @@ def span(start, end, *speakers):
 
 
 class MeetingAsrPlanningTests(unittest.TestCase):
+    def test_known_single_groups_native_id_changes_without_crossing_silence(self):
+        native = [span(0, 2, "old_01"), span(2, 2.3, "old_01", "old_02"),
+                  span(2.3, 5, "old_02"), span(5, 7, "old_03"),
+                  span(7.4, 8, "old_03"), span(8, 9, "old_04")]
+        before = copy.deepcopy(native)
+        identities = [{**row, "speakers": ["speaker_01"], "source_speakers": row["speakers"],
+                       "speaker_assignment": "explicit"} for row in native]
+        planned = pipeline.assign_transcription_speakers(pipeline.plan_single_speaker_intervals(native), identities)
+        self.assertEqual([(row["start"], row["end"]) for row in planned], [(0, 7), (7.4, 9)])
+        self.assertEqual([row["speakers"] for row in planned], [["speaker_01"], ["speaker_01"]])
+        self.assertEqual([source for row in planned for source in row["source_intervals"]], identities)
+        self.assertEqual(native, before)
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "Optional meeting numerical runtime is not installed")
+    def test_known_single_long_phrase_splits_without_losing_or_repeating_speech_samples(self):
+        import numpy as np
+        native = [span(0, 22, "old_01"), span(22, 22.3, "old_01", "old_02"),
+                  span(22.3, 90, "old_02")]
+        identities = [{**row, "speakers": ["speaker_01"]} for row in native]
+        planned = pipeline.assign_transcription_speakers(pipeline.plan_single_speaker_intervals(native), identities)
+        chunks = pipeline.split_intervals(planned, np.zeros(90 * 16000))
+        self.assertTrue(all(row["end"] - row["start"] <= 45 for row in chunks))
+        self.assertEqual(chunks[0]["start"], 0)
+        self.assertEqual(chunks[-1]["end"], 90)
+        self.assertTrue(all(left["end"] == right["start"] for left, right in zip(chunks, chunks[1:])))
+        self.assertTrue(all(row["speakers"] == ["speaker_01"] for row in chunks))
+        sources = [source for row in chunks for source in row["source_intervals"]]
+        sample_ranges = [(int(row["start"] * 16000), int(row["end"] * 16000)) for row in sources]
+        self.assertEqual(sample_ranges[0][0], 0)
+        self.assertEqual(sample_ranges[-1][1], 90 * 16000)
+        self.assertTrue(all(left[1] == right[0] for left, right in zip(sample_ranges, sample_ranges[1:])))
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "Optional meeting numerical runtime is not installed")
+    def test_known_single_processing_reuses_cached_native_spans(self):
+        native = [span(0, 2, "old_01"), span(2, 2.3, "old_01", "old_02"),
+                  span(2.3, 5, "old_02"), span(5.5, 8, "old_03")]
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            for name in ["microphone.wav", "remote.wav"]:
+                (root / name).write_bytes(b"source-audio")
+            pipeline.atomic_json(root / "session.json", {"speakers": 1})
+            config = {"KWISPR_API_URL": "http://127.0.0.1:19650/v1/audio/transcriptions"}
+            signature = pipeline._fingerprint(root, config, {"speakers": 1})
+            pipeline.atomic_json(root / "diarization.json", {"signature": signature,
+                                                               "tracks": {"remote": native, "microphone": []}})
+            stack.enter_context(patch.object(pipeline, "require_ready"))
+            stack.enter_context(patch.object(pipeline, "_load_track", return_value=[0] * (9 * 16000)))
+            diarize = stack.enter_context(patch.object(pipeline, "_diarize"))
+            stack.enter_context(patch.object(pipeline, "_wav_slice", return_value=b"test-pcm"))
+            request = stack.enter_context(patch.object(pipeline, "_request_transcription",
+                                                       return_value={"text": "hello", "language": "en"}))
+            stack.enter_context(patch.object(pipeline.time, "sleep"))
+            result = pipeline.process_session(root, config)
+            self.assertEqual(diarize.call_count, 0)
+            self.assertEqual(request.call_count, 2)
+            self.assertEqual(result["speaker_count"], 1)
+            rows = json.loads((root / "transcript.json").read_text())["utterances"]
+            self.assertEqual([(row["start"], row["end"]) for row in rows], [(0, 5), (5.5, 8)])
+            self.assertEqual([row["speakers"] for row in rows], [["speaker_01"], ["speaker_01"]])
+            self.assertEqual([source for row in rows for source in row["source_intervals"]],
+                             [{**row, "source_speakers": row["speakers"], "speakers": ["speaker_01"],
+                               "speaker_assignment": "explicit"} for row in native])
+            self.assertEqual((root / "remote.wav").read_bytes(), b"source-audio")
+
     def test_refinement_annotations_do_not_break_a_grouped_acoustic_phrase(self):
         native = [span(0, 2, "a"), span(2, 2.3, "a", "b"), span(2.3, 5, "a")]
         refined = [span(0, 1.9, "speaker_01"), span(1.9, 2, "speaker_unknown"),
