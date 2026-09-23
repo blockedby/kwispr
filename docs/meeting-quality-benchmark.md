@@ -64,6 +64,61 @@ For example, Gemini 3.8 Flash completed the real pilot with
 exhausted the initial 1024-token limit. These options affect chat requests only;
 they do not alter the recorder or local recognizer.
 
+## Reprocessing saved one-to-one meetings
+
+`tools/reprocess_meeting_openrouter.py` is an explicit cloud batch tool for
+saved sessions. Keep its plan, key and outputs outside the repository. A private
+plan JSON specifies one audio-chat model and request settings for the whole run:
+
+```json
+{
+  "model": "provider/audio-chat-model-id",
+  "prompt": "Transcribe the speech verbatim in its original language. Return only the transcript; return an empty string for silence.",
+  "max_output_tokens": 8192,
+  "reasoning_effort": "minimal"
+}
+```
+
+Each `--session` directory needs `session.json`, `microphone.wav` and
+`remote.wav` in mono 16 kHz 16-bit PCM. Check the dry-run chunk count first;
+only `--execute` sends audio. Use a separate provider-side hard spending limit:
+
+```bash
+python3 tools/reprocess_meeting_openrouter.py \
+  --session /path/to/saved-session-a --session /path/to/saved-session-b \
+  --output-root /path/to/private/cloud-results \
+  --plan /path/to/private/plan.json --key-file /path/to/private/key \
+  --budget-usd 1.5
+
+python3 tools/reprocess_meeting_openrouter.py \
+  --session /path/to/saved-session-a --session /path/to/saved-session-b \
+  --output-root /path/to/private/cloud-results \
+  --plan /path/to/private/plan.json --key-file /path/to/private/key \
+  --budget-usd 1.5 --execute
+```
+
+The source WAVs are read only. Every frame, including silence, is sent in
+nonoverlapping 45-second windows; no VAD, gain change or speaker diarization is
+applied. Results, attempt markers, `transcript.json` and `transcript.md` go in a
+per-session directory under `--output-root`. The microphone is labeled `Я`
+(`self`), and the remote track `Собеседник 1` (`speaker_01`); bleed or crosstalk
+can still make a track label misleading. Timestamps are window bounds, not word
+alignment.
+
+Each request is saved privately and reused only when its source/audio hashes,
+model, prompt and options match. An attempt marker without a saved response
+means the paid request outcome is unknown: inspect it and billing before any
+manual resolution; the tool will not retry blindly. Missing or truncated windows
+make the transcript explicitly incomplete. To process other windows after an
+unknown attempt or a failed request, rerun the same command with both
+`--execute` and `--continue-on-error`. The unknown request is skipped without
+resubmission, and the command exits nonzero while any window remains incomplete.
+Private `.diagnostic` files record only a sanitized error class, HTTP status
+when known, and a timeout flag; they do not contain response bodies.
+`--budget-usd` is a soft total across the selected sessions: four requests may
+run concurrently, and actual cost can exceed the $0.05 reserved per pending or
+unknown request, especially with an 8192-token output limit.
+
 ## Interpreting results
 
 Cloud-model agreement is diagnostic evidence, not a verified reference. WER/CER
