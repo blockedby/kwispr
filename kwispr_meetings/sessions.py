@@ -20,7 +20,8 @@ import uuid
 
 from .config import ConfigError, load_config, output_dir, speaker_count, validate_local_backend
 
-ACTIVE = {"starting", "recording", "stopping", "processing"}
+CAPTURING = {"starting", "recording", "stopping"}
+ACTIVE = CAPTURING | {"processing", "queued"}
 STOP_TIMEOUT_SECONDS = 8
 START_TIMEOUT_SECONDS = 20
 
@@ -56,6 +57,11 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -109,8 +115,20 @@ def current_locked(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     directory = Path(pointer["session_dir"])
     session = read_json(directory / "session.json")
     if session.get("token") != pointer.get("token"):
-        raise SessionError("Session identity does not match the current recording.")
-    if session.get("state") in ACTIVE and not owner_alive(pointer):
+        # A retry can commit its new manifest before selecting it for display.
+        # Never repair a live recorder's identity; only a stale selection.
+        if (session.get("state") in {"queued", "processing", "complete", "failed"}
+                and isinstance(session.get("token"), str) and not owner_alive(pointer)):
+            pointer = {"session_dir": str(directory), "token": session["token"]}
+            atomic_json(root / "current.json", pointer)
+        else:
+            raise SessionError("Session identity does not match the current recording.")
+    owner = pointer
+    if session.get("state") == "processing":
+        processing = read_json(root / "processing.json")
+        if processing.get("token") == session.get("token"):
+            owner = processing
+    if session.get("state") in CAPTURING | {"processing"} and not owner_alive(owner):
         session.update(state="failed", message="Meeting worker stopped unexpectedly. Audio was kept; retry processing from this folder.", updated_at=now())
         atomic_json(directory / "session.json", session)
     return pointer, session
@@ -123,15 +141,125 @@ def public_status(session: dict[str, Any]) -> dict[str, Any]:
 
 def status() -> dict[str, Any]:
     with control_lock() as root:
+        advance_queue_locked(root)
         _, session = current_locked(root)
-        return public_status(session)
+        return status_locked(root, session)
+
+
+def queue_locked(root: Path) -> list[dict[str, Any]]:
+    jobs = read_json(root / "queue.json").get("jobs", [])
+    if not isinstance(jobs, list) or any(not isinstance(job, dict) or
+            not isinstance(job.get("session_dir"), str) or not isinstance(job.get("token"), str)
+            for job in jobs):
+        raise SessionError("Invalid transcription queue. Saved audio was kept.")
+    return jobs
+
+
+def pointer_matches(pointer: dict[str, Any], directory: Path, token: str) -> bool:
+    return pointer.get("token") == token and pointer.get("session_dir") == str(directory)
+
+
+def processing_locked(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    pointer = read_json(root / "processing.json")
+    # An already-running worker from an older installation owns current.json.
+    if not pointer:
+        legacy = read_json(root / "current.json")
+        if legacy and owner_alive(legacy):
+            session = read_json(Path(legacy["session_dir"]) / "session.json")
+            if session.get("state") == "processing" and session.get("token") == legacy.get("token"):
+                return legacy, session
+        return {}, {}
+    session = read_json(Path(pointer["session_dir"]) / "session.json")
+    return pointer, session if session.get("token") == pointer.get("token") else {}
+
+
+def status_locked(root: Path, session: dict[str, Any]) -> dict[str, Any]:
+    result = public_status(session)
+    _, recording = current_locked(root)
+    pointer, processing = processing_locked(root)
+    pending = []
+    for job in queue_locked(root):
+        queued = read_json(Path(job["session_dir"]) / "session.json")
+        staged = job.get("session", {})
+        if (queued.get("token") == job.get("previous_token") and isinstance(staged, dict)
+                and staged.get("token") == job["token"] and staged.get("session_dir") == job["session_dir"]):
+            queued = staged
+        if queued.get("token") == job["token"]:
+            pending.append(public_status(queued))
+    result.update(recording=public_status(recording) if recording.get("state") in CAPTURING else None,
+                  transcription=public_status(processing) if owner_alive(pointer) and processing.get("state") == "processing" else None,
+                  queue=pending, queue_length=len(pending))
+    return result
+
+
+def advance_queue_locked(root: Path) -> None:
+    """Claim the next durable FIFO job. Called under the short control lock."""
+    pointer, processing = processing_locked(root)
+    if owner_alive(pointer):
+        jobs = queue_locked(root)
+        pending = [job for job in jobs if not pointer_matches(pointer, Path(job["session_dir"]), job["token"])]
+        if pending != jobs:
+            atomic_json(root / "queue.json", {"jobs": pending})
+        return
+    jobs = queue_locked(root)
+    if pointer:
+        if processing.get("state") == "processing":
+            processing.update(state="failed", message="Transcription worker stopped unexpectedly. Audio and checkpoints were kept; retry this meeting.", updated_at=now())
+            atomic_json(Path(pointer["session_dir"]) / "session.json", processing)
+        jobs = [job for job in jobs if not pointer_matches(pointer, Path(job["session_dir"]), job["token"])]
+        atomic_json(root / "queue.json", {"jobs": jobs})
+        atomic_json(root / "processing.json", {})
+    while jobs:
+        job = jobs[0]
+        directory = Path(job["session_dir"])
+        session = read_json(directory / "session.json")
+        if session.get("token") != job["token"]:
+            staged = job.get("session", {})
+            if (isinstance(staged, dict) and session.get("token") == job.get("previous_token")
+                    and staged.get("token") == job["token"] and staged.get("session_dir") == str(directory)):
+                # Complete a retry journalled before its new manifest token was
+                # published. Never overwrite a subsequently changed token.
+                session = staged
+                atomic_json(directory / "session.json", session)
+        if session.get("token") != job["token"] or session.get("state") == "complete":
+            jobs.pop(0)
+            atomic_json(root / "queue.json", {"jobs": jobs})
+            continue
+        # A capture may have crashed between journalling a finished recording
+        # and publishing its queued state. The durable queue owns that handoff.
+        current = read_json(root / "current.json")
+        if session.get("state") in CAPTURING and owner_alive(current) and pointer_matches(current, directory, job["token"]):
+            return
+        session.update(state="processing", message="Separating speakers and transcribing locally…", updated_at=now())
+        atomic_json(directory / "session.json", session)
+        try:
+            launch_locked(root, directory, session, "process")
+        except SessionError:
+            jobs.pop(0)
+            atomic_json(root / "queue.json", {"jobs": jobs})
+            continue
+        jobs.pop(0)
+        atomic_json(root / "queue.json", {"jobs": jobs})
+        return
+
+
+def enqueue_locked(root: Path, directory: Path, session: dict[str, Any]) -> None:
+    jobs = queue_locked(root)
+    previous_token = read_json(directory / "session.json").get("token")
+    session.update(state="queued", message="Waiting in the transcription queue.", queued_at=now(), updated_at=now(), stop_requested=False)
+    if not any(pointer_matches(job, directory, session["token"]) for job in jobs):
+        jobs.append({"session_dir": str(directory), "token": session["token"],
+                     "previous_token": previous_token, "session": dict(session)})
+        atomic_json(root / "queue.json", {"jobs": jobs})
+    atomic_json(directory / "session.json", session)
+    advance_queue_locked(root)
 
 
 def update_session(directory: Path, token: str, **values: Any) -> dict[str, Any]:
     with control_lock() as root:
-        pointer = read_json(root / "current.json")
-        if pointer.get("token") != token or pointer.get("session_dir") != str(directory):
-            raise SessionError("This meeting no longer owns the recorder.")
+        pointers = [read_json(root / name) for name in ("current.json", "processing.json")]
+        if not any(pointer_matches(pointer, directory, token) for pointer in pointers):
+            raise SessionError("This worker no longer owns its meeting.")
         session = read_json(directory / "session.json")
         if session.get("token") != token:
             raise SessionError("Session token changed.")
@@ -212,7 +340,8 @@ def launch_locked(root: Path, directory: Path, session: dict[str, Any], mode: st
         raise SessionError(session["message"]) from error
     finally:
         os.close(logfd)
-    atomic_json(root / "current.json", {"session_dir": str(directory), "token": token,
+    pointer_name = "current.json" if mode == "record" else "processing.json"
+    atomic_json(root / pointer_name, {"session_dir": str(directory), "token": token,
                                        "worker_pid": process.pid, "worker_identity": process_identity(process.pid)})
     return process
 
@@ -236,9 +365,13 @@ def start(config: dict[str, str], mic: str | None = None, monitor: str | None = 
     except ValueError:
         stop_delay_ms = 350
     with control_lock() as root:
+        advance_queue_locked(root)
         _, previous = current_locked(root)
-        if previous.get("state") in ACTIVE:
-            raise SessionError("A meeting is already recording or processing.")
+        if previous.get("state") in CAPTURING:
+            raise SessionError("A meeting is already recording.")
+        legacy, _ = processing_locked(root)
+        if legacy and not read_json(root / "processing.json"):
+            raise SessionError("Wait for the transcription started by the older version to finish once before recording a new meeting.")
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not base.is_dir():
             raise SessionError("Choose an existing directory or a new output folder.")
@@ -269,11 +402,11 @@ def start(config: dict[str, str], mic: str | None = None, monitor: str | None = 
 def stop() -> dict[str, Any]:
     with control_lock() as root:
         _, session = current_locked(root)
-        if session.get("state") not in {"starting", "recording", "stopping"}:
-            return public_status(session)
+        if session.get("state") not in CAPTURING:
+            return status_locked(root, session)
         session.update(stop_requested=True, state="stopping", message="Finishing the audio files…", updated_at=now())
         atomic_json(Path(session["session_dir"]) / "session.json", session)
-        return public_status(session)
+        return status_locked(root, session)
 
 
 def retry(directory: Path, config: dict[str, str], speakers: int | None = None) -> dict[str, Any]:
@@ -281,22 +414,29 @@ def retry(directory: Path, config: dict[str, str], speakers: int | None = None) 
     ready(config)
     directory = directory.expanduser().resolve()
     with control_lock() as root:
+        advance_queue_locked(root)
         _, previous = current_locked(root)
-        if previous.get("state") in ACTIVE:
-            raise SessionError("Wait for the active meeting to finish first.")
         session = read_json(directory / "session.json")
         if not session or session.get("version") != 1:
             raise SessionError("Select a meeting folder containing session.json.")
+        if previous.get("state") in CAPTURING and previous.get("session_dir") == str(directory):
+            raise SessionError("Stop recording this meeting before queuing its transcription.")
+        processing, _ = processing_locked(root)
+        if processing and owner_alive(processing) and not read_json(root / "processing.json"):
+            raise SessionError("Wait for the transcription started by the older version to finish before queuing a retry.")
+        if (processing.get("session_dir") == str(directory) and owner_alive(processing)) or any(job["session_dir"] == str(directory) for job in queue_locked(root)):
+            raise SessionError("This meeting is already queued or transcribing.")
         for track in ("microphone.wav", "remote.wav"):
             if not (directory / track).is_file() or (directory / track).stat().st_size <= 44:
                 raise SessionError(f"The meeting does not have a usable {track}; recorded files were kept.")
         if count is not None:
             session["speakers"] = count
-        session.update(token=uuid.uuid4().hex, session_dir=str(directory), state="processing",
-                       message="Preparing transcription…", updated_at=now(), stop_requested=False)
-        atomic_json(directory / "session.json", session)
-        launch_locked(root, directory, session, "process")
-        return public_status(session)
+        session.update(token=uuid.uuid4().hex, session_dir=str(directory), state="queued",
+                       message="Waiting in the transcription queue.", updated_at=now(), stop_requested=False)
+        enqueue_locked(root, directory, session)
+        if previous.get("state") not in CAPTURING:
+            atomic_json(root / "current.json", {"session_dir": str(directory), "token": session["token"]})
+        return status_locked(root, read_json(directory / "session.json"))
 
 
 def finish_capture(process: subprocess.Popen) -> None:
@@ -388,15 +528,23 @@ def worker(directory: Path, token: str, mode: str) -> int:
     try:
         # The parent holds the lock until our PID identity is durable.
         with control_lock() as root:
-            pointer = read_json(root / "current.json")
+            pointer = read_json(root / ("current.json" if mode == "record" else "processing.json"))
             if pointer.get("token") != token or pointer.get("worker_pid") != os.getpid():
                 raise SessionError("Worker does not own this meeting session.")
         config = load_config()
-        pipeline = ready(config)
         if mode == "record":
             record(directory, token, lambda: interrupted)
+            # Audio is finalized before the recorder releases its slot. A new
+            # capture can start while this independent queue is draining.
+            with control_lock() as root:
+                session = read_json(directory / "session.json")
+                if session.get("token") != token:
+                    raise SessionError("Session token changed.")
+                enqueue_locked(root, directory, session)
+            return 0
         if interrupted:
             raise SessionError("Meeting worker was stopped. Audio was kept; retry processing from the meeting folder.")
+        pipeline = ready(config)
         update_session(directory, token, state="processing", message="Separating speakers and transcribing locally…")
 
         def progress(value):
@@ -419,6 +567,13 @@ def worker(directory: Path, token: str, mode: str) -> int:
             pass
         print(f"Meeting failed: {error}", file=sys.stderr)
         return 1
+    finally:
+        if mode == "process":
+            with control_lock() as root:
+                pointer = read_json(root / "processing.json")
+                if pointer_matches(pointer, directory, token) and pointer.get("worker_pid") == os.getpid():
+                    atomic_json(root / "processing.json", {})
+                    advance_queue_locked(root)
 
 
 def main(argv: list[str] | None = None) -> int:

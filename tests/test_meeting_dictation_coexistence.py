@@ -28,10 +28,12 @@ from kwispr_meetings.sessions import process_identity
 ROOT = Path(__file__).resolve().parents[1]
 
 PIPELINE = '''from pathlib import Path
-import os, time
+import os, time, fcntl
 def require_ready(config): pass
 def process_session(directory, config, progress_callback=None):
     marker = Path(os.environ['KWISPR_COEXISTENCE_ROOT']) / 'release-processing'
+    guard = marker.with_name('processor.lock').open('w')
+    fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
     deadline = time.monotonic() + 45
     while not marker.exists():
         if time.monotonic() >= deadline: raise RuntimeError('Smoke processing timed out')
@@ -203,20 +205,39 @@ class MeetingDictationCoexistenceTests(unittest.TestCase):
             requests = [json.loads(line) for line in (root / 'requests.jsonl').read_text().splitlines()]
             self.assertEqual(len(requests), 2)
             self.assertTrue(all('http://127.0.0.1:1/v1/audio/transcriptions' in request for request in requests))
+            later_meetings = []
+            for title in ('Second meeting', 'Third meeting'):
+                next_meeting = meeting('start', '--mic', mic_source, '--monitor', remote_sink+'.monitor',
+                                       '--output-dir', str(root/'meetings'), '--title', title)
+                self.assertEqual(next_meeting['recording']['title'], title)
+                self.assertEqual(next_meeting['transcription']['session_dir'], str(directory))
+                next_dir = Path(next_meeting['session_dir'])
+                tone(mic_sink, title+'-mic.wav', 660)
+                tone(remote_sink, title+'-remote.wav', 880)
+                self.assertEqual(meeting('stop')['state'], 'stopping')
+                wait(lambda: meeting('status')['state']=='queued', 'New meeting did not queue behind first')
+                later_meetings.append(next_dir)
+                self.assertEqual(meeting('status')['queue_length'],len(later_meetings))
+                for track in ('microphone.wav','remote.wav'):
+                    self.assertGreater(self.energy_windows(self.wav_samples(next_dir/track)),0)
             (root / 'release-processing').touch()
             wait(lambda: meeting('status')['state'] == 'complete', 'Meeting failed to complete after release')
             self.assertEqual((root / 'fake-clipboard.txt').read_text().strip(), 'Synthetic dictation completed.',
                              'Meeting processing must not overwrite dictation clipboard')
             self.assertTrue((directory / 'transcript.md').is_file())
+            for saved in later_meetings:
+                self.assertTrue((saved/'transcript.md').is_file())
+                self.assertEqual(json.loads((saved/'session.json').read_text())['state'],'complete')
             print(f'Concurrent capture passed: meeting microphone {len(microphone)/16000:.2f}s, '
                   f'remote {len(remote)/16000:.2f}s, first dictation {len(first_audio)/16000:.2f}s; '
-                  'second dictation also captured and reached fake STT during processing.')
+                  'second dictation reached fake STT during processing; two further real meetings '
+                  'captured both tone tracks, queued, and completed serially.')
         finally:
             (root / 'release-processing').touch()
             if meeting_started:
                 try:
                     meeting('stop')
-                    wait(lambda: meeting('status')['state'] not in {'starting','recording','stopping','processing'},
+                    wait(lambda: meeting('status')['state'] not in {'starting','recording','stopping','processing','queued'},
                          'Meeting cleanup timed out', timeout=15)
                 except (AssertionError, subprocess.SubprocessError):
                     pointer = json.loads(pointer_path.read_text())

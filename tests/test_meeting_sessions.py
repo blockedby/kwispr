@@ -40,11 +40,23 @@ for path in outputs:
 sys.stdin.readline()
 '''
 FAKE_PIPELINE = '''from pathlib import Path
-import os
+import os, json, time, fcntl
 def require_ready(config):
     if os.environ.get('FAIL_READY'): raise RuntimeError('Install the meeting models first.')
 def process_session(directory, config, progress_callback=None):
     if progress_callback: progress_callback('Transcribing test audio')
+    if os.environ.get('QUEUE_TEST_DIR'):
+        root = Path(os.environ['QUEUE_TEST_DIR'])
+        title = json.loads((Path(directory)/'session.json').read_text())['title']
+        # A real OS lock makes accidental parallel pipeline execution observable.
+        guard = (root/'processor.lock').open('w')
+        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with (root/'events').open('a') as log: log.write(title+'\\n')
+        deadline = time.monotonic()+20
+        while not (root/('release-'+title)).exists() and not (root/'release-all').exists():
+            if time.monotonic() > deadline: raise RuntimeError('Queue test timed out')
+            time.sleep(.02)
+        if title == os.environ.get('QUEUE_FAIL_TITLE'): raise RuntimeError('Deliberate queued failure')
     if os.environ.get('FAIL_PIPELINE'): raise RuntimeError('Deliberate processing failure')
     path = Path(directory) / 'transcript.md'
     path.write_text('00:00 Me: test\\n00:01 Speaker 1: response\\n')
@@ -53,6 +65,55 @@ def process_session(directory, config, progress_callback=None):
 
 
 class MeetingSessionUnitTests(unittest.TestCase):
+    def test_retry_journal_recovers_before_manifest_publish(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root/'meeting'
+            directory.mkdir()
+            before = {'version':1, 'token':'old', 'state':'complete', 'session_dir':str(directory)}
+            queued = {**before, 'token':'new', 'state':'queued'}
+            sessions.atomic_json(directory/'session.json',before)
+            sessions.atomic_json(root/'current.json',{'session_dir':str(directory),'token':'old'})
+            job = {'session_dir':str(directory),'token':'new','previous_token':'old','session':queued}
+            sessions.atomic_json(root/'queue.json',{'jobs':[job]})
+            with patch.object(sessions, 'launch_locked') as launch:
+                sessions.advance_queue_locked(root)
+                launch.assert_called_once()
+                self.assertEqual(launch.call_args.args[2]['token'],'new')
+            self.assertEqual(sessions.read_json(directory/'session.json')['state'],'processing')
+            self.assertEqual(sessions.queue_locked(root),[])
+
+    def test_live_owner_deduplicates_journal_after_launch_crash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root/'meeting'
+            directory.mkdir()
+            pointer = {'session_dir':str(directory),'token':'job','worker_pid':os.getpid(),
+                       'worker_identity':sessions.process_identity(os.getpid())}
+            sessions.atomic_json(directory/'session.json',{'token':'job','state':'processing'})
+            sessions.atomic_json(root/'processing.json',pointer)
+            sessions.atomic_json(root/'queue.json',{'jobs':[{'session_dir':str(directory),'token':'job'}]})
+            with patch.object(sessions,'launch_locked') as launch:
+                sessions.advance_queue_locked(root)
+                launch.assert_not_called()
+            self.assertEqual(sessions.queue_locked(root),[])
+
+    def test_retry_does_not_replace_legacy_live_processor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            active = root/'active';active.mkdir()
+            target = root/'target';target.mkdir()
+            sessions.atomic_json(active/'session.json',{'version':1,'token':'old','state':'processing','session_dir':str(active)})
+            pointer = {'session_dir':str(active),'token':'old','worker_pid':os.getpid(),
+                       'worker_identity':sessions.process_identity(os.getpid())}
+            sessions.atomic_json(root/'current.json',pointer)
+            sessions.atomic_json(target/'session.json',{'version':1,'token':'saved','state':'complete'})
+            with patch.object(sessions,'state_dir',return_value=root), patch.object(sessions,'ready'):
+                with self.assertRaisesRegex(sessions.SessionError,'older version'):
+                    sessions.retry(target,{})
+            self.assertEqual(sessions.read_json(root/'current.json'),pointer)
+            self.assertEqual(sessions.queue_locked(root),[])
+
     def test_pid_identity_stale_pid_is_not_a_live_worker(self):
         self.assertTrue(sessions.owner_alive({'worker_pid':os.getpid(), 'worker_identity':sessions.process_identity(os.getpid())}))
         self.assertFalse(sessions.owner_alive({'worker_pid':os.getpid(), 'worker_identity':'wrong-start-ticks'}))
@@ -102,6 +163,8 @@ class DetachedMeetingTests(unittest.TestCase):
 
     def tearDown(self):
         try:
+            if (self.root/'queue-probe').exists():
+                (self.root/'queue-probe/release-all').touch()
             self.run_cli('stop')
             self.wait_state({'complete','failed','idle'}, timeout=5)
         finally:
@@ -197,6 +260,107 @@ class DetachedMeetingTests(unittest.TestCase):
         while sessions.process_identity(capture_pid) and time.monotonic()<deadline:
             time.sleep(.05)
         self.assertIsNone(sessions.process_identity(capture_pid),'capture survived dead supervisor')
+
+    def enable_queue_probe(self):
+        probe = self.root/'queue-probe'
+        probe.mkdir()
+        self.env['QUEUE_TEST_DIR'] = str(probe)
+        return probe
+
+    def wait_processing(self, title, timeout=5):
+        deadline = time.monotonic()+timeout
+        while time.monotonic() < deadline:
+            result = self.run_cli('status')
+            if (result.get('transcription') or {}).get('title') == title:
+                return result
+            time.sleep(.03)
+        self.fail(f'Never processed {title}: {result}')
+
+    def test_capture_during_processing_and_fifo_queue(self):
+        probe = self.enable_queue_probe()
+        a = self.run_cli('start','--title','A')
+        self.run_cli('stop')
+        self.wait_processing('A')
+        b = self.run_cli('start','--title','B')
+        self.assertEqual(b['state'], 'recording')
+        self.assertEqual(b['recording']['title'], 'B')
+        self.assertEqual(b['transcription']['title'], 'A')
+        self.assertIn('already recording',self.run_cli('start',ok=False)['message'])
+        self.assertIn('already queued or transcribing',self.run_cli('process',a['session_dir'],ok=False)['message'])
+        self.assertIn('Stop recording',self.run_cli('process',b['session_dir'],ok=False)['message'])
+        self.run_cli('stop')
+        queued = self.wait_state({'queued'})
+        self.assertEqual([x['title'] for x in queued['queue']], ['B'])
+        self.assertEqual(queued['queue_length'],1)
+        self.assertIn('already queued',self.run_cli('process',b['session_dir'],ok=False)['message'])
+        c = self.run_cli('start','--title','C')
+        self.run_cli('stop')
+        queued = self.wait_state({'queued'})
+        self.assertEqual([x['title'] for x in queued['queue']], ['B','C'])
+        before = {str(Path(s['session_dir'])/n):(Path(s['session_dir'])/n).read_bytes()
+                  for s in (a,b,c) for n in ('microphone.wav','remote.wav')}
+        self.assertEqual((probe/'events').read_text().splitlines(), ['A'])
+        (probe/'release-A').touch()
+        next_status = self.wait_processing('B')
+        self.assertEqual(next_status['state'],'queued')
+        self.assertEqual([x['title'] for x in next_status['queue']],['C'])
+        (probe/'release-B').touch()
+        self.assertEqual(self.wait_processing('C')['queue_length'],0)
+        (probe/'release-C').touch()
+        final = self.wait_state({'complete'})
+        self.assertEqual(final['title'],'C')
+        self.assertEqual((probe/'events').read_text().splitlines(),['A','B','C'])
+        self.assertTrue(all(Path(p).read_bytes()==data for p,data in before.items()))
+
+    def test_failed_job_continues_queue(self):
+        probe = self.enable_queue_probe()
+        self.env['QUEUE_FAIL_TITLE'] = 'A'
+        a = self.run_cli('start','--title','A')
+        self.run_cli('stop')
+        self.wait_processing('A')
+        self.run_cli('start','--title','B')
+        self.run_cli('stop')
+        self.wait_state({'queued'})
+        (probe/'release-A').touch()
+        self.wait_processing('B')
+        self.assertEqual(json.loads((Path(a['session_dir'])/'session.json').read_text())['state'],'failed')
+        (probe/'release-B').touch()
+        self.assertEqual(self.wait_state({'complete'})['queue_length'],0)
+
+    def test_dead_processor_recovers_queue_without_stopping_new_capture(self):
+        probe = self.enable_queue_probe()
+        a = self.run_cli('start','--title','A')
+        self.run_cli('stop')
+        self.wait_processing('A')
+        processor = json.loads((self.root/'state/kwispr/meetings/processing.json').read_text())
+        self.run_cli('start','--title','B')
+        self.run_cli('stop')
+        self.wait_state({'queued'})
+        self.run_cli('start','--title','C')
+        capture_pid = int((self.root/'capture.pid').read_text())
+        os.kill(processor['worker_pid'],signal.SIGKILL)
+        state = self.wait_processing('B')
+        self.assertEqual(state['state'],'recording')
+        self.assertEqual(state['recording']['title'],'C')
+        self.assertTrue(sessions.process_identity(capture_pid))
+        self.assertEqual(json.loads((Path(a['session_dir'])/'session.json').read_text())['state'],'failed')
+        (probe/'release-all').touch()
+        self.run_cli('stop')
+        self.wait_state({'complete'})
+
+    def test_retry_other_meeting_preserves_capture_owner(self):
+        a = self.run_cli('start','--title','A')
+        self.run_cli('stop')
+        self.wait_state({'complete'})
+        probe = self.enable_queue_probe()
+        b = self.run_cli('start','--title','B')
+        self.run_cli('process',a['session_dir'])
+        state = self.wait_processing('A')
+        self.assertEqual(state['recording']['session_dir'], b['session_dir'])
+        self.assertEqual(self.run_cli('stop')['title'],'B')
+        self.wait_state({'queued'})
+        (probe/'release-all').touch()
+        self.wait_state({'complete'})
 
 
 @unittest.skipUnless(os.environ.get('KWISPR_MEETING_AUDIO_SMOKE') == '1',
