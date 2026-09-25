@@ -2,6 +2,7 @@
 
 #include <QDialog>
 #include <QString>
+#include <QStringList>
 #include <functional>
 
 class QComboBox;
@@ -54,6 +55,7 @@ private:
     QString m_state = QStringLiteral("loading");
     QString m_previousState;
     QString m_message;
+    QString m_backgroundStatus;
     QString m_error;
     QString m_statusError;
     QString m_sessionDir;
@@ -62,6 +64,9 @@ private:
     QString m_startedAt;
     QString m_activeMic;
     QString m_activeMonitor;
+    QString m_recordingSessionDir;
+    QString m_transcriptionSessionDir;
+    QStringList m_queuedSessionDirs;
     QString m_savedMic;
     QString m_savedMonitor;
     QString m_defaultMic;
@@ -69,6 +74,10 @@ private:
     FolderOpener m_folderOpener;
     bool m_folderOpenBusy = false;
     bool m_statusKnown = false;
+    bool m_hasQueueContract = false;
+    bool m_recordingActive = false;
+    bool m_transcriptionActive = false;
+    int m_queueLength = 0;
     bool m_sourcesLoaded = false;
     bool m_commandBusy = false;
     bool m_setupBusy = false;
@@ -88,6 +97,7 @@ private:
     QTimer *m_sourcesTimeout;
     QLabel *m_statusLabel;
     QLabel *m_messageLabel;
+    QLabel *m_backgroundStatusLabel;
     QLabel *m_errorLabel;
     QLabel *m_activeSourcesLabel;
     QProgressBar *m_progress;

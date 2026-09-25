@@ -65,11 +65,22 @@ elif args[0] == 'start':
     opts = dict(zip(args[1::2], args[2::2]))
     session = root / 'saved meeting'
     session.mkdir(exist_ok=True)
-    state = {'state':'recording','session_dir':str(session),'message':'','mic_source':opts['--mic'],'monitor_source':opts['--monitor'],'started_at':'2026-09-21T10:00:00Z'}
+    if 'recording' in state:
+        recording = {'state':'recording','session_dir':str(session),'title':opts.get('--title') or 'Meeting','message':'Recording microphone and call audio.','mic_source':opts['--mic'],'monitor_source':opts['--monitor'],'started_at':'2026-09-21T10:00:00Z'}
+        state.update({'state':'recording','session_dir':str(session),'title':recording['title'],'message':recording['message'],'mic_source':opts['--mic'],'monitor_source':opts['--monitor'],'started_at':recording['started_at'],'recording':recording})
+    else:
+        state = {'state':'recording','session_dir':str(session),'message':'','mic_source':opts['--mic'],'monitor_source':opts['--monitor'],'started_at':'2026-09-21T10:00:00Z'}
     state_file.write_text(json.dumps(state))
     print(json.dumps(state))
 elif args[0] == 'stop':
-    state['state'] = 'processing'
+    if 'recording' in state:
+        recording = dict(state.get('recording') or {})
+        recording.update({'state':'queued','message':'Waiting in the transcription queue.'})
+        queue = list(state.get('queue') or [])
+        queue.append(recording)
+        state.update({'state':'queued','session_dir':recording.get('session_dir',''),'title':recording.get('title','Meeting'),'message':recording['message'],'recording':None,'queue':queue,'queue_length':len(queue)})
+    else:
+        state['state'] = 'processing'
     state_file.write_text(json.dumps(state))
     print(json.dumps(state))
 elif args[0] == 'process':
@@ -121,6 +132,11 @@ print('Fixture meeting models ready', flush=True)
         if (speakers >= 0) saved.insert(QStringLiteral("speakers"), speakers);
         return writeFile(dir.filePath(QStringLiteral("state.json")), QJsonDocument(saved).toJson());
     }
+
+    bool setStatus(const QJsonObject &status)
+    {
+        return writeFile(dir.filePath(QStringLiteral("state.json")), QJsonDocument(status).toJson());
+    }
 };
 
 template <typename T> T *control(MeetingDialog &dialog, const char *name)
@@ -150,6 +166,12 @@ private slots:
     void pollingDoesNotOverlapOrRunWhileHidden();
     void hiddenActiveMeetingKeepsPolling_data();
     void hiddenActiveMeetingKeepsPolling();
+    void startIsAvailableWhileTranscriptionAndQueueAreActive();
+    void captureStatusStaysSeparateFromTranscriptionAndQueue();
+    void retryIsAvailableOnlyWhenTargetIsNotActiveOrQueued();
+    void invalidQueueStatusFailsClosed();
+    void hiddenQueuedMeetingKeepsPolling();
+    void lastKnownCaptureCanStopAfterStatusError();
     void narrowLayoutKeepsActionsReachable();
     void destructionDisconnectsPendingWorkerCallbacks();
 };
@@ -629,6 +651,225 @@ void MeetingDialogTest::hiddenActiveMeetingKeepsPolling()
     QVERIFY(count >= 2);
     QTest::qWait(1200);
     QCOMPARE(fixture.calls(QStringLiteral("status")).size(), count);
+}
+
+void MeetingDialogTest::startIsAvailableWhileTranscriptionAndQueueAreActive()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    const QString queuedDir = fixture.dir.filePath(QStringLiteral("queued meeting"));
+    QVERIFY(QDir().mkpath(queuedDir));
+    const QJsonObject queued{{QStringLiteral("state"), QStringLiteral("queued")},
+                             {QStringLiteral("session_dir"), queuedDir},
+                             {QStringLiteral("title"), QStringLiteral("Next meeting")},
+                             {QStringLiteral("message"), QStringLiteral("Waiting in the transcription queue.")}};
+    const QJsonObject transcription{{QStringLiteral("state"), QStringLiteral("processing")},
+                                    {QStringLiteral("session_dir"), fixture.dir.filePath(QStringLiteral("previous meeting"))},
+                                    {QStringLiteral("title"), QStringLiteral("Previous meeting")},
+                                    {QStringLiteral("message"), QStringLiteral("Transcribing microphone…")},
+                                    {QStringLiteral("progress"), QJsonObject{{QStringLiteral("stage"), QStringLiteral("transcribe")},
+                                                                              {QStringLiteral("track"), QStringLiteral("microphone")},
+                                                                              {QStringLiteral("index"), 3},
+                                                                              {QStringLiteral("total"), 8}}}};
+    QVERIFY(fixture.setStatus({{QStringLiteral("state"), QStringLiteral("queued")},
+                               {QStringLiteral("session_dir"), queuedDir},
+                               {QStringLiteral("title"), QStringLiteral("Next meeting")},
+                               {QStringLiteral("message"), QStringLiteral("Waiting in the transcription queue.")},
+                               {QStringLiteral("recording"), QJsonValue(QJsonValue::Null)},
+                               {QStringLiteral("transcription"), transcription},
+                               {QStringLiteral("queue"), QJsonArray{queued}},
+                               {QStringLiteral("queue_length"), 1}}));
+
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    auto *start = control<QPushButton>(dialog, "meetingStart");
+    QTRY_VERIFY(start->isEnabled());
+    QVERIFY(control<QLineEdit>(dialog, "meetingTitle")->isEnabled());
+    QVERIFY(control<QLineEdit>(dialog, "meetingOutput")->isEnabled());
+    QVERIFY(control<QComboBox>(dialog, "meetingMicrophone")->isEnabled());
+    QVERIFY(!control<QPushButton>(dialog, "meetingStop")->isEnabled());
+    QVERIFY(!control<QPushButton>(dialog, "meetingRetry")->isEnabled());
+    QVERIFY(!control<QPushButton>(dialog, "meetingSetup")->isEnabled());
+    const QString background = control<QLabel>(dialog, "meetingBackgroundStatus")->text();
+    QVERIFY(background.contains(QStringLiteral("Previous meeting")));
+    QVERIFY(background.contains(QStringLiteral("3/8")));
+    QVERIFY(background.contains(QStringLiteral("1 meeting waiting in queue")));
+
+    start->click();
+    QVERIFY(dialog.recordingActive());
+    dialog.close();
+    QVERIFY(dialog.isVisible());
+    QTest::keyClick(&dialog, Qt::Key_Escape);
+    QVERIFY(dialog.isVisible());
+    QTRY_VERIFY(dialog.recordingActive());
+    QTRY_VERIFY(control<QPushButton>(dialog, "meetingStop")->isEnabled());
+    QCOMPARE(fixture.calls(QStringLiteral("start")).size(), 1);
+}
+
+void MeetingDialogTest::captureStatusStaysSeparateFromTranscriptionAndQueue()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    const QString recordingDir = fixture.dir.filePath(QStringLiteral("current recording"));
+    const QString transcriptionDir = fixture.dir.filePath(QStringLiteral("previous transcription"));
+    const QString queuedDir = fixture.dir.filePath(QStringLiteral("pending transcription"));
+    const QJsonObject recording{{QStringLiteral("state"), QStringLiteral("recording")},
+                                {QStringLiteral("session_dir"), recordingDir},
+                                {QStringLiteral("title"), QStringLiteral("Current meeting")},
+                                {QStringLiteral("message"), QStringLiteral("Recording microphone and call audio.")},
+                                {QStringLiteral("mic_source"), QStringLiteral("mic.fixture")},
+                                {QStringLiteral("monitor_source"), QStringLiteral("sink.fixture.monitor")},
+                                {QStringLiteral("started_at"), QStringLiteral("2026-09-25T10:00:00Z")}};
+    const QJsonObject transcription{{QStringLiteral("state"), QStringLiteral("processing")},
+                                    {QStringLiteral("session_dir"), transcriptionDir},
+                                    {QStringLiteral("title"), QStringLiteral("Previous interview")},
+                                    {QStringLiteral("message"), QStringLiteral("Working on the remote track…")},
+                                    {QStringLiteral("progress"), QJsonObject{{QStringLiteral("stage"), QStringLiteral("transcribe")},
+                                                                              {QStringLiteral("track"), QStringLiteral("remote")},
+                                                                              {QStringLiteral("index"), 2},
+                                                                              {QStringLiteral("total"), 7}}}};
+    const QJsonObject queued{{QStringLiteral("state"), QStringLiteral("queued")},
+                             {QStringLiteral("session_dir"), queuedDir},
+                             {QStringLiteral("title"), QStringLiteral("Waiting meeting")},
+                             {QStringLiteral("message"), QStringLiteral("Waiting in the transcription queue.")}};
+    QVERIFY(fixture.setStatus({{QStringLiteral("state"), QStringLiteral("recording")},
+                               {QStringLiteral("session_dir"), recordingDir},
+                               {QStringLiteral("title"), QStringLiteral("Current meeting")},
+                               {QStringLiteral("message"), QStringLiteral("Recording microphone and call audio.")},
+                               {QStringLiteral("mic_source"), QStringLiteral("mic.fixture")},
+                               {QStringLiteral("monitor_source"), QStringLiteral("sink.fixture.monitor")},
+                               {QStringLiteral("started_at"), QStringLiteral("2026-09-25T10:00:00Z")},
+                               {QStringLiteral("recording"), recording},
+                               {QStringLiteral("transcription"), transcription},
+                               {QStringLiteral("queue"), QJsonArray{queued}},
+                               {QStringLiteral("queue_length"), 1}}));
+
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    QTRY_VERIFY(dialog.recordingActive());
+    auto *status = control<QLabel>(dialog, "meetingStatus");
+    auto *backgroundStatus = control<QLabel>(dialog, "meetingBackgroundStatus");
+    QVERIFY(status->text().contains(QStringLiteral("Recording")));
+    QVERIFY(!status->text().contains(QStringLiteral("Transcribing")));
+    QVERIFY(backgroundStatus->text().contains(QStringLiteral("Previous interview")));
+    QVERIFY(backgroundStatus->text().contains(QStringLiteral("Working on the remote track")));
+    QVERIFY(backgroundStatus->text().contains(QStringLiteral("remote")));
+    QVERIFY(backgroundStatus->text().contains(QStringLiteral("2/7")));
+    QVERIFY(backgroundStatus->text().contains(QStringLiteral("1 meeting waiting in queue")));
+    QVERIFY(!control<QPushButton>(dialog, "meetingStart")->isEnabled());
+    QVERIFY(control<QPushButton>(dialog, "meetingStop")->isEnabled());
+    QVERIFY(!control<QLineEdit>(dialog, "meetingTitle")->isEnabled());
+
+    control<QPushButton>(dialog, "meetingStop")->click();
+    QTRY_VERIFY(!dialog.recordingActive());
+    QVERIFY(!control<QPushButton>(dialog, "meetingStop")->isEnabled());
+    QVERIFY(backgroundStatus->text().contains(QStringLiteral("2 ")));
+    QVERIFY(backgroundStatus->text().contains(QStringLiteral("waiting in queue")));
+    QVERIFY(backgroundStatus->text().contains(QStringLiteral("Previous interview")));
+}
+
+void MeetingDialogTest::retryIsAvailableOnlyWhenTargetIsNotActiveOrQueued()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    const QString failedDir = fixture.dir.filePath(QStringLiteral("failed meeting"));
+    const QJsonObject transcription{{QStringLiteral("state"), QStringLiteral("processing")},
+                                    {QStringLiteral("session_dir"), fixture.dir.filePath(QStringLiteral("other meeting"))},
+                                    {QStringLiteral("title"), QStringLiteral("Other meeting")},
+                                    {QStringLiteral("message"), QStringLiteral("Transcribing…")}};
+    const auto status = [&] (const QJsonArray &queue) {
+        return QJsonObject{{QStringLiteral("state"), QStringLiteral("failed")},
+                           {QStringLiteral("session_dir"), failedDir},
+                           {QStringLiteral("title"), QStringLiteral("Failed meeting")},
+                           {QStringLiteral("recording"), QJsonValue(QJsonValue::Null)},
+                           {QStringLiteral("transcription"), transcription},
+                           {QStringLiteral("queue"), queue},
+                           {QStringLiteral("queue_length"), queue.size()}};
+    };
+    QVERIFY(fixture.setStatus(status({})));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    auto *retry = control<QPushButton>(dialog, "meetingRetry");
+    QTRY_VERIFY(retry->isEnabled());
+
+    const QJsonObject queued{{QStringLiteral("state"), QStringLiteral("queued")},
+                             {QStringLiteral("session_dir"), failedDir},
+                             {QStringLiteral("title"), QStringLiteral("Failed meeting")}};
+    QVERIFY(fixture.setStatus(status(QJsonArray{queued})));
+    QTRY_VERIFY(!retry->isEnabled());
+}
+
+void MeetingDialogTest::invalidQueueStatusFailsClosed()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    QVERIFY(fixture.setStatus({{QStringLiteral("state"), QStringLiteral("idle")},
+                               {QStringLiteral("session_dir"), QString()},
+                               {QStringLiteral("recording"), QJsonValue(QJsonValue::Null)},
+                               {QStringLiteral("transcription"), QJsonValue(QJsonValue::Null)},
+                               {QStringLiteral("queue"), QJsonArray{}},
+                               {QStringLiteral("queue_length"), 1}}));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    QTRY_VERIFY(control<QLabel>(dialog, "meetingError")->text().contains(QStringLiteral("inconsistent queue length")));
+    QVERIFY(!control<QPushButton>(dialog, "meetingStart")->isEnabled());
+    QVERIFY(!control<QPushButton>(dialog, "meetingRetry")->isEnabled());
+}
+
+void MeetingDialogTest::hiddenQueuedMeetingKeepsPolling()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    const QString queuedDir = fixture.dir.filePath(QStringLiteral("queued meeting"));
+    const QJsonObject queued{{QStringLiteral("state"), QStringLiteral("queued")},
+                             {QStringLiteral("session_dir"), queuedDir},
+                             {QStringLiteral("title"), QStringLiteral("Queued meeting")}};
+    const auto queuedStatus = QJsonObject{{QStringLiteral("state"), QStringLiteral("queued")},
+                                          {QStringLiteral("session_dir"), queuedDir},
+                                          {QStringLiteral("title"), QStringLiteral("Queued meeting")},
+                                          {QStringLiteral("recording"), QJsonValue(QJsonValue::Null)},
+                                          {QStringLiteral("transcription"), QJsonValue(QJsonValue::Null)},
+                                          {QStringLiteral("queue"), QJsonArray{queued}},
+                                          {QStringLiteral("queue_length"), 1}};
+    QVERIFY(fixture.setStatus(queuedStatus));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    QTRY_VERIFY(control<QLabel>(dialog, "meetingBackgroundStatus")->text().contains(QStringLiteral("1 meeting waiting in queue")));
+    dialog.hide();
+    const int beforeCompletion = fixture.calls(QStringLiteral("status")).size();
+    QVERIFY(beforeCompletion >= 1);
+    QVERIFY(fixture.setState(QStringLiteral("complete"), QStringLiteral("Finished while the window was hidden.")));
+    QTRY_VERIFY(fixture.calls(QStringLiteral("status")).size() > beforeCompletion);
+    const int afterCompletion = fixture.calls(QStringLiteral("status")).size();
+    QTest::qWait(1200);
+    QCOMPARE(fixture.calls(QStringLiteral("status")).size(), afterCompletion);
+}
+
+void MeetingDialogTest::lastKnownCaptureCanStopAfterStatusError()
+{
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    const QString sessionDir = fixture.dir.filePath(QStringLiteral("active recording"));
+    const QJsonObject recording{{QStringLiteral("state"), QStringLiteral("recording")},
+                                {QStringLiteral("session_dir"), sessionDir},
+                                {QStringLiteral("title"), QStringLiteral("Active meeting")}};
+    QVERIFY(fixture.setStatus({{QStringLiteral("state"), QStringLiteral("recording")},
+                               {QStringLiteral("session_dir"), sessionDir},
+                               {QStringLiteral("recording"), recording},
+                               {QStringLiteral("transcription"), QJsonValue(QJsonValue::Null)},
+                               {QStringLiteral("queue"), QJsonArray{}},
+                               {QStringLiteral("queue_length"), 0}}));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    auto *stop = control<QPushButton>(dialog, "meetingStop");
+    QTRY_VERIFY(stop->isEnabled());
+    QVERIFY(fixture.setStatus({{QStringLiteral("state"), QStringLiteral("bad-state")}}));
+    QTRY_VERIFY(control<QLabel>(dialog, "meetingError")->text().contains(QStringLiteral("unknown state")));
+    QVERIFY(dialog.recordingActive());
+    QVERIFY(stop->isEnabled());
+    stop->click();
+    QTRY_VERIFY(!dialog.recordingActive());
+    QVERIFY(!stop->isEnabled());
 }
 
 void MeetingDialogTest::narrowLayoutKeepsActionsReachable()
