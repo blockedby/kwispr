@@ -70,3 +70,7 @@ Staged install example:
 ```bash
 DESTDIR=/tmp/kde-whisper-install cmake --install kde-whisper/build --prefix /usr
 ```
+
+## Transcribing audio files
+
+Open **Meetings…** from the tray and select the **Audio files** tab. Choose a save folder, then add one or more Telegram voice messages or other audio files. The tab uses the local Whisper runtime and processes files in order; each completed item shows its transcript for reading and offers explicit **Copy text** and **Open saved folder** actions. The default save root is `~/Documents/Kwispr/Transcriptions`. Closing the window hides it while the queue continues. Kwispr prevents Quit until the active file and queued files finish. Meeting recording remains available on the **Meetings** tab during file transcription.

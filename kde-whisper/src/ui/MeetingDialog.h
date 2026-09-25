@@ -14,6 +14,8 @@ class QPushButton;
 class QSpinBox;
 class QTimer;
 class QJsonObject;
+class QTabWidget;
+class AudioFilesWidget;
 
 class MeetingDialog : public QDialog
 {
@@ -25,6 +27,8 @@ public:
                            FolderOpener folderOpener = {});
     ~MeetingDialog() override;
     bool recordingActive() const;
+    bool audioFilesPending() const;
+    void showAudioFiles();
 
 signals:
     void meetingStateChanged(const QString &state);
@@ -117,4 +121,6 @@ private:
     QPushButton *m_stopButton;
     QPushButton *m_retryButton;
     QPushButton *m_openFolderButton;
+    QTabWidget *m_tabs;
+    AudioFilesWidget *m_audioFiles;
 };

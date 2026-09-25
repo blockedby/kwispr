@@ -238,6 +238,13 @@ void TrayApp::quitApplication()
                                  QStringLiteral("Stop the meeting recording before quitting Kwispr."));
         return;
     }
+    if (m_meetingDialog && m_meetingDialog->audioFilesPending()) {
+        m_meetingDialog->showAudioFiles();
+        openMeetings();
+        QMessageBox::information(m_meetingDialog, QStringLiteral("Audio transcription"),
+                                 QStringLiteral("Audio files are still being transcribed. Wait for the queue to finish before quitting Kwispr."));
+        return;
+    }
     qApp->quit();
 }
 
