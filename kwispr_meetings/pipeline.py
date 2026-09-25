@@ -316,6 +316,7 @@ def _request_transcription(pcm, config, *, language="", vocabulary=True):
         with opener.open(request, timeout=180) as response:
             result = json.loads(response.read(2 * 1024 * 1024))
     except urllib.error.HTTPError as error:
+        error.close()
         raise RuntimeError(f"Local transcription returned HTTP {error.code}. Audio was kept; fix the endpoint/model and retry.") from error
     except (urllib.error.URLError, TimeoutError, ValueError) as error:
         raise RuntimeError(f"Local transcription failed ({type(error).__name__}). Audio and completed turns were kept; retry when the server is ready.") from error

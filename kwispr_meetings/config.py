@@ -19,7 +19,7 @@ def config_path() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser() / "kwispr/config.env"
 
 
-def load_config(path: Path | None = None) -> dict[str, str]:
+def load_config(path: Path | None = None, *, meeting_overrides: bool = True) -> dict[str, str]:
     """Load shell-quoted assignments without expansion; environment wins."""
     config: dict[str, str] = {}
     source = path or config_path()
@@ -44,21 +44,20 @@ def load_config(path: Path | None = None) -> dict[str, str]:
     # Meetings can keep a local recognition endpoint while ordinary dictation
     # opts into a separate backend. Presence, including an empty value, matters
     # so a meeting API key can explicitly clear a key inherited from dictation.
-    meeting_overrides = {
+    override_keys = {
         "KWISPR_MEETING_BACKEND": "KWISPR_BACKEND",
         "KWISPR_MEETING_API_URL": "KWISPR_API_URL",
         "KWISPR_MEETING_MODEL": "KWISPR_MODEL",
         "KWISPR_MEETING_API_KEY": "KWISPR_API_KEY",
         "KWISPR_MEETING_LOCAL_STT_CONFIGURED": "KWISPR_LOCAL_STT_CONFIGURED",
     }
-    for meeting_key, general_key in meeting_overrides.items():
-        if meeting_key in config:
-            config[general_key] = config[meeting_key]
-            if meeting_key == "KWISPR_MEETING_API_KEY":
-                # Pipeline key selection falls back to OPENAI_API_KEY when the
-                # Kwispr key is empty. Suppress that fallback for explicit
-                # meeting-key overrides, including an intentional blank.
-                config["OPENAI_API_KEY"] = ""
+    if meeting_overrides:
+        for meeting_key, general_key in override_keys.items():
+            if meeting_key in config:
+                config[general_key] = config[meeting_key]
+                if meeting_key == "KWISPR_MEETING_API_KEY":
+                    # Suppress key fallback for an intentional blank override.
+                    config["OPENAI_API_KEY"] = ""
     return config
 
 
