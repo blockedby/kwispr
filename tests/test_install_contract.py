@@ -141,6 +141,7 @@ class InstallerContractTest(unittest.TestCase):
             runtime / "kwispr-models.py",
             runtime / "kwispr-meetings.py",
             runtime / "kwispr-meetings-setup.py",
+            runtime / "kwispr-files.py",
             runtime / "kwispr_meetings" / "pipeline.py",
             runtime / "kwispr_meetings" / "sessions.py",
             runtime / "models" / "local-stt-catalog.json",
@@ -151,6 +152,12 @@ class InstallerContractTest(unittest.TestCase):
             self.assertTrue(path.exists(), path)
 
         self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+        file_help = subprocess.run(
+            [str(cli), "files", "--help"], env=self.env(), text=True,
+            capture_output=True, timeout=10,
+        )
+        self.assertEqual(file_help.returncode, 0, file_help.stderr)
+        self.assertIn("transcribe", file_help.stdout)
         self.assertEqual(config.read_text(encoding="utf-8"), self.legacy_config.read_text(encoding="utf-8"))
         self.assertIn(f'Exec="{tray}"', desktop.read_text(encoding="utf-8"))
         self.assertIn(f'Exec="{tray}"', autostart.read_text(encoding="utf-8"))

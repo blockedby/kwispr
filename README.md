@@ -9,7 +9,8 @@ Press a hotkey, speak, and press it again. Kwispr transcribes your speech, copie
 - Russian, English, and mixed-language speech;
 - KDE tray, notifications, and sound cues;
 - recording archive with retry support;
-- [meeting recordings with speaker-labelled transcripts saved to files](docs/meetings.md).
+- [meeting recordings with speaker-labelled transcripts saved to files](docs/meetings.md);
+- [local transcription of audio files, including Telegram voice messages](docs/audio-files.md).
 
 ![Kwispr demo](demo.gif)
 

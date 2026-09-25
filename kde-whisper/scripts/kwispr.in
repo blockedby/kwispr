@@ -18,6 +18,10 @@ case "${1:-}" in
         shift
         exec "$runtime_root/kwispr-meetings.py" "$@"
         ;;
+    files)
+        shift
+        exec "$runtime_root/kwispr-files.py" "$@"
+        ;;
 esac
 
 exec "$runtime_root/kwispr.sh" "$@"
