@@ -24,6 +24,8 @@ CAPTURING = {"starting", "recording", "stopping"}
 ACTIVE = CAPTURING | {"processing", "queued"}
 STOP_TIMEOUT_SECONDS = 8
 START_TIMEOUT_SECONDS = 20
+TRANSCRIPTION_OPTIONS = ("KWISPR_MODEL", "KWISPR_MEETING_MIC_LANGUAGE", "KWISPR_MEETING_REMOTE_LANGUAGE",
+                         "KWISPR_WHISPER_ALLOWED_LANGUAGES", "KWISPR_VOCABULARY")
 
 
 class SessionError(RuntimeError):
@@ -136,7 +138,14 @@ def current_locked(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 def public_status(session: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in session.items()
-            if key not in {"token", "worker_pid", "worker_identity", "stop_requested"}}
+            if key not in {"token", "worker_pid", "worker_identity", "stop_requested", "transcription_options"}}
+
+
+def transcription_options(config: dict[str, str]) -> dict[str, str]:
+    # Queue each meeting with its own language/context choices. Credentials and
+    # server connection settings remain in the private live config, not audio folders.
+    return {key: config.get(key, "whisper-large-v3-turbo" if key == "KWISPR_MODEL" else "")
+            for key in TRANSCRIPTION_OPTIONS}
 
 
 def status() -> dict[str, Any]:
@@ -382,6 +391,7 @@ def start(config: dict[str, str], mic: str | None = None, monitor: str | None = 
                    "token": uuid.uuid4().hex, "state": "starting", "message": "Starting audio capture…",
                    "title": title.strip() or "Meeting", "started_at": now(), "updated_at": now(),
                    "mic_source": mic, "monitor_source": monitor, "speakers": count, "stop_delay_ms": stop_delay_ms,
+                   "transcription_options": transcription_options(config),
                    "microphone_offset_seconds": 0.0, "remote_offset_seconds": 0.0}
         atomic_json(directory / "session.json", session)
         process = launch_locked(root, directory, session, "record")
@@ -432,7 +442,8 @@ def retry(directory: Path, config: dict[str, str], speakers: int | None = None) 
         if count is not None:
             session["speakers"] = count
         session.update(token=uuid.uuid4().hex, session_dir=str(directory), state="queued",
-                       message="Waiting in the transcription queue.", updated_at=now(), stop_requested=False)
+                       message="Waiting in the transcription queue.", updated_at=now(), stop_requested=False,
+                       transcription_options=transcription_options(config))
         enqueue_locked(root, directory, session)
         if previous.get("state") not in CAPTURING:
             atomic_json(root / "current.json", {"session_dir": str(directory), "token": session["token"]})
@@ -532,6 +543,11 @@ def worker(directory: Path, token: str, mode: str) -> int:
             if pointer.get("token") != token or pointer.get("worker_pid") != os.getpid():
                 raise SessionError("Worker does not own this meeting session.")
         config = load_config()
+        if mode == "process":
+            options = read_json(directory / "session.json").get("transcription_options", {})
+            if not isinstance(options, dict) or any(not isinstance(value, str) for value in options.values()):
+                raise SessionError("Invalid saved transcription options. Audio was kept.")
+            config.update({key: value for key, value in options.items() if key in TRANSCRIPTION_OPTIONS})
         if mode == "record":
             record(directory, token, lambda: interrupted)
             # Audio is finalized before the recorder releases its slot. A new

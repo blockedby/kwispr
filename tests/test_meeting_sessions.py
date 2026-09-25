@@ -44,6 +44,7 @@ import os, json, time, fcntl
 def require_ready(config):
     if os.environ.get('FAIL_READY'): raise RuntimeError('Install the meeting models first.')
 def process_session(directory, config, progress_callback=None):
+    (Path(directory)/'options.json').write_text(json.dumps({k:v for k,v in config.items() if k in ('KWISPR_MEETING_MIC_LANGUAGE','KWISPR_MEETING_REMOTE_LANGUAGE','KWISPR_VOCABULARY')}))
     if progress_callback: progress_callback('Transcribing test audio')
     if os.environ.get('QUEUE_TEST_DIR'):
         root = Path(os.environ['QUEUE_TEST_DIR'])
@@ -281,6 +282,8 @@ class DetachedMeetingTests(unittest.TestCase):
         a = self.run_cli('start','--title','A')
         self.run_cli('stop')
         self.wait_processing('A')
+        with (self.root/'config.env').open('a') as config:
+            config.write('KWISPR_MEETING_MIC_LANGUAGE=ru\nKWISPR_VOCABULARY=Cointelegraph\n')
         b = self.run_cli('start','--title','B')
         self.assertEqual(b['state'], 'recording')
         self.assertEqual(b['recording']['title'], 'B')
@@ -293,6 +296,8 @@ class DetachedMeetingTests(unittest.TestCase):
         self.assertEqual([x['title'] for x in queued['queue']], ['B'])
         self.assertEqual(queued['queue_length'],1)
         self.assertIn('already queued',self.run_cli('process',b['session_dir'],ok=False)['message'])
+        with (self.root/'config.env').open('a') as config:
+            config.write('KWISPR_MEETING_MIC_LANGUAGE=en\nKWISPR_VOCABULARY=Example\n')
         c = self.run_cli('start','--title','C')
         self.run_cli('stop')
         queued = self.wait_state({'queued'})
@@ -310,6 +315,13 @@ class DetachedMeetingTests(unittest.TestCase):
         final = self.wait_state({'complete'})
         self.assertEqual(final['title'],'C')
         self.assertEqual((probe/'events').read_text().splitlines(),['A','B','C'])
+        b_options = json.loads((Path(b['session_dir'])/'options.json').read_text())
+        c_options = json.loads((Path(c['session_dir'])/'options.json').read_text())
+        self.assertEqual(b_options['KWISPR_MEETING_MIC_LANGUAGE'],'ru')
+        self.assertEqual(b_options['KWISPR_VOCABULARY'],'Cointelegraph')
+        self.assertEqual(c_options['KWISPR_MEETING_MIC_LANGUAGE'],'en')
+        self.assertEqual(c_options['KWISPR_VOCABULARY'],'Example')
+        self.assertNotIn('transcription_options',queued['queue'][0])
         self.assertTrue(all(Path(p).read_bytes()==data for p,data in before.items()))
 
     def test_failed_job_continues_queue(self):
