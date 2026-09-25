@@ -1,4 +1,5 @@
 #include "ui/MeetingDialog.h"
+#include "ui/AudioFilesWidget.h"
 
 #include "config/EnvFile.h"
 
@@ -28,6 +29,7 @@
 #include <QShowEvent>
 #include <QSpinBox>
 #include <QStandardPaths>
+#include <QTabWidget>
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QTimer>
@@ -171,19 +173,27 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     setMinimumSize(380, 380);
 
     auto *layout = new QVBoxLayout(this);
-    m_statusLabel = wrapLabel(tr("Checking meeting status…"), this);
+    m_tabs = new QTabWidget(this);
+    m_tabs->setObjectName(QStringLiteral("kwisprTabs"));
+    layout->addWidget(m_tabs);
+    auto *meetingPage = new QWidget(m_tabs);
+    auto *meetingLayout = new QVBoxLayout(meetingPage);
+    m_tabs->addTab(meetingPage, tr("Meetings"));
+    m_audioFiles = new AudioFilesWidget(m_runtimeRoot, m_configPath, m_folderOpener, m_tabs);
+    m_tabs->addTab(m_audioFiles, tr("Audio files"));
+    m_statusLabel = wrapLabel(tr("Checking meeting status…"), meetingPage);
     m_statusLabel->setObjectName(QStringLiteral("meetingStatus"));
     QFont statusFont = m_statusLabel->font();
     statusFont.setBold(true);
     m_statusLabel->setFont(statusFont);
-    layout->addWidget(m_statusLabel);
-    m_progress = new QProgressBar(this);
+    meetingLayout->addWidget(m_statusLabel);
+    m_progress = new QProgressBar(meetingPage);
     m_progress->setRange(0, 0);
     m_progress->setTextVisible(false);
     m_progress->setMaximumHeight(6);
-    layout->addWidget(m_progress);
+    meetingLayout->addWidget(m_progress);
 
-    auto *scroll = new QScrollArea(this);
+    auto *scroll = new QScrollArea(meetingPage);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -271,24 +281,24 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     bodyLayout->addLayout(form);
     bodyLayout->addStretch();
     scroll->setWidget(body);
-    layout->addWidget(scroll, 1);
+    meetingLayout->addWidget(scroll, 1);
 
     auto *recordActions = new QHBoxLayout;
-    m_startButton = new QPushButton(tr("Start recording"), this);
+    m_startButton = new QPushButton(tr("Start recording"), meetingPage);
     m_startButton->setObjectName(QStringLiteral("meetingStart"));
-    m_stopButton = new QPushButton(tr("Stop && transcribe"), this);
+    m_stopButton = new QPushButton(tr("Stop && transcribe"), meetingPage);
     m_stopButton->setObjectName(QStringLiteral("meetingStop"));
     recordActions->addWidget(m_startButton);
     recordActions->addWidget(m_stopButton);
-    layout->addLayout(recordActions);
+    meetingLayout->addLayout(recordActions);
     auto *fileActions = new QHBoxLayout;
-    m_retryButton = new QPushButton(tr("Retry transcription"), this);
+    m_retryButton = new QPushButton(tr("Retry transcription"), meetingPage);
     m_retryButton->setObjectName(QStringLiteral("meetingRetry"));
-    m_openFolderButton = new QPushButton(tr("Open saved folder"), this);
+    m_openFolderButton = new QPushButton(tr("Open saved folder"), meetingPage);
     m_openFolderButton->setObjectName(QStringLiteral("meetingOpenFolder"));
     fileActions->addWidget(m_retryButton);
     fileActions->addWidget(m_openFolderButton);
-    layout->addLayout(fileActions);
+    meetingLayout->addLayout(fileActions);
     for (auto *button : findChildren<QPushButton *>()) {
         button->setAutoDefault(false);
         button->setMinimumHeight(28);
@@ -837,6 +847,16 @@ bool MeetingDialog::captureActive() const
 bool MeetingDialog::recordingActive() const
 {
     return captureActive();
+}
+
+bool MeetingDialog::audioFilesPending() const
+{
+    return m_audioFiles->hasPendingWork();
+}
+
+void MeetingDialog::showAudioFiles()
+{
+    m_tabs->setCurrentWidget(m_audioFiles);
 }
 
 void MeetingDialog::updatePolling()

@@ -36,6 +36,7 @@ add_library(kde_whisper_core STATIC
     src/models/ModelCatalog.cpp
     src/models/ModelManager.cpp
     src/ui/GlobalShortcut.cpp
+    src/ui/AudioFilesWidget.cpp
     src/ui/MeetingDialog.cpp
     src/ui/SettingsDialog.cpp
     src/ui/TrayApp.cpp
@@ -60,6 +61,7 @@ install(PROGRAMS
     "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr-models.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr-meetings.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr-meetings-setup.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr-files.py"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/kwispr/runtime")
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../kwispr_meetings"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/kwispr/runtime"
@@ -113,6 +115,11 @@ if(BUILD_TESTING)
     target_link_libraries(MeetingDialogTest PRIVATE kde_whisper_core Qt6::Test Qt6::Widgets)
     add_test(NAME MeetingDialogTest COMMAND MeetingDialogTest)
     set_tests_properties(MeetingDialogTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(AudioFilesWidgetTest tests/audio_files_widget_test.cpp)
+    target_link_libraries(AudioFilesWidgetTest PRIVATE kde_whisper_core Qt6::Test Qt6::Widgets)
+    add_test(NAME AudioFilesWidgetTest COMMAND AudioFilesWidgetTest)
+    set_tests_properties(AudioFilesWidgetTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;AUDIO_FILES_SCREENSHOT=${CMAKE_BINARY_DIR}/audio-files-tab.png;AUDIO_FILES_TABS_SCREENSHOT=${CMAKE_BINARY_DIR}/audio-files-dialog.png")
 
     add_executable(LocalSttClientTest tests/local_stt_client_test.cpp)
     target_link_libraries(LocalSttClientTest PRIVATE kde_whisper_core Qt6::Test Qt6::Network)

@@ -53,6 +53,7 @@ set(expected_files
     "${DESTDIR}/usr/lib/kwispr/kde-whisper"
     "${DESTDIR}/usr/share/kwispr/runtime/kwispr.sh"
     "${DESTDIR}/usr/share/kwispr/runtime/kwispr-models.py"
+    "${DESTDIR}/usr/share/kwispr/runtime/kwispr-files.py"
     "${DESTDIR}/usr/share/kwispr/runtime/models/local-stt-catalog.json"
     "${DESTDIR}/usr/share/kwispr/runtime/sounds/start.wav"
     "${DESTDIR}/usr/share/kwispr/runtime/sounds/stop.wav"
@@ -77,6 +78,16 @@ execute_process(
 )
 if(NOT installed_cli_result EQUAL 0 OR installed_cli_out STREQUAL "")
     message(FATAL_ERROR "Installed relocatable CLI failed: ${installed_cli_out}${installed_cli_err}")
+endif()
+
+execute_process(
+    COMMAND "${DESTDIR}/usr/bin/kwispr" files --help
+    RESULT_VARIABLE installed_files_result
+    OUTPUT_VARIABLE installed_files_out
+    ERROR_VARIABLE installed_files_err
+)
+if(NOT installed_files_result EQUAL 0 OR NOT installed_files_out MATCHES "transcribe")
+    message(FATAL_ERROR "Installed audio-file CLI failed: ${installed_files_out}${installed_files_err}")
 endif()
 
 # A nested bindir and non-default lib/data directories must still resolve the
