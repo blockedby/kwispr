@@ -194,6 +194,9 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     m_messageLabel = wrapLabel(QString(), body);
     m_messageLabel->setObjectName(QStringLiteral("meetingMessage"));
     bodyLayout->addWidget(m_messageLabel);
+    m_backgroundStatusLabel = wrapLabel(QString(), body);
+    m_backgroundStatusLabel->setObjectName(QStringLiteral("meetingBackgroundStatus"));
+    bodyLayout->addWidget(m_backgroundStatusLabel);
     m_errorLabel = wrapLabel(QString(), body);
     m_errorLabel->setObjectName(QStringLiteral("meetingError"));
     m_errorLabel->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
@@ -535,15 +538,168 @@ void MeetingDialog::refreshStatus()
 void MeetingDialog::applyStatus(const QJsonObject &status)
 {
     const QString state = status.value(QStringLiteral("state")).toString();
-    const QStringList validStates = {QStringLiteral("idle"), QStringLiteral("starting"), QStringLiteral("recording"), QStringLiteral("stopping"), QStringLiteral("processing"), QStringLiteral("complete"), QStringLiteral("failed")};
+    const QStringList validStates = {QStringLiteral("idle"), QStringLiteral("starting"), QStringLiteral("recording"), QStringLiteral("stopping"), QStringLiteral("queued"), QStringLiteral("processing"), QStringLiteral("complete"), QStringLiteral("failed")};
     if (!validStates.contains(state)) {
         m_statusKnown = false;
         m_statusError = tr("The meeting worker returned an unknown state: %1").arg(state);
         updateUi();
         return;
     }
+
+    const bool hasRecording = status.contains(QStringLiteral("recording"));
+    const bool hasTranscription = status.contains(QStringLiteral("transcription"));
+    const bool hasQueue = status.contains(QStringLiteral("queue"));
+    const bool hasQueueLength = status.contains(QStringLiteral("queue_length"));
+    const bool hasAnyQueueField = hasRecording || hasTranscription || hasQueue || hasQueueLength;
+    const bool hasAllQueueFields = hasRecording && hasTranscription && hasQueue && hasQueueLength;
+    if (hasAnyQueueField && !hasAllQueueFields) {
+        m_statusKnown = false;
+        m_statusError = tr("The meeting worker returned an incomplete recording queue status.");
+        updateUi();
+        return;
+    }
+
+    bool recordingActive = false;
+    QString recordingSessionDir;
+    bool transcriptionActive = false;
+    QString transcriptionSessionDir;
+    QString backgroundStatus;
+    QStringList queuedSessionDirs;
+    int queueLength = 0;
+    if (hasAllQueueFields) {
+        const QJsonValue recordingValue = status.value(QStringLiteral("recording"));
+        if (!recordingValue.isNull() && !recordingValue.isObject()) {
+            m_statusKnown = false;
+            m_statusError = tr("The meeting worker returned an invalid recording status.");
+            updateUi();
+            return;
+        }
+        if (recordingValue.isObject()) {
+            const QJsonObject recording = recordingValue.toObject();
+            const QString recordingState = recording.value(QStringLiteral("state")).toString();
+            recordingSessionDir = recording.value(QStringLiteral("session_dir")).toString();
+            if (!QStringList{QStringLiteral("starting"), QStringLiteral("recording"), QStringLiteral("stopping")}.contains(recordingState)
+                || recordingSessionDir.isEmpty() || state != recordingState) {
+                m_statusKnown = false;
+                m_statusError = tr("The meeting worker returned an inconsistent recording status.");
+                updateUi();
+                return;
+            }
+            recordingActive = true;
+        } else if (state == QStringLiteral("starting") || state == QStringLiteral("recording") || state == QStringLiteral("stopping")) {
+            m_statusKnown = false;
+            m_statusError = tr("The meeting worker omitted the active recording status.");
+            updateUi();
+            return;
+        }
+
+        const QJsonValue transcriptionValue = status.value(QStringLiteral("transcription"));
+        if (!transcriptionValue.isNull() && !transcriptionValue.isObject()) {
+            m_statusKnown = false;
+            m_statusError = tr("The meeting worker returned an invalid transcription status.");
+            updateUi();
+            return;
+        }
+        if (transcriptionValue.isObject()) {
+            const QJsonObject transcription = transcriptionValue.toObject();
+            transcriptionSessionDir = transcription.value(QStringLiteral("session_dir")).toString();
+            if (transcription.value(QStringLiteral("state")).toString() != QStringLiteral("processing") || transcriptionSessionDir.isEmpty()) {
+                m_statusKnown = false;
+                m_statusError = tr("The meeting worker returned an inconsistent transcription status.");
+                updateUi();
+                return;
+            }
+            transcriptionActive = true;
+            const QString title = transcription.value(QStringLiteral("title")).toString().trimmed();
+            const QString message = transcription.value(QStringLiteral("message")).toString().trimmed();
+            QStringList details;
+            if (!message.isEmpty()) {
+                details.append(message);
+            }
+            const QJsonValue progressValue = transcription.value(QStringLiteral("progress"));
+            if (progressValue.isObject()) {
+                const QJsonObject progress = progressValue.toObject();
+                QStringList progressParts;
+                const QString stage = progress.value(QStringLiteral("stage")).toString().trimmed();
+                const QString track = progress.value(QStringLiteral("track")).toString().trimmed();
+                if (!stage.isEmpty()) progressParts.append(stage);
+                if (!track.isEmpty()) progressParts.append(track);
+                const QJsonValue indexValue = progress.value(QStringLiteral("index"));
+                const QJsonValue totalValue = progress.value(QStringLiteral("total"));
+                const int progressIndex = indexValue.toInt(-1);
+                const int progressTotal = totalValue.toInt(-1);
+                if (progressIndex >= 0 && progressTotal > 0) {
+                    progressParts.append(tr("%1/%2").arg(progressIndex).arg(progressTotal));
+                }
+                if (!progressParts.isEmpty()) {
+                    details.append(progressParts.join(QStringLiteral(" · ")));
+                }
+            }
+            backgroundStatus = tr("Transcribing %1")
+                .arg(title.isEmpty() ? tr("meeting") : title);
+            if (!details.isEmpty()) {
+                backgroundStatus += QStringLiteral(" — ") + details.join(QStringLiteral(" · "));
+            }
+        }
+
+        const QJsonValue queueValue = status.value(QStringLiteral("queue"));
+        const QJsonValue queueLengthValue = status.value(QStringLiteral("queue_length"));
+        if (!queueValue.isArray() || !queueLengthValue.isDouble()) {
+            m_statusKnown = false;
+            m_statusError = tr("The meeting worker returned an invalid queue.");
+            updateUi();
+            return;
+        }
+        const double reportedQueueLength = queueLengthValue.toDouble(-1.0);
+        const QJsonArray queue = queueValue.toArray();
+        if (reportedQueueLength < 0.0 || reportedQueueLength != static_cast<double>(queue.size())) {
+            m_statusKnown = false;
+            m_statusError = tr("The meeting worker returned an inconsistent queue length.");
+            updateUi();
+            return;
+        }
+        queueLength = queue.size();
+        for (const QJsonValue &value : queue) {
+            if (!value.isObject()) {
+                m_statusKnown = false;
+                m_statusError = tr("The meeting worker returned an invalid queued meeting.");
+                updateUi();
+                return;
+            }
+            const QJsonObject queued = value.toObject();
+            const QString sessionDir = queued.value(QStringLiteral("session_dir")).toString();
+            if (queued.value(QStringLiteral("state")).toString() != QStringLiteral("queued") || sessionDir.isEmpty()) {
+                m_statusKnown = false;
+                m_statusError = tr("The meeting worker returned an invalid queued meeting.");
+                updateUi();
+                return;
+            }
+            queuedSessionDirs.append(sessionDir);
+        }
+        if (queueLength > 0) {
+            const QString waiting = queueLength == 1
+                ? tr("1 meeting waiting in queue")
+                : tr("%1 meetings waiting in queue").arg(queueLength);
+            backgroundStatus = backgroundStatus.isEmpty() ? waiting : backgroundStatus + QLatin1Char('\n') + waiting;
+        }
+    } else if (state == QStringLiteral("processing")) {
+        // Older workers expose a single processing state and do not support
+        // concurrent capture or a durable queue.
+        backgroundStatus.clear();
+    }
+
     const bool changed = m_state != state;
     m_state = state;
+    m_hasQueueContract = hasAllQueueFields;
+    m_recordingActive = recordingActive;
+    m_recordingSessionDir = recordingSessionDir;
+    m_transcriptionActive = transcriptionActive;
+    m_transcriptionSessionDir = transcriptionSessionDir;
+    m_queuedSessionDirs = queuedSessionDirs;
+    m_queueLength = queueLength;
+    m_backgroundStatus = backgroundStatus;
+    m_statusKnown = true;
+    m_statusError.clear();
     m_message = status.value(QStringLiteral("message")).toString();
     m_sessionDir = status.value(QStringLiteral("session_dir")).toString();
     if (!m_sessionDir.isEmpty() && m_speakersSessionDir != m_sessionDir) {
@@ -599,7 +755,8 @@ void MeetingDialog::startMeeting()
 
 void MeetingDialog::setupModels()
 {
-    if (m_setupBusy || m_commandBusy || captureActive() || m_state == QStringLiteral("processing")) {
+    const bool processing = m_hasQueueContract ? m_transcriptionActive : m_state == QStringLiteral("processing");
+    if (m_setupBusy || m_commandBusy || captureActive() || processing) {
         return;
     }
     ++m_generation;
@@ -669,6 +826,11 @@ bool MeetingDialog::saveChoices(bool languagesOnly)
 
 bool MeetingDialog::captureActive() const
 {
+    if (m_hasQueueContract) {
+        // A Start command is asynchronous: retain the pending-start capture
+        // state until its response updates the nested recording object.
+        return m_recordingActive || m_state == QStringLiteral("starting");
+    }
     return m_state == QStringLiteral("recording") || m_state == QStringLiteral("starting") || m_state == QStringLiteral("stopping");
 }
 
@@ -679,7 +841,8 @@ bool MeetingDialog::recordingActive() const
 
 void MeetingDialog::updatePolling()
 {
-    const bool active = captureActive() || m_state == QStringLiteral("processing") || m_commandBusy || m_setupBusy;
+    const bool processing = m_hasQueueContract ? m_transcriptionActive : m_state == QStringLiteral("processing");
+    const bool active = captureActive() || processing || m_queueLength > 0 || m_commandBusy || m_setupBusy;
     if (isVisible() || active) {
         if (!m_pollTimer->isActive()) {
             m_pollTimer->start();
@@ -694,16 +857,24 @@ void MeetingDialog::updateUi()
     updatePolling();
     updateDeviceDetails();
     const bool capturing = captureActive();
-    const bool processing = m_state == QStringLiteral("processing");
-    const bool editable = !capturing && !processing && !m_commandBusy && !m_setupBusy;
+    const bool processing = m_hasQueueContract ? m_transcriptionActive : m_state == QStringLiteral("processing");
+    // New workers permit a fresh capture while an earlier session is being
+    // transcribed. Legacy workers keep their previous single-session behavior.
+    const bool editable = !capturing && (m_hasQueueContract || m_state != QStringLiteral("processing"))
+        && !m_commandBusy && !m_setupBusy;
     for (QWidget *field : QList<QWidget *>{m_titleEdit, m_micCombo, m_monitorCombo, m_micLanguageCombo, m_remoteLanguageCombo, m_outputEdit, m_speakersSpin, m_browseButton}) {
         field->setEnabled(editable);
     }
     m_refreshButton->setEnabled(editable && m_sourcesProcess->state() == QProcess::NotRunning);
-    m_setupButton->setEnabled(editable && QFileInfo::exists(m_runtimeRoot + QStringLiteral("/kwispr-meetings-setup.py")));
+    m_setupButton->setEnabled(editable && !processing && QFileInfo::exists(m_runtimeRoot + QStringLiteral("/kwispr-meetings-setup.py")));
     m_startButton->setEnabled(editable && m_statusKnown && m_sourcesLoaded && m_micCombo->currentIndex() >= 0 && m_monitorCombo->currentIndex() >= 0 && !m_outputEdit->text().trimmed().isEmpty());
-    m_stopButton->setEnabled(m_state == QStringLiteral("recording") && !m_commandBusy);
-    m_retryButton->setEnabled(m_state == QStringLiteral("failed") && !m_sessionDir.isEmpty() && !m_commandBusy && !m_setupBusy);
+    // A failed status poll must not hide the Stop action for a last-known live
+    // capture. The previous valid recording object is retained on parse errors.
+    m_stopButton->setEnabled(capturing && m_state == QStringLiteral("recording") && !m_commandBusy);
+    const bool retryTargetBusy = capturing || (!m_sessionDir.isEmpty()
+        && (m_sessionDir == m_recordingSessionDir || m_sessionDir == m_transcriptionSessionDir || m_queuedSessionDirs.contains(m_sessionDir)));
+    m_retryButton->setEnabled(m_statusKnown && m_state == QStringLiteral("failed") && !m_sessionDir.isEmpty()
+                               && !retryTargetBusy && !m_commandBusy && !m_setupBusy);
     m_openFolderButton->setEnabled(!m_folderOpenBusy && !m_sessionDir.isEmpty() && QFileInfo(m_sessionDir).isDir());
     m_openFolderButton->setText(m_folderOpenBusy ? tr("Opening folder…") : tr("Open saved folder"));
     m_progress->setVisible(m_commandBusy || m_setupBusy || processing || (m_state == QStringLiteral("loading") && m_statusError.isEmpty()) || m_state == QStringLiteral("starting") || m_state == QStringLiteral("stopping"));
@@ -711,8 +882,8 @@ void MeetingDialog::updateUi()
     QString status = tr("Ready to record");
     if (m_setupBusy) status = tr("Preparing meeting models…");
     else if (m_state == QStringLiteral("loading")) status = m_statusError.isEmpty() ? tr("Checking meeting status…") : tr("Meeting status unavailable");
-    else if (m_state == QStringLiteral("starting")) status = tr("Starting recording…");
-    else if (m_state == QStringLiteral("recording")) {
+    else if (capturing && m_state == QStringLiteral("starting")) status = tr("Starting recording…");
+    else if (capturing && m_state == QStringLiteral("recording")) {
         status = tr("● Recording");
         const auto start = QDateTime::fromString(m_startedAt, Qt::ISODate);
         if (start.isValid()) {
@@ -720,7 +891,8 @@ void MeetingDialog::updateUi()
             status += QStringLiteral(" · %1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10, QLatin1Char('0'));
         }
     }
-    else if (m_state == QStringLiteral("stopping")) status = tr("Finishing recording…");
+    else if (capturing && m_state == QStringLiteral("stopping")) status = tr("Finishing recording…");
+    else if (m_state == QStringLiteral("queued")) status = tr("Waiting in transcription queue");
     else if (processing) status = tr("Transcribing meeting…");
     else if (m_state == QStringLiteral("complete")) status = tr("Transcript saved");
     else if (m_state == QStringLiteral("failed")) status = tr("Meeting needs attention");
@@ -728,6 +900,8 @@ void MeetingDialog::updateUi()
     setWindowTitle(capturing ? tr("Recording — Meetings") : tr("Meetings"));
     m_messageLabel->setText(m_message);
     m_messageLabel->setVisible(!m_message.isEmpty());
+    m_backgroundStatusLabel->setText(m_backgroundStatus);
+    m_backgroundStatusLabel->setVisible(!m_backgroundStatus.isEmpty());
     const QString error = m_error + (!m_error.isEmpty() && !m_statusError.isEmpty() ? QStringLiteral("\n") : QString()) + m_statusError;
     m_errorLabel->setText(error);
     m_errorLabel->setVisible(!error.isEmpty());
