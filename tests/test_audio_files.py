@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -19,6 +20,19 @@ from kwispr_meetings.config import ConfigError, load_config
 
 
 class AudioFilesTest(unittest.TestCase):
+    def _video(self, root: Path, extension: str, *, audio: bool = True) -> Path:
+        source = root / f"видео с пробелами{extension}"
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                   "-f", "lavfi", "-i", "color=c=black:s=32x32:r=10:d=1.4"]
+        if audio:
+            command += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000:duration=1.4"]
+        command += ["-c:v", "mpeg4"]
+        if audio:
+            command += ["-c:a", "aac"]
+        command.append(str(source))
+        subprocess.run(command, check=True)
+        return source
+
     def _source(self, root: Path) -> Path:
         wav = root / "голос с пробелами.wav"
         # 65 seconds, with short quiet stretches at safe chunk boundaries.
@@ -166,6 +180,65 @@ class AudioFilesTest(unittest.TestCase):
                     self.assertEqual((reader.getnchannels(), reader.getsampwidth(), reader.getframerate()), (1, 2, 16000))
                     self.assertGreater(reader.getnframes(), 0)
                 self.assertEqual(converted.stat().st_mode & 0o777, 0o600)
+
+    def test_mp4_and_mkv_video_transcribe_first_audio_track(self):
+        observed = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"capabilities":{"whisper_allowed_languages":true}}')
+
+            def do_POST(self):
+                observed.append(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"text":"local transcript","language":"en"}')
+
+            def log_message(self, *args):
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary, ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                root = Path(temporary)
+                config = root / "config.env"
+                config.write_text("KWISPR_BACKEND=openai-transcriptions\n"
+                                  f"KWISPR_API_URL=http://127.0.0.1:{server.server_port}/v1/audio/transcriptions\n"
+                                  "KWISPR_MODEL=whisper-large-v3-turbo\n")
+                with patch.dict(os.environ, {"KWISPR_CONFIG_FILE": str(config)}, clear=True):
+                    for extension in (".mp4", ".mkv"):
+                        source = self._video(root, extension)
+                        before = hashlib.sha256(source.read_bytes()).digest()
+                        result = transcribe(source, root / "results")
+                        document = json.loads(Path(result["transcript_json"]).read_text())
+                        self.assertEqual(result["source_path"], str(source))
+                        self.assertEqual(document["source_path"], str(source))
+                        self.assertEqual(result["text"], "local transcript")
+                        self.assertEqual(Path(result["transcript_path"]).read_text(), "local transcript\n")
+                        self.assertEqual(len(document["chunks"]), 1)
+                        self.assertGreater(document["chunks"][0]["end"], 1.25)
+                        self.assertLess(document["chunks"][0]["end"], 1.55)
+                        self.assertEqual(hashlib.sha256(source.read_bytes()).digest(), before)
+                    self.assertEqual(len(observed), 2)
+                    self.assertTrue(all(b'name="allowed_languages"\r\n\r\nru,en' in post for post in observed))
+                    silent = self._video(root, ".mov", audio=False)
+                    before = hashlib.sha256(silent.read_bytes()).digest()
+                    with self.assertRaisesRegex(RuntimeError, "no audio track to transcribe"):
+                        transcribe(silent, root / "results")
+                    command = [sys.executable, str(Path(__file__).resolve().parents[1] / "kwispr-files.py"),
+                               "transcribe", str(silent), "--output-dir", str(root / "results")]
+                    cli = subprocess.run(command, capture_output=True, text=True, env=os.environ.copy())
+                    self.assertNotEqual(cli.returncode, 0)
+                    self.assertIn("no audio track to transcribe", cli.stderr)
+                    self.assertEqual(json.loads(cli.stdout.splitlines()[-1])["event"], "error")
+                    self.assertEqual(hashlib.sha256(silent.read_bytes()).digest(), before)
+                    self.assertEqual(len(observed), 2)
+            finally:
+                server.shutdown()
+                worker.join()
 
 
 if __name__ == "__main__":

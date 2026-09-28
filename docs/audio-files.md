@@ -1,17 +1,17 @@
-# Audio file transcription
+# Audio and video file transcription
 
 Open **Meetings** from the tray, then choose the **Audio files** tab. Select a save folder and click **Add audio files…** to choose one or more saved Telegram voice messages or other audio files. Files run in order; select a completed row to read the text, **Copy text**, or **Open saved folder**. Closing the window leaves processing running. Meeting recording and ordinary dictation remain available.
 
 The installed command is `kwispr files transcribe '/path/to/voice message.ogg'`.
 
-`kwispr-files.py` imports one existing audio file and writes plain text. It uses the configured local Whisper HTTP service, with Russian and English language detection. It does not separate speakers, access the clipboard, delete the source, or use a cloud fallback.
+`kwispr-files.py` imports one existing audio or video file and writes plain text. For video, it transcribes the first audio track and ignores the picture; a video without audio reports an error. It uses the configured local Whisper HTTP service, with Russian and English language detection. It does not separate speakers, access the clipboard, delete the source, or use a cloud fallback.
 
 ```bash
 python3 kwispr-files.py transcribe '/path/to/voice message.ogg'
 python3 kwispr-files.py transcribe '/path/to/voice message.ogg' --output-dir '/path/to/results'
 ```
 
-The default result root is `~/Documents/Kwispr/Transcriptions`. Each source and transcription setting set gets its own result directory, containing `transcript.txt`, `transcript.json`, a converted `audio.wav`, and `processing-checkpoint.json`. A failed job keeps completed chunks; run the same command again to resume. The source file is only read. Supported input formats depend on installed `ffmpeg`, including OGG/Opus, MP3, and WAV.
+The default result root is `~/Documents/Kwispr/Transcriptions`. Each source and transcription setting set gets its own result directory, containing `transcript.txt`, `transcript.json`, a converted `audio.wav`, and `processing-checkpoint.json`. A failed job keeps completed chunks; run the same command again to resume. The source file is only read. Supported input formats depend on installed `ffmpeg`, including OGG/Opus, MP3, WAV, MP4, and MKV.
 
 Set `KWISPR_CONFIG_FILE` to a config file with general `KWISPR_BACKEND=openai-transcriptions`, a loopback `KWISPR_API_URL`, and a `KWISPR_MODEL` beginning with `whisper`. Meeting-specific backend/model overrides are ignored for imports. The local server must advertise `whisper_allowed_languages` in `/health` so only `ru,en` are considered. If your general dictation settings use a cloud backend, supply a separate local config file for this command. No diarization runtime is needed.
 
