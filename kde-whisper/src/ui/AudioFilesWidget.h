@@ -7,7 +7,6 @@
 #include <functional>
 
 class QLabel;
-class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
 class QProcess;
@@ -26,7 +25,7 @@ public:
     void enqueueFiles(const QStringList &paths);
 
 private:
-    struct Job { QString source; QString outputRoot; int row; };
+    struct Job { QString source; int row; };
     void startNext();
     void readOutput();
     void consumeLine(const QByteArray &line);
@@ -35,6 +34,7 @@ private:
     void showSelectedResult();
     QString m_runtimeRoot;
     QString m_configPath;
+    QString m_outputRoot;
     FolderOpener m_folderOpener;
     QQueue<Job> m_queue;
     Job m_current;
@@ -45,14 +45,12 @@ private:
     QJsonObject m_result;
     QString m_error;
     QProcess *m_process;
-    QLineEdit *m_outputEdit;
     QListWidget *m_jobs;
     QPlainTextEdit *m_transcript;
     QLabel *m_status;
     QLabel *m_errorLabel;
     QProgressBar *m_progress;
     QPushButton *m_addButton;
-    QPushButton *m_browseButton;
     QPushButton *m_copyButton;
     QPushButton *m_openButton;
 };

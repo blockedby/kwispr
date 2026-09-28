@@ -1,6 +1,6 @@
 # Audio and video file transcription
 
-Open **Meetings** from the tray, then choose the **Audio files** tab. Select a save folder and click **Add audio files…** to choose one or more saved Telegram voice messages or other audio files. Files run in order; select a completed row to read the text, **Copy text**, or **Open saved folder**. Closing the window leaves processing running. Meeting recording and ordinary dictation remain available.
+Open **Transcribe…** from the tray, choose the **Audio & video files** tab, and click **Add audio or video files…**. Select one or more saved Telegram voice messages, audio files, or videos; they enter the queue immediately. Results are saved automatically under `~/Documents/Kwispr/Transcriptions`. Select a completed row to read the text, **Copy text**, or **Open saved folder**. Closing the window leaves processing running. Meeting recording and ordinary dictation remain available.
 
 The installed command is `kwispr files transcribe '/path/to/voice message.ogg'`.
 

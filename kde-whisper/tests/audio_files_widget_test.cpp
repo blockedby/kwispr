@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -15,6 +16,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QStandardPaths>
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
@@ -99,15 +101,45 @@ elif command == 'stop':
 class AudioFilesWidgetTest : public QObject {
     Q_OBJECT
 private slots:
+    void initTestCase();
+    void cleanupTestCase();
     void chooserOffersObsVideoFiles();
     void streamsPartialProgressAndProcessesQueue();
     void hiddenMeetingWindowKeepsFileJobAndTabsIndependent();
+private:
+    QTemporaryDir m_testPaths;
+    QString m_outputRoot;
+    QByteArray m_previousXdgConfigHome;
+    bool m_hadXdgConfigHome = false;
 };
+
+void AudioFilesWidgetTest::initTestCase()
+{
+    QVERIFY(m_testPaths.isValid());
+    const QString documents = m_testPaths.filePath(QStringLiteral("Documents"));
+    QVERIFY(QDir().mkpath(documents));
+    const QString config = m_testPaths.filePath(QStringLiteral("config"));
+    QVERIFY(QDir().mkpath(config));
+    QVERIFY(writeFile(config + QStringLiteral("/user-dirs.dirs"),
+                      (QStringLiteral("XDG_DOCUMENTS_DIR=\"") + documents + QStringLiteral("\"\n")).toUtf8()));
+    m_hadXdgConfigHome = qEnvironmentVariableIsSet("XDG_CONFIG_HOME");
+    m_previousXdgConfigHome = qgetenv("XDG_CONFIG_HOME");
+    qputenv("XDG_CONFIG_HOME", config.toUtf8());
+    QCOMPARE(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation), documents);
+    m_outputRoot = documents + QStringLiteral("/Kwispr/Transcriptions");
+}
+
+void AudioFilesWidgetTest::cleanupTestCase()
+{
+    if (m_hadXdgConfigHome) qputenv("XDG_CONFIG_HOME", m_previousXdgConfigHome);
+    else qunsetenv("XDG_CONFIG_HOME");
+}
 
 void AudioFilesWidgetTest::chooserOffersObsVideoFiles()
 {
     Fixture fixture;
     QVERIFY(fixture.create());
+    const QString source = fixture.source(QStringLiteral("selected OBS recording.mkv"));
     AudioFilesWidget widget(fixture.dir.path(), fixture.dir.filePath(QStringLiteral("config.env")),
                             [](const QString &, AudioFilesWidget::FolderOpenCompletion complete) { complete(true, {}); });
     bool explainsFirstTrack = false;
@@ -115,6 +147,10 @@ void AudioFilesWidgetTest::chooserOffersObsVideoFiles()
         explainsFirstTrack |= label->text().contains(QStringLiteral("first audio track"));
     }
     QVERIFY(explainsFirstTrack);
+    QVERIFY(!widget.findChild<QLineEdit *>(QStringLiteral("audioFilesOutput")));
+    QVERIFY(!widget.findChild<QPushButton *>(QStringLiteral("audioFilesBrowse")));
+    QCOMPARE(widget.findChild<QLabel *>(QStringLiteral("audioFilesSaveHint"))->text(),
+             QStringLiteral("Transcripts are saved under %1.").arg(m_outputRoot));
     bool inspected = false;
     QTimer::singleShot(100, &widget, [&] {
         for (QWidget *topLevel : QApplication::topLevelWidgets()) {
@@ -130,13 +166,29 @@ void AudioFilesWidgetTest::chooserOffersObsVideoFiles()
             for (const auto &extension : {"*.mkv", "*.mp4", "*.mov", "*.avi", "*.webm", "*.m4v", "*.ts"}) {
                 QVERIFY(filters.at(1).contains(QString::fromLatin1(extension)));
             }
-            dialog->reject();
+            dialog->setDirectory(fixture.dir.path());
+            QTimer::singleShot(500, dialog, [dialog, source] {
+                dialog->selectFile(source);
+                dialog->findChild<QLineEdit *>(QStringLiteral("fileNameEdit"))->setText(QFileInfo(source).fileName());
+                static_cast<QDialog *>(dialog)->accept();
+            });
             return;
         }
         if (auto *modal = QApplication::activeModalWidget()) modal->close();
     });
+    QTimer::singleShot(3000, &widget, [] {
+        if (auto *modal = QApplication::activeModalWidget()) modal->close();
+    });
     widget.findChild<QPushButton *>(QStringLiteral("audioFilesAdd"))->click();
     QVERIFY(inspected);
+    auto *jobs = widget.findChild<QListWidget *>(QStringLiteral("audioFilesJobs"));
+    QTRY_COMPARE(jobs->count(), 1);
+    QTRY_COMPARE(jobs->item(0)->text(), QStringLiteral("Complete · selected OBS recording.mkv"));
+    QFile calls(fixture.dir.filePath(QStringLiteral("calls.jsonl")));
+    QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto args = QJsonDocument::fromJson(calls.readAll().trimmed()).array();
+    QCOMPARE(args.at(1).toString(), source);
+    QCOMPARE(args.at(3).toString(), m_outputRoot);
 }
 
 void AudioFilesWidgetTest::streamsPartialProgressAndProcessesQueue()
@@ -148,7 +200,7 @@ void AudioFilesWidgetTest::streamsPartialProgressAndProcessesQueue()
     QVERIFY(QFile::link(realFirst, first));
     const QString second = fixture.source(QStringLiteral("bad voice.ogg"));
     const QString third = fixture.source(QStringLiteral("last OBS recording.mkv"));
-    const QString output = fixture.dir.filePath(QStringLiteral("saved transcripts"));
+    const QString output = m_outputRoot;
     QString opened;
     AudioFilesWidget widget(fixture.dir.path(), fixture.dir.filePath(QStringLiteral("config.env")),
                             [&opened](const QString &folder, AudioFilesWidget::FolderOpenCompletion complete) {
@@ -156,7 +208,6 @@ void AudioFilesWidgetTest::streamsPartialProgressAndProcessesQueue()
                             });
     widget.resize(650, 700);
     widget.show();
-    widget.findChild<QLineEdit *>(QStringLiteral("audioFilesOutput"))->setText(output);
     widget.enqueueFiles({first, second, third});
     QVERIFY(widget.hasPendingWork());
     auto *status = widget.findChild<QLabel *>(QStringLiteral("audioFilesStatus"));
@@ -211,7 +262,6 @@ void AudioFilesWidgetTest::hiddenMeetingWindowKeepsFileJobAndTabsIndependent()
     QCOMPARE(tabs->currentIndex(), 1);
     auto *files = dialog.findChild<AudioFilesWidget *>();
     QVERIFY(files);
-    files->findChild<QLineEdit *>(QStringLiteral("audioFilesOutput"))->setText(fixture.dir.filePath(QStringLiteral("saved")));
     files->enqueueFiles({source});
     QVERIFY(dialog.audioFilesPending());
     tabs->setCurrentIndex(0);

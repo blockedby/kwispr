@@ -9,7 +9,6 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QLabel>
-#include <QLineEdit>
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QProcess>
@@ -32,23 +31,19 @@ QString defaultOutputRoot()
 
 AudioFilesWidget::AudioFilesWidget(QString runtimeRoot, QString configPath, FolderOpener folderOpener, QWidget *parent)
     : QWidget(parent), m_runtimeRoot(std::move(runtimeRoot)), m_configPath(std::move(configPath)),
+      m_outputRoot(defaultOutputRoot()),
       m_folderOpener(std::move(folderOpener)), m_process(new QProcess(this))
 {
     auto *layout = new QVBoxLayout(this);
     auto *intro = new QLabel(tr("Transcribe Telegram voice messages, audio files, and videos such as OBS recordings with local Whisper. For video, the first audio track is used. Files are processed one at a time and saved automatically."), this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
-    auto *outputRow = new QHBoxLayout;
-    m_outputEdit = new QLineEdit(defaultOutputRoot(), this);
-    m_outputEdit->setObjectName(QStringLiteral("audioFilesOutput"));
-    m_browseButton = new QPushButton(tr("Choose folder…"), this);
-    m_browseButton->setObjectName(QStringLiteral("audioFilesBrowse"));
-    outputRow->addWidget(m_outputEdit, 1);
-    outputRow->addWidget(m_browseButton);
-    auto *outputLabel = new QLabel(tr("Save &folder"), this);
-    outputLabel->setBuddy(m_outputEdit);
-    layout->addWidget(outputLabel);
-    layout->addLayout(outputRow);
+    auto *saveHint = new QLabel(tr("Transcripts are saved under %1.").arg(m_outputRoot), this);
+    saveHint->setObjectName(QStringLiteral("audioFilesSaveHint"));
+    saveHint->setTextFormat(Qt::PlainText);
+    saveHint->setWordWrap(true);
+    saveHint->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+    layout->addWidget(saveHint);
     m_addButton = new QPushButton(tr("Add audio or video files…"), this);
     m_addButton->setObjectName(QStringLiteral("audioFilesAdd"));
     layout->addWidget(m_addButton);
@@ -87,12 +82,7 @@ AudioFilesWidget::AudioFilesWidget(QString runtimeRoot, QString configPath, Fold
     actions->addWidget(m_copyButton);
     actions->addWidget(m_openButton);
     layout->addLayout(actions);
-    for (auto *button : {m_addButton, m_browseButton, m_copyButton, m_openButton}) button->setAutoDefault(false);
-
-    connect(m_browseButton, &QPushButton::clicked, this, [this] {
-        const QString path = QFileDialog::getExistingDirectory(this, tr("Save transcripts in"), m_outputEdit->text());
-        if (!path.isEmpty()) m_outputEdit->setText(path);
-    });
+    for (auto *button : {m_addButton, m_copyButton, m_openButton}) button->setAutoDefault(false);
     connect(m_addButton, &QPushButton::clicked, this, [this] {
         enqueueFiles(QFileDialog::getOpenFileNames(this, tr("Choose audio or video files"), QDir::homePath(),
             tr("Audio and video files (*.ogg *.oga *.opus *.mp3 *.m4a *.wav *.flac *.aac *.wma *.mp4 *.mkv *.mov *.avi *.webm *.m4v *.ts *.m2ts *.flv);;OBS video recordings (*.mkv *.mp4 *.mov *.webm *.flv *.ts *.m2ts *.avi *.m4v);;Audio files (*.ogg *.oga *.opus *.mp3 *.m4a *.wav *.flac *.aac *.wma);;All files (*)")));
@@ -112,7 +102,6 @@ AudioFilesWidget::AudioFilesWidget(QString runtimeRoot, QString configPath, Fold
             widget->updateActions();
         });
     });
-    connect(m_outputEdit, &QLineEdit::textChanged, this, &AudioFilesWidget::updateActions);
     connect(m_process, &QProcess::readyReadStandardOutput, this, &AudioFilesWidget::readOutput);
     connect(m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
         readOutput();
@@ -137,13 +126,7 @@ bool AudioFilesWidget::hasPendingWork() const { return m_running || !m_queue.isE
 
 void AudioFilesWidget::enqueueFiles(const QStringList &paths)
 {
-    const QString outputRoot = m_outputEdit->text().trimmed();
     if (paths.isEmpty()) return;
-    if (outputRoot.isEmpty()) {
-        m_errorLabel->setText(tr("Choose a save folder before adding files."));
-        m_errorLabel->show();
-        return;
-    }
     int added = 0;
     for (const QString &path : paths) {
         const QFileInfo source(path);
@@ -154,7 +137,7 @@ void AudioFilesWidget::enqueueFiles(const QStringList &paths)
         }
         auto *item = new QListWidgetItem(tr("Queued · %1").arg(source.fileName()), m_jobs);
         item->setToolTip(source.canonicalFilePath());
-        m_queue.enqueue({source.canonicalFilePath(), outputRoot, m_jobs->row(item)});
+        m_queue.enqueue({source.canonicalFilePath(), m_jobs->row(item)});
         ++added;
     }
     if (added && !m_running) startNext();
@@ -179,7 +162,7 @@ void AudioFilesWidget::startNext()
     env.insert(QStringLiteral("KWISPR_CONFIG_FILE"), m_configPath);
     m_process->setProcessEnvironment(env);
     m_process->start(QStringLiteral("python3"), {m_runtimeRoot + QStringLiteral("/kwispr-files.py"),
-        QStringLiteral("transcribe"), m_current.source, QStringLiteral("--output-dir"), m_current.outputRoot});
+        QStringLiteral("transcribe"), m_current.source, QStringLiteral("--output-dir"), m_outputRoot});
     updateActions();
 }
 
@@ -260,7 +243,6 @@ void AudioFilesWidget::updateActions()
 {
     const auto *item = m_jobs->currentItem();
     const auto result = item ? item->data(resultRole).toJsonObject() : QJsonObject();
-    m_addButton->setEnabled(!m_outputEdit->text().trimmed().isEmpty());
     m_copyButton->setEnabled(!result.value(QStringLiteral("text")).toString().isEmpty());
     m_openButton->setEnabled(!m_folderOpenBusy && !result.value(QStringLiteral("output_dir")).toString().isEmpty());
 }
