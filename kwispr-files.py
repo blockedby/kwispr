@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Transcribe one imported audio file through the local Whisper service."""
+"""Transcribe one imported audio or video file through local Whisper."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ import sys
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    transcribe = commands.add_parser("transcribe", help="Transcribe one local audio file")
+    transcribe = commands.add_parser("transcribe", help="Transcribe one local audio or video file")
     transcribe.add_argument("source_file")
     transcribe.add_argument("--output-dir", default="~/Documents/Kwispr/Transcriptions")
     args = parser.parse_args(argv)

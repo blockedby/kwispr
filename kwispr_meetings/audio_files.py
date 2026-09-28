@@ -1,4 +1,4 @@
-"""Resumable, speaker-free transcription of imported audio using local Whisper."""
+"""Resumable transcription of audio and video files using local Whisper."""
 from __future__ import annotations
 
 import hashlib
@@ -52,6 +52,7 @@ def _safe_name(source: Path) -> str:
 
 
 def _convert(source: Path, destination: Path) -> None:
+    """Decode the first audio track; ignore video without modifying the source."""
     temporary = destination.with_name("audio-" + uuid.uuid4().hex + ".wav")
     try:
         command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -64,6 +65,8 @@ def _convert(source: Path, destination: Path) -> None:
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("Audio conversion timed out; source and completed work were kept.") from error
         if result.returncode:
+            if "matches no streams" in result.stderr.lower():
+                raise RuntimeError(f"Media file has no audio track to transcribe: {source.name}")
             raise RuntimeError("ffmpeg could not decode this audio file: " + result.stderr.strip()[-500:])
         with wave.open(str(temporary), "rb") as reader:
             if (reader.getnchannels(), reader.getsampwidth(), reader.getframerate()) != (1, 2, SAMPLE_RATE):
