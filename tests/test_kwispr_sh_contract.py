@@ -445,6 +445,8 @@ class KwisprShellContractTest(unittest.TestCase):
 
     def test_known_subtitle_credit_is_trimmed_only_as_a_standalone_trailing_line(self) -> None:
         cases = (
+            ("Это нужно усилить. Субтитры создавал DimaTorzok", "Это нужно усилить.", "C.UTF-8"),
+            ("Конец фразы. Субтитры создал Дима Торжок.", "Конец фразы.", "C.UTF-8"),
             ("Spoken sentence. Субтитры сделал DimaTorzok.", "Spoken sentence.", "C"),
             ("Говорил prefix.\nСУБТИТРЫ СДЕЛАЛ ДИМА ТОРЖОК!!!  ", "Говорил prefix.", "C.UTF-8"),
             ("Субтитры сделал Дима Торжок!", "", "C.UTF-8"),
@@ -470,6 +472,9 @@ class KwisprShellContractTest(unittest.TestCase):
             "Он произнёс: «Субтитры сделал Дима Торжок».",
             "Важно: Субтитры сделал Дима Торжок, а потом продолжил.",
             "Субтитры сделал Иван.",
+            "Он сказал: «Субтитры создавал DimaTorzok».",
+            "Субтитры создавал DimaTorzok. Затем мы обсудили встречу.",
+            "Субтитры создавал Андрей.",
             "Subtitles by DimaTorzok.",
             "Субтитры сделал Дима Торжок — вот так звучит фраза.",
         )

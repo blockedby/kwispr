@@ -269,7 +269,7 @@ stop_recording() {
 
 trim_known_subtitle_credit_tail() {
   local text="$1"
-  local suffix_pattern='Субтитры[[:blank:]]+сделал[[:blank:]]+(DimaTorzok|Дима[[:blank:]]+Торжок)[.!?,;:…]*[[:space:]]*$'
+  local suffix_pattern='Субтитры[[:blank:]]+(сделал|создал|создавал)[[:blank:]]+(DimaTorzok|Дима[[:blank:]]+Торжок)[.!?,;:…]*[[:space:]]*$'
   local suffix prefix trimmed_prefix separator
   local restore_nocase=0
 
