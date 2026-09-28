@@ -35,7 +35,7 @@ AudioFilesWidget::AudioFilesWidget(QString runtimeRoot, QString configPath, Fold
       m_folderOpener(std::move(folderOpener)), m_process(new QProcess(this))
 {
     auto *layout = new QVBoxLayout(this);
-    auto *intro = new QLabel(tr("Transcribe Telegram voice messages and other audio files with local Whisper. Files are processed one at a time and saved automatically."), this);
+    auto *intro = new QLabel(tr("Transcribe Telegram voice messages, audio files, and videos such as OBS recordings with local Whisper. For video, the first audio track is used. Files are processed one at a time and saved automatically."), this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
     auto *outputRow = new QHBoxLayout;
@@ -49,10 +49,10 @@ AudioFilesWidget::AudioFilesWidget(QString runtimeRoot, QString configPath, Fold
     outputLabel->setBuddy(m_outputEdit);
     layout->addWidget(outputLabel);
     layout->addLayout(outputRow);
-    m_addButton = new QPushButton(tr("Add audio files…"), this);
+    m_addButton = new QPushButton(tr("Add audio or video files…"), this);
     m_addButton->setObjectName(QStringLiteral("audioFilesAdd"));
     layout->addWidget(m_addButton);
-    m_status = new QLabel(tr("Choose audio files to transcribe."), this);
+    m_status = new QLabel(tr("Choose audio or video files to transcribe."), this);
     m_status->setObjectName(QStringLiteral("audioFilesStatus"));
     m_status->setTextFormat(Qt::PlainText);
     m_status->setWordWrap(true);
@@ -94,8 +94,8 @@ AudioFilesWidget::AudioFilesWidget(QString runtimeRoot, QString configPath, Fold
         if (!path.isEmpty()) m_outputEdit->setText(path);
     });
     connect(m_addButton, &QPushButton::clicked, this, [this] {
-        enqueueFiles(QFileDialog::getOpenFileNames(this, tr("Choose audio files"), QDir::homePath(),
-                                                   tr("Audio files (*.ogg *.oga *.opus *.mp3 *.m4a *.mp4 *.wav *.flac *.webm *.aac *.wma);;All files (*)")));
+        enqueueFiles(QFileDialog::getOpenFileNames(this, tr("Choose audio or video files"), QDir::homePath(),
+            tr("Audio and video files (*.ogg *.oga *.opus *.mp3 *.m4a *.wav *.flac *.aac *.wma *.mp4 *.mkv *.mov *.avi *.webm *.m4v *.ts *.m2ts *.flv);;OBS video recordings (*.mkv *.mp4 *.mov *.webm *.flv *.ts *.m2ts *.avi *.m4v);;Audio files (*.ogg *.oga *.opus *.mp3 *.m4a *.wav *.flac *.aac *.wma);;All files (*)")));
     });
     connect(m_jobs, &QListWidget::currentRowChanged, this, &AudioFilesWidget::showSelectedResult);
     connect(m_copyButton, &QPushButton::clicked, this, [this] { QApplication::clipboard()->setText(m_transcript->toPlainText()); });

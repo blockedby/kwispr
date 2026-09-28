@@ -166,7 +166,7 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
             showFolderInFileManager(this, folder, std::move(complete));
         };
     }
-    setWindowTitle(tr("Meetings"));
+    setWindowTitle(tr("Transcribe"));
     setWindowFlag(Qt::WindowMinimizeButtonHint);
     setModal(false);
     resize(600, 660);
@@ -180,7 +180,7 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     auto *meetingLayout = new QVBoxLayout(meetingPage);
     m_tabs->addTab(meetingPage, tr("Meetings"));
     m_audioFiles = new AudioFilesWidget(m_runtimeRoot, m_configPath, m_folderOpener, m_tabs);
-    m_tabs->addTab(m_audioFiles, tr("Audio files"));
+    m_tabs->addTab(m_audioFiles, tr("Audio && video files"));
     m_statusLabel = wrapLabel(tr("Checking meeting status…"), meetingPage);
     m_statusLabel->setObjectName(QStringLiteral("meetingStatus"));
     QFont statusFont = m_statusLabel->font();
@@ -917,7 +917,7 @@ void MeetingDialog::updateUi()
     else if (m_state == QStringLiteral("complete")) status = tr("Transcript saved");
     else if (m_state == QStringLiteral("failed")) status = tr("Meeting needs attention");
     m_statusLabel->setText(status);
-    setWindowTitle(capturing ? tr("Recording — Meetings") : tr("Meetings"));
+    setWindowTitle(capturing ? tr("Recording — Transcribe") : tr("Transcribe"));
     m_messageLabel->setText(m_message);
     m_messageLabel->setVisible(!m_message.isEmpty());
     m_backgroundStatusLabel->setText(m_backgroundStatus);

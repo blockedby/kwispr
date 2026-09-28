@@ -5,6 +5,7 @@
 #include <QClipboard>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -98,9 +99,45 @@ elif command == 'stop':
 class AudioFilesWidgetTest : public QObject {
     Q_OBJECT
 private slots:
+    void chooserOffersObsVideoFiles();
     void streamsPartialProgressAndProcessesQueue();
     void hiddenMeetingWindowKeepsFileJobAndTabsIndependent();
 };
+
+void AudioFilesWidgetTest::chooserOffersObsVideoFiles()
+{
+    Fixture fixture;
+    QVERIFY(fixture.create());
+    AudioFilesWidget widget(fixture.dir.path(), fixture.dir.filePath(QStringLiteral("config.env")),
+                            [](const QString &, AudioFilesWidget::FolderOpenCompletion complete) { complete(true, {}); });
+    bool explainsFirstTrack = false;
+    for (const auto *label : widget.findChildren<QLabel *>()) {
+        explainsFirstTrack |= label->text().contains(QStringLiteral("first audio track"));
+    }
+    QVERIFY(explainsFirstTrack);
+    bool inspected = false;
+    QTimer::singleShot(100, &widget, [&] {
+        for (QWidget *topLevel : QApplication::topLevelWidgets()) {
+            auto *dialog = qobject_cast<QFileDialog *>(topLevel);
+            if (!dialog) continue;
+            inspected = true;
+            QCOMPARE(dialog->windowTitle(), QStringLiteral("Choose audio or video files"));
+            const QStringList filters = dialog->nameFilters();
+            QCOMPARE(filters.size(), 4);
+            QVERIFY(filters.at(0).contains(QStringLiteral("*.ogg")));
+            QVERIFY(filters.at(0).contains(QStringLiteral("*.mkv")));
+            QVERIFY(filters.at(1).startsWith(QStringLiteral("OBS video recordings")));
+            for (const auto &extension : {"*.mkv", "*.mp4", "*.mov", "*.avi", "*.webm", "*.m4v", "*.ts"}) {
+                QVERIFY(filters.at(1).contains(QString::fromLatin1(extension)));
+            }
+            dialog->reject();
+            return;
+        }
+        if (auto *modal = QApplication::activeModalWidget()) modal->close();
+    });
+    widget.findChild<QPushButton *>(QStringLiteral("audioFilesAdd"))->click();
+    QVERIFY(inspected);
+}
 
 void AudioFilesWidgetTest::streamsPartialProgressAndProcessesQueue()
 {
@@ -110,7 +147,7 @@ void AudioFilesWidgetTest::streamsPartialProgressAndProcessesQueue()
     const QString first = fixture.dir.filePath(QStringLiteral("voice link.ogg"));
     QVERIFY(QFile::link(realFirst, first));
     const QString second = fixture.source(QStringLiteral("bad voice.ogg"));
-    const QString third = fixture.source(QStringLiteral("last voice.wav"));
+    const QString third = fixture.source(QStringLiteral("last OBS recording.mkv"));
     const QString output = fixture.dir.filePath(QStringLiteral("saved transcripts"));
     QString opened;
     AudioFilesWidget widget(fixture.dir.path(), fixture.dir.filePath(QStringLiteral("config.env")),
@@ -127,7 +164,7 @@ void AudioFilesWidgetTest::streamsPartialProgressAndProcessesQueue()
     QTRY_COMPARE(status->text(), QStringLiteral("Decoding audio"));
     QCOMPARE(progress->maximum(), 2);
     auto *jobs = widget.findChild<QListWidget *>(QStringLiteral("audioFilesJobs"));
-    QTRY_COMPARE(jobs->item(2)->text(), QStringLiteral("Complete · last voice.wav"));
+    QTRY_COMPARE(jobs->item(2)->text(), QStringLiteral("Complete · last OBS recording.mkv"));
     QTRY_VERIFY(!widget.hasPendingWork());
     QCOMPARE(jobs->count(), 3);
     QVERIFY(jobs->item(0)->text().startsWith(QStringLiteral("Complete")));
@@ -168,7 +205,8 @@ void AudioFilesWidgetTest::hiddenMeetingWindowKeepsFileJobAndTabsIndependent()
     auto *tabs = dialog.findChild<QTabWidget *>(QStringLiteral("kwisprTabs"));
     QVERIFY(tabs);
     QCOMPARE(tabs->tabText(0), QStringLiteral("Meetings"));
-    QCOMPARE(tabs->tabText(1), QStringLiteral("Audio files"));
+    QCOMPARE(tabs->tabText(1), QStringLiteral("Audio && video files"));
+    QCOMPARE(dialog.windowTitle(), QStringLiteral("Transcribe"));
     dialog.showAudioFiles();
     QCOMPARE(tabs->currentIndex(), 1);
     auto *files = dialog.findChild<AudioFilesWidget *>();

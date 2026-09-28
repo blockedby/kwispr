@@ -57,7 +57,7 @@ void TrayControllerTest::menuContainsRequiredActions()
     QMenu *menu = controller.menu();
 
     QVERIFY(actionByText(menu, QStringLiteral("Toggle Recording")));
-    QVERIFY(actionByText(menu, QStringLiteral("Meetings…")));
+    QVERIFY(actionByText(menu, QStringLiteral("Transcribe…")));
     QVERIFY(actionByText(menu, QStringLiteral("Settings")));
     QVERIFY(actionByText(menu, QStringLiteral("Start Local STT")));
     QVERIFY(actionByText(menu, QStringLiteral("Stop Local STT")));
@@ -81,7 +81,7 @@ void TrayControllerTest::actionsCallInjectedServices()
     QMenu *menu = controller.menu();
 
     actionByText(menu, QStringLiteral("Toggle Recording"))->trigger();
-    actionByText(menu, QStringLiteral("Meetings…"))->trigger();
+    actionByText(menu, QStringLiteral("Transcribe…"))->trigger();
     actionByText(menu, QStringLiteral("Settings"))->trigger();
     actionByText(menu, QStringLiteral("Start Local STT"))->trigger();
     actionByText(menu, QStringLiteral("Stop Local STT"))->trigger();
@@ -142,12 +142,12 @@ void TrayControllerTest::recordingMeetingHasVisibleTrayLabel()
     FakeTrayActions actions;
     TrayController controller(&actions, cacheDir.path());
     controller.setMeetingState(QStringLiteral("recording"));
-    auto *meetingAction = actionByText(controller.menu(), QStringLiteral("Meetings — Recording…"));
+    auto *meetingAction = actionByText(controller.menu(), QStringLiteral("Transcribe — Recording…"));
     QVERIFY(meetingAction);
     meetingAction->trigger();
     QCOMPARE(actions.meetingCalls, 1);
     controller.setMeetingState(QStringLiteral("complete"));
-    QVERIFY(actionByText(controller.menu(), QStringLiteral("Meetings…")));
+    QVERIFY(actionByText(controller.menu(), QStringLiteral("Transcribe…")));
 }
 
 QTEST_MAIN(TrayControllerTest)

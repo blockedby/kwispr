@@ -251,7 +251,7 @@ void MeetingDialogTest::recordsAsynchronouslyPreservesConfigAndStopsBeforeClosin
     QCOMPARE(saved.value(QStringLiteral("KWISPR_MEETING_OUTPUT_DIR")), output);
     QCOMPARE(saved.value(QStringLiteral("KWISPR_MEETING_SPEAKERS")), QStringLiteral("3"));
     QVERIFY(dialog.recordingActive());
-    QVERIFY(dialog.windowTitle().contains(QStringLiteral("Recording")));
+    QCOMPARE(dialog.windowTitle(), QStringLiteral("Recording — Transcribe"));
     QVERIFY(control<QLabel>(dialog, "meetingActiveSources")->text().contains(QStringLiteral("sink.fixture.monitor")));
     dialog.close();
     QVERIFY(dialog.isVisible());
