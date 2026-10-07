@@ -269,7 +269,7 @@ stop_recording() {
 
 trim_known_subtitle_credit_tail() {
   local text="$1"
-  local suffix_pattern='Субтитры[[:blank:]]+(сделал|создал|создавал)[[:blank:]]+(DimaTorzok|Дима[[:blank:]]+Торжок)[.!?,;:…]*[[:space:]]*$'
+  local suffix_pattern='(Субтитры[[:blank:]]+(сделал|создал|создавал)[[:blank:]]+(DimaTorzok|Дима[[:blank:]]+Торжок)|Продолжение[[:blank:]]+следует)[.!?,;:…]*[[:space:]]*$'
   local suffix prefix trimmed_prefix separator
   local restore_nocase=0
 
@@ -428,7 +428,7 @@ transcribe() {
 
   text="$(trim_known_subtitle_credit_tail "$text")"
 
-  # Keep model text intact apart from the exact known terminal credit above.
+  # Keep model text intact apart from the known standalone terminal phrases above.
   # Broader subtitle/closing-phrase filters can delete real speech and its tail.
   if [[ -z "${text//[[:space:]]/}" ]]; then
     # Local VAD servers may intentionally return an empty transcript for

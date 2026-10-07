@@ -10,6 +10,39 @@ from tests.kwispr_contract_utils import KwisprScriptHarness
 
 
 class KwisprShellContractTest(unittest.TestCase):
+    def test_continuation_hallucination_suffix_is_removed(self) -> None:
+        for suffix in ("", ".", "...", "…", "!", "... \n"):
+            with self.subTest(suffix=suffix), KwisprScriptHarness() as h:
+                wav = h.make_wav(size=40000)
+                h.write_env(
+                    KWISPR_BACKEND="openai-transcriptions",
+                    KWISPR_API_URL="http://127.0.0.1:19650/v1/audio/transcriptions",
+                    KWISPR_AUTOPASTE="0",
+                )
+                h.fake_curl_response(200, {"text": f"И так далее. Продолжение следует{suffix}"})
+
+                result = h.run("retry", str(wav))
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(h.clipboard_text(), "И так далее.")
+                self.assertEqual(wav.with_suffix(".txt").read_text(encoding="utf-8"), "И так далее.")
+
+    def test_continuation_phrase_inside_dictation_is_preserved(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav(size=40000)
+            h.write_env(
+                KWISPR_BACKEND="openai-transcriptions",
+                KWISPR_API_URL="http://127.0.0.1:19650/v1/audio/transcriptions",
+                KWISPR_AUTOPASTE="0",
+            )
+            text = "Фраза «Продолжение следует...» была добавлена ошибочно."
+            h.fake_curl_response(200, {"text": text})
+
+            result = h.run("retry", str(wav))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(h.clipboard_text(), text)
+
     def test_xdg_config_takes_precedence_over_legacy_repo_env(self) -> None:
         with KwisprScriptHarness() as h:
             wav = h.make_wav(size=40000)
