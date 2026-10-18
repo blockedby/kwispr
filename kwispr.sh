@@ -190,7 +190,7 @@ is_recording() {
 }
 
 start_recording() {
-  local ts wav
+  local ts wav source
   ts="$(date +%Y-%m-%d_%H-%M-%S)"
   wav="$CACHE_DIR/$ts.wav"
   echo "$wav" > "$WAV_POINTER"
@@ -210,13 +210,28 @@ start_recording() {
   # Small delay to ensure the writer is open before ffmpeg reads
   sleep 0.05
 
+  # PulseAudio's symbolic default source is @DEFAULT_SOURCE@. Passing the
+  # literal "default" can be interpreted as a nonexistent device by FFmpeg.
+  source="$KWISPR_PULSE_SOURCE"
+  [[ "$source" != "default" ]] || source="@DEFAULT_SOURCE@"
   ffmpeg -hide_banner -loglevel error \
-    -f pulse -i "$KWISPR_PULSE_SOURCE" \
+    -f pulse -i "$source" \
     -ar 16000 -ac 1 \
-    "$wav" < "$FIFO_PATH" &
+    "$wav" < "$FIFO_PATH" > /dev/null 2> "$CACHE_DIR/recording-error.log" &
   local ffpid=$!
 
   printf '%s\n%s\n' "$ffpid" "$holder" > "$PID_FILE"
+
+  # Do not announce a recording that failed to open its input. Keep the
+  # diagnostic available after the launcher exits.
+  sleep 0.3
+  if ! kill -0 "$ffpid" 2>/dev/null; then
+    wait "$ffpid" 2>/dev/null || true
+    kill "$holder" 2>/dev/null || true
+    rm -f "$PID_FILE" "$WAV_POINTER" "$FIFO_PATH"
+    status "❌ Recording failed" 5000
+    die "Could not start microphone recording. See $CACHE_DIR/recording-error.log"
+  fi
 
   play_cue "$KWISPR_SOUND_START"
   status "🎙 Listening"

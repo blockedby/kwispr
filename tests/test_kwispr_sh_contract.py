@@ -10,6 +10,20 @@ from tests.kwispr_contract_utils import KwisprScriptHarness
 
 
 class KwisprShellContractTest(unittest.TestCase):
+    def test_failed_recorder_cleans_state_and_resolves_default_source(self) -> None:
+        with KwisprScriptHarness() as h:
+            h.write_env(KWISPR_API_KEY="test", KWISPR_PULSE_SOURCE="default", KWISPR_SOUNDS="0")
+            recorder = h.bin / "ffmpeg"
+            recorder.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$KWISPR_CONTRACT_ROOT/recorder-args"\necho "input failed" >&2\nexit 1\n')
+            recorder.chmod(0o755)
+            result = h.run("toggle")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Could not start microphone", result.stderr)
+            self.assertIn("@DEFAULT_SOURCE@", (h.root / "recorder-args").read_text())
+            self.assertIn("input failed", (h.cache_dir / "recording-error.log").read_text())
+            for name in ("current.pid", "current.path", "ffmpeg.fifo", "toggle.lock"):
+                self.assertFalse((h.cache_dir / name).exists(), name)
+
     def test_continuation_hallucination_suffix_is_removed(self) -> None:
         for suffix in ("", ".", "...", "…", "!", "... \n"):
             with self.subTest(suffix=suffix), KwisprScriptHarness() as h:
