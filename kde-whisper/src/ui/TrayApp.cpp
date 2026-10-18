@@ -139,13 +139,14 @@ void TrayApp::openSettings()
     const QString servicePath = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation))
         .filePath(QStringLiteral("systemd/user/kwispr-local-stt.service"));
     const bool localRuntimeInstalled = QFileInfo::exists(servicePath);
+    QString previousLocalSttDevice = settings.localSttDevice;
     QString previousLocalSttHost = settings.localSttHost;
     int previousLocalSttPort = settings.localSttPort;
     SettingsDialog dialog(settings, catalog, installedModelIds, &env, &modelManager,
                           localRuntimeInstalled, m_globalShortcut.get());
     m_settingsDialog = &dialog;
     connect(&dialog, &SettingsDialog::settingsSaved, this,
-            [this, &env, envPath, localRuntimeInstalled, previousLocalSttHost, previousLocalSttPort](const KwisprSettings &savedSettings) mutable {
+            [this, &env, envPath, localRuntimeInstalled, previousLocalSttHost, previousLocalSttPort, previousLocalSttDevice](const KwisprSettings &savedSettings) mutable {
         QDir().mkpath(QFileInfo(envPath).absolutePath());
         if (!env.save(envPath)) {
             QMessageBox::warning(nullptr,
@@ -155,7 +156,8 @@ void TrayApp::openSettings()
             return;
         }
         const bool serverChanged = savedSettings.localSttHost != previousLocalSttHost
-            || savedSettings.localSttPort != previousLocalSttPort;
+            || savedSettings.localSttPort != previousLocalSttPort
+            || savedSettings.localSttDevice != previousLocalSttDevice;
         if (localRuntimeInstalled && serverChanged) {
             ProcessRunner restartRunner;
             const ProcessResult result = restartRunner.run(
@@ -167,9 +169,10 @@ void TrayApp::openSettings()
                                                                   : result.stderrText);
             } else {
                 QMessageBox::information(nullptr, QStringLiteral("KDE Whisper"),
-                                         QStringLiteral("Local STT listen settings applied and the service restarted."));
+                                         QStringLiteral("Local STT server settings applied and the service restarted."));
             }
         }
+        previousLocalSttDevice = savedSettings.localSttDevice;
         previousLocalSttHost = savedSettings.localSttHost;
         previousLocalSttPort = savedSettings.localSttPort;
         m_controller->refreshState();

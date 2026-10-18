@@ -1,3 +1,5 @@
+mod compute;
+
 use anyhow::{anyhow, Context, Result};
 use axum::{
     extract::{multipart::MultipartRejection, DefaultBodyLimit, Multipart, State},
@@ -6,6 +8,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use compute::ComputeDevice;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,8 +23,8 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 use transcribe_cpp::{
-    Backend, Model, ModelOptions, RunExtension, RunOptions, Session, Transcript,
-    WhisperPromptCondition, WhisperRunOptions,
+    Model, ModelOptions, RunExtension, RunOptions, Session, Transcript, WhisperPromptCondition,
+    WhisperRunOptions,
 };
 use transcribe_rs::vad::{SileroVad, SmoothedVad, Vad};
 
@@ -55,6 +58,9 @@ struct AppState {
     catalog: Catalog,
     model_dir: PathBuf,
     vad: VadConfig,
+    compute: ComputeDevice,
+    model_options: ModelOptions,
+    device_name: String,
 }
 #[derive(Clone, Deserialize)]
 struct Catalog {
@@ -87,6 +93,8 @@ struct QuantFile {
 #[derive(Serialize)]
 struct Health {
     status: &'static str,
+    compute_device: ComputeDevice,
+    device_name: String,
     vad: VadConfig,
     capabilities: RuntimeCapabilities,
 }
@@ -163,9 +171,14 @@ const DEFAULT_LOCAL_STT_PORT: u16 = 19650;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let compute = ComputeDevice::parse(
+        &env_or_arg("--compute-device", "KWISPR_LOCAL_STT_DEVICE").unwrap_or_else(|| "auto".into()),
+    )?;
     transcribe_cpp::init_logging();
     transcribe_cpp::init_backends_default()
         .context("initialize transcribe-cpp dynamic backends")?;
+    let (model_options, device_name) = compute.select(&transcribe_cpp::devices())?;
+    println!("local STT compute: {compute:?} ({device_name})");
     let host = arg("--host").unwrap_or_else(|| DEFAULT_LOCAL_STT_HOST.into());
     let port: u16 = arg("--port")
         .map(|value| value.parse())
@@ -186,6 +199,9 @@ async fn main() -> Result<()> {
         catalog,
         model_dir,
         vad: vad.clone(),
+        compute,
+        model_options,
+        device_name,
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -209,6 +225,8 @@ async fn main() -> Result<()> {
 async fn health(State(state): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok",
+        compute_device: state.compute,
+        device_name: state.device_name.clone(),
         vad: state.vad.clone(),
         capabilities: RuntimeCapabilities {
             whisper_prompt: true,
@@ -281,6 +299,7 @@ async fn transcribe(
         transcribe_blocking(
             &state.model_dir,
             &info,
+            &state.model_options,
             preprocessed.samples,
             language,
             prompt,
@@ -488,6 +507,7 @@ fn parse_preserve_audio_tail(value: &str) -> std::result::Result<bool, ApiError>
 fn transcribe_blocking(
     model_dir: &Path,
     info: &ModelInfo,
+    model_options: &ModelOptions,
     audio: Vec<f32>,
     language: Option<String>,
     prompt: Option<String>,
@@ -499,7 +519,7 @@ fn transcribe_blocking(
     if !cache.contains_key(&info.slug) {
         cache.insert(
             info.slug.clone(),
-            load_session(model_dir, info).map_err(ApiError::runtime)?,
+            load_session(model_dir, info, model_options).map_err(ApiError::runtime)?,
         );
     }
     let session = cache.get_mut(&info.slug).expect("cached session");
@@ -537,7 +557,7 @@ fn run_options(
     }
 }
 
-fn load_session(model_dir: &Path, info: &ModelInfo) -> Result<Session> {
+fn load_session(model_dir: &Path, info: &ModelInfo, options: &ModelOptions) -> Result<Session> {
     let path = model_path(model_dir, info)?;
     if !path.is_file() {
         return Err(anyhow!(
@@ -547,14 +567,8 @@ fn load_session(model_dir: &Path, info: &ModelInfo) -> Result<Session> {
             path.display()
         ));
     }
-    let model = Model::load_with(
-        &path,
-        &ModelOptions {
-            backend: Backend::Auto,
-            gpu_device: 0,
-        },
-    )
-    .with_context(|| format!("load GGUF model {}", info.slug))?;
+    let model = Model::load_with(&path, options)
+        .with_context(|| format!("load GGUF model {}", info.slug))?;
     model
         .session()
         .with_context(|| format!("create session for {}", info.slug))

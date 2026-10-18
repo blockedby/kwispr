@@ -91,6 +91,7 @@ KwisprSettings KwisprSettings::fromEnv(const EnvFile &env)
     bool ok = false;
     settings.backend = env.value(QStringLiteral("KWISPR_BACKEND"), settings.backend);
     settings.apiUrl = env.value(QStringLiteral("KWISPR_API_URL"), settings.apiUrl);
+    settings.localSttDevice = env.value(QStringLiteral("KWISPR_LOCAL_STT_DEVICE"), settings.localSttDevice);
     settings.localSttHost = env.value(QStringLiteral("KWISPR_LOCAL_STT_HOST"), settings.localSttHost);
     if (env.contains(QStringLiteral("KWISPR_LOCAL_STT_PORT"))) {
         const QString rawPort = env.value(QStringLiteral("KWISPR_LOCAL_STT_PORT"));
@@ -246,6 +247,7 @@ void KwisprSettings::writeTo(EnvFile &env) const
 {
     env.setValue("KWISPR_BACKEND", backend);
     env.setValue("KWISPR_API_URL", apiUrl);
+    env.setValue("KWISPR_LOCAL_STT_DEVICE", localSttDevice);
     env.setValue("KWISPR_LOCAL_STT_HOST", localSttHost);
     env.setValue("KWISPR_LOCAL_STT_PORT", QString::number(localSttPort));
     env.setValue("KWISPR_LOCAL_STT_CONFIGURED", localSttConfigured ? "1" : "0");
@@ -342,6 +344,10 @@ bool KwisprSettings::validate(QStringList *errors) const
         addError(errors, "0.0.0.0 and :: are listen addresses, not valid client destinations.");
     }
 
+    if (!QStringList{QStringLiteral("auto"), QStringLiteral("cpu"), QStringLiteral("igpu"), QStringLiteral("gpu")}.contains(localSttDevice)) {
+        ok = false;
+        addError(errors, "Choose Automatic, CPU, Integrated GPU, or Discrete GPU for local transcription.");
+    }
     QHostAddress bindAddress;
     if (!bindAddress.setAddress(localSttHost.trimmed())) {
         ok = false;

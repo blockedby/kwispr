@@ -35,7 +35,7 @@ fn loaded_model_reports_an_enumerated_device() {
 
 #[test]
 fn negative_gpu_device_is_invalid_argument() {
-    // gpu_device must be >= 0; -1 is rejected before any device lookup.
+    // Values below -1 are rejected before any device lookup (Kwispr reserves -1 for index zero).
     let Some((model_path, _)) = common::smoke_fixtures("negative_gpu_device_is_invalid_argument")
     else {
         return;
@@ -43,7 +43,7 @@ fn negative_gpu_device_is_invalid_argument() {
     let err = Model::load_with(
         &model_path,
         &ModelOptions {
-            gpu_device: -1,
+            gpu_device: -2,
             ..Default::default()
         },
     )
@@ -89,4 +89,42 @@ fn gpu_device_with_cpu_backend_is_invalid_argument() {
     )
     .unwrap_err();
     assert!(matches!(err, Error::InvalidArgument(_)), "got {err:?}");
+}
+
+#[test]
+fn explicit_registry_zero_selects_that_gpu() {
+    let Some((model_path, _)) = common::smoke_fixtures("explicit_registry_zero_selects_that_gpu")
+    else {
+        return;
+    };
+    let all = devices();
+    let Some(first) = all.first() else {
+        return;
+    };
+    if !matches!(
+        first.device_type,
+        transcribe_cpp::DeviceType::Gpu | transcribe_cpp::DeviceType::Igpu
+    ) {
+        return;
+    }
+    let model = Model::load_with(
+        &model_path,
+        &ModelOptions {
+            backend: Backend::Auto,
+            gpu_device: -1,
+        },
+    )
+    .unwrap();
+    let selected = model.device().unwrap();
+    assert_eq!(selected.name, first.name);
+    assert_eq!(selected.device_id, first.device_id);
+    let error = Model::load_with(
+        &model_path,
+        &ModelOptions {
+            backend: Backend::Cpu,
+            gpu_device: -1,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::InvalidArgument(_)));
 }

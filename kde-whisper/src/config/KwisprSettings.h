@@ -10,6 +10,7 @@ class KwisprSettings {
 public:
     QString backend = "openai-transcriptions";
     QString apiUrl = "https://api.openai.com/v1/audio/transcriptions";
+    QString localSttDevice = "auto";
     QString localSttHost = "127.0.0.1";
     int localSttPort = 19650;
     bool localSttPortValid = true;

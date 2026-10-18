@@ -75,7 +75,8 @@ pub struct Device {
     pub memory_free: u64,
     /// Registry index of this device — the value to pass as
     /// [`ModelOptions::gpu_device`](crate::ModelOptions) to select it (0
-    /// means auto: discrete GPUs are probed before integrated). `None` when
+    /// means auto: discrete GPUs are probed before integrated; pass -1 to pin
+    /// registry index zero in the Kwispr build). `None` when
     /// this `Device` came from [`crate::Model::device`], since
     /// `transcribe_model_get_device` does not expose an index; correlate such
     /// a device back to [`devices`] by `device_id` / `name` instead.

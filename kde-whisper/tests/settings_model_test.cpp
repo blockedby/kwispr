@@ -12,6 +12,7 @@ class SettingsModelTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void computeDeviceRoundTripsAndRejectsInvalidValues();
     void localPresetWritesLocalSttKeys();
     void localSttConnectionRoundTripsAndHealthUsesClientEndpoint();
     void legacyGeneratedPortStaysMatchedOnUpgrade();
@@ -160,6 +161,24 @@ void SettingsModelTest::dictationValidationMatchesRuntimeLimits()
         QVERIFY(!KwisprSettings::fromEnv(env).validate(&errors));
         QVERIFY(errors.join('\n').contains(QStringLiteral("stop delay")));
     }
+}
+
+void SettingsModelTest::computeDeviceRoundTripsAndRejectsInvalidValues()
+{
+    EnvFile env;
+    QCOMPARE(KwisprSettings::fromEnv(env).localSttDevice, QStringLiteral("auto"));
+    KwisprSettings settings;
+    settings.applyLocalPreset(QStringLiteral("Qwen3-ASR-1.7B"), QStringLiteral("/models"), QString());
+    for (const QString &device : {QStringLiteral("auto"), QStringLiteral("cpu"), QStringLiteral("igpu"), QStringLiteral("gpu")}) {
+        settings.localSttDevice = device;
+        QVERIFY(settings.validate());
+        settings.writeTo(env);
+        QCOMPARE(KwisprSettings::fromEnv(env).localSttDevice, device);
+    }
+    settings.localSttDevice = QStringLiteral("invalid");
+    QStringList errors;
+    QVERIFY(!settings.validate(&errors));
+    QVERIFY(errors.join(QString()).contains(QStringLiteral("transcription")));
 }
 
 void SettingsModelTest::localPresetWritesLocalSttKeys()

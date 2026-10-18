@@ -114,3 +114,14 @@ are available. Language-list tests cover the actual shared candidate selector,
 legacy ABI guard bytes, v2 materialization and default behavior. Before enabling
 the option, also compare real RU, EN and mixed speech with and without it;
 unit tests establish mechanism correctness, not recognition quality.
+
+## Explicit registry device zero
+
+Kwispr's processor selector needs to pin an integrated GPU even when it occupies
+registry index zero alongside a discrete GPU. Upstream 0.1.3 reserves zero for
+automatic selection. The local extension in `transcribe-load-common.cpp` accepts
+`gpu_device=-1` to select registry index zero explicitly. Zero and positive values
+keep their existing meanings; values below -1 remain invalid. CPU requests still
+reject any explicit GPU index. C/Rust documentation and the negative-index smoke
+test are updated. No ABI layout or backend enum changes. The runtime resolves
+backend-reported device classes afresh at startup and only uses -1 when needed.
