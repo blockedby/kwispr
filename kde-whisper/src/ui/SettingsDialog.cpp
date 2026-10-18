@@ -302,6 +302,18 @@ void SettingsDialog::buildUi()
     m_resolvedUrlFieldLabel = formLabel(QStringLiteral("Resolved API URL"), QStringLiteral("resolvedLocalSttUrlFieldLabel"), backendGroup);
     m_backendForm->addRow(m_resolvedUrlFieldLabel, m_resolvedUrlLabel);
 
+    m_localSttDeviceCombo = new QComboBox(backendGroup);
+    m_localSttDeviceCombo->setObjectName(QStringLiteral("localSttDeviceCombo"));
+    m_localSttDeviceCombo->setAccessibleName(QStringLiteral("Transcription device"));
+    m_localSttDeviceCombo->addItem(QStringLiteral("Automatic"), QStringLiteral("auto"));
+    m_localSttDeviceCombo->addItem(QStringLiteral("CPU"), QStringLiteral("cpu"));
+    m_localSttDeviceCombo->addItem(QStringLiteral("Integrated GPU"), QStringLiteral("igpu"));
+    m_localSttDeviceCombo->addItem(QStringLiteral("Discrete GPU"), QStringLiteral("gpu"));
+    m_localSttDeviceCombo->setToolTip(QStringLiteral("Applies to this computer's local STT server. Apply restarts the server. An unavailable device causes a startup error."));
+    m_localSttDeviceLabel = formLabel(QStringLiteral("Transcription device"), QStringLiteral("localSttDeviceLabel"), backendGroup);
+    m_localSttDeviceLabel->setBuddy(m_localSttDeviceCombo);
+    m_backendForm->addRow(m_localSttDeviceLabel, m_localSttDeviceCombo);
+
     m_localSttHostEdit = new QLineEdit(backendGroup);
     m_localSttHostEdit->setObjectName(QStringLiteral("localSttHostEdit"));
     m_localSttHostLabel = formLabel(QStringLiteral("Listen address"), QStringLiteral("localSttHostLabel"), backendGroup);
@@ -632,6 +644,7 @@ void SettingsDialog::loadFromSettings(const KwisprSettings &settings)
     const QSignalBlocker blocker(m_backendCombo);
     m_backendCombo->setCurrentText(backendLabel);
     m_apiUrlEdit->setText(settings.apiUrl);
+    m_localSttDeviceCombo->setCurrentIndex(m_localSttDeviceCombo->findData(settings.localSttDevice));
     m_localSttHostEdit->setText(settings.localSttHost);
     {
         const QSignalBlocker portBlocker(m_localSttPortSpin);
@@ -878,6 +891,8 @@ void SettingsDialog::updateBackendVisibility()
     m_apiUrlEdit->setReadOnly(false);
     m_resolvedUrlLabel->setVisible(local);
     m_resolvedUrlFieldLabel->setVisible(local);
+    m_localSttDeviceCombo->setVisible(local && m_localRuntimeInstalled);
+    m_localSttDeviceLabel->setVisible(local && m_localRuntimeInstalled);
     m_localSttHostEdit->setVisible(local && m_localRuntimeInstalled);
     m_localSttHostLabel->setVisible(local && m_localRuntimeInstalled);
     m_localSttPortSpin->setVisible(local && m_localRuntimeInstalled);
@@ -1209,6 +1224,7 @@ KwisprSettings SettingsDialog::settingsFromWidgets() const
     const bool local = m_backendCombo->currentText() == QLatin1String("Local STT");
     settings.backend = backendValueForLabel(m_backendCombo->currentText());
     settings.apiUrl = m_apiUrlEdit->text().trimmed();
+    settings.localSttDevice = m_localSttDeviceCombo->currentData().toString();
     settings.localSttHost = m_localSttHostEdit->text().trimmed();
     settings.localSttPort = m_localSttPortNeedsCorrection ? 0 : m_localSttPortSpin->value();
     settings.localSttPortValid = !m_localSttPortNeedsCorrection;

@@ -180,3 +180,21 @@ Use `./kwispr-models.py list` for the complete current catalog.
 | incorrect language | Supply an ISO language code supported by the selected model, or omit `KWISPR_LANGUAGE` for model-default behavior. |
 
 See [Dictation quality and personal vocabulary](dictation-quality.md) for optional Whisper hints and audio-ending preservation.
+
+## Transcription device
+
+KDE Settings → Local STT → Transcription device offers Automatic (the unchanged
+default), CPU, Integrated GPU, and Discrete GPU. Apply restarts the installed
+local server when the selection changes. This controls the server on this
+computer, not a remote endpoint.
+
+For a manually started runtime, set `KWISPR_LOCAL_STT_DEVICE=cpu` (or `auto`,
+`igpu`, `gpu`), or pass `--compute-device cpu`. The flag overrides the environment.
+GPU choices select the first detected device of the requested class; an absent
+class stops startup with an error rather than silently selecting another class.
+CPU uses the strict CPU backend. `/health` exposes `compute_device` and
+`device_name`; Automatic reports its policy rather than a model-specific device.
+
+GPU device classes come from the backend. Existing Vulkan device/driver filters
+still apply: a hidden device cannot be selected. Device indexes are discovered
+at each startup rather than persisted across driver changes.

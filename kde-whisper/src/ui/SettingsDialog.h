@@ -129,6 +129,8 @@ private:
     QLabel *m_apiUrlLabel = nullptr;
     QLabel *m_resolvedUrlLabel = nullptr;
     QLabel *m_resolvedUrlFieldLabel = nullptr;
+    QComboBox *m_localSttDeviceCombo = nullptr;
+    QLabel *m_localSttDeviceLabel = nullptr;
     QLineEdit *m_localSttHostEdit = nullptr;
     QLabel *m_localSttHostLabel = nullptr;
     QSpinBox *m_localSttPortSpin = nullptr;

@@ -5,6 +5,7 @@
 #include "ui/GlobalShortcut.h"
 
 #include <QtTest/QtTest>
+#include <QAbstractItemView>
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -107,6 +108,7 @@ private slots:
     void punctuationExamplesFollowLanguageOnlyOnClick();
     void autoDetectionCandidatesFitScrollableWindows();
     void backendRowsAreContextSensitiveAndPreserveDrafts();
+    void transcriptionDeviceSavesAndUsesKeyboard();
     void lanOptInUpdatesListenAddress();
     void invalidLoadedPortRequiresExplicitCorrection();
     void firstLocalPresetUsesRetainedServerPort();
@@ -523,6 +525,40 @@ void SettingsDialogTest::backendRowsAreContextSensitiveAndPreserveDrafts()
     QCOMPARE(dialog.findChild<QLineEdit *>("modelEdit")->text(), QStringLiteral("custom-openai-model"));
 }
 
+void SettingsDialogTest::transcriptionDeviceSavesAndUsesKeyboard()
+{
+    EnvFile env;
+    KwisprSettings settings = localSettings();
+    settings.localSttDevice = QStringLiteral("cpu");
+    SettingsDialog dialog(settings, sampleCatalog(), {}, &env);
+    dialog.show();
+    QTest::qWait(1);
+    auto *device = dialog.findChild<QComboBox *>("localSttDeviceCombo");
+    QVERIFY(device);
+    QVERIFY(!device->isHidden());
+    QCOMPARE(device->currentData().toString(), QStringLiteral("cpu"));
+    device->setFocus();
+    QTest::keyClick(device, Qt::Key_Down);
+    QCOMPARE(device->currentData().toString(), QStringLiteral("igpu"));
+    QVERIFY(dialog.save());
+    QCOMPARE(env.value(QStringLiteral("KWISPR_LOCAL_STT_DEVICE")), QStringLiteral("igpu"));
+    const QString snapshots = qEnvironmentVariable("KWISPR_TEST_SNAPSHOT_DIR");
+    if (!snapshots.isEmpty()) {
+        QVERIFY(QDir().mkpath(snapshots));
+        for (const QSize &size : {QSize(520, 560), QSize(760, 720), QSize(960, 760)}) {
+            dialog.resize(size);
+            QTest::qWait(10);
+            QVERIFY(dialog.grab().save(QDir(snapshots).filePath(QStringLiteral("compute-device-%1x%2.png").arg(size.width()).arg(size.height()))));
+        }
+        device->showPopup();
+        QTest::qWait(20);
+        QVERIFY(device->view()->grab().save(QDir(snapshots).filePath(QStringLiteral("compute-device-options.png"))));
+        device->hidePopup();
+    }
+    dialog.findChild<QComboBox *>("backendCombo")->setCurrentText(QStringLiteral("OpenAI"));
+    QVERIFY(device->isHidden());
+}
+
 void SettingsDialogTest::lanOptInUpdatesListenAddress()
 {
     EnvFile env;
@@ -602,6 +638,7 @@ void SettingsDialogTest::remoteOnlyLocalSttUsesCatalogWithoutRuntimeArtifacts()
     dialog.show();
     QTest::qWait(1);
 
+    QVERIFY(dialog.findChild<QComboBox *>("localSttDeviceCombo")->isHidden());
     QVERIFY(dialog.findChild<QLineEdit *>("localSttHostEdit")->isHidden());
     QVERIFY(dialog.findChild<QSpinBox *>("localSttPortSpin")->isHidden());
     QVERIFY(dialog.findChild<QCheckBox *>("localSttAllowLanCheck")->isHidden());

@@ -62,7 +62,8 @@ bool metal_backend_lacks_simdgroup_mm(ggml_backend_t be, ggml_backend_dev_t dev)
 //                a GPU/IGPU, and for a specific METAL/VULKAN/CUDA request it
 //                must be that vendor. gpu_device is not valid for a
 //                CPU / CPU_ACCEL request (there is no GPU to pick) nor
-//                negative; both return TRANSCRIBE_ERR_INVALID_ARG.
+//                below -1; both return TRANSCRIBE_ERR_INVALID_ARG.
+//                Kwispr: -1 explicitly selects registry index zero.
 //   error_tag:   log prefix, e.g. "parakeet".
 //   out:         populated on success. out.primary is the backend
 //                that owns the weight buffer; out.scheduler_list
@@ -72,7 +73,7 @@ bool metal_backend_lacks_simdgroup_mm(ggml_backend_t be, ggml_backend_dev_t dev)
 //
 // Returns:
 //   TRANSCRIBE_OK         on success.
-//   TRANSCRIBE_ERR_INVALID_ARG if gpu_device is negative, out of range,
+//   TRANSCRIBE_ERR_INVALID_ARG if gpu_device is below -1, out of range,
 //                          names a non-GPU device, names a device whose
 //                          vendor doesn't match a specific GPU request, or
 //                          is non-zero for a CPU request.

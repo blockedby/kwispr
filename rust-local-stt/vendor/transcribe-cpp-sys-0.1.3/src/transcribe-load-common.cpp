@@ -192,7 +192,7 @@ bool valid_backend_request(int raw) {
     return false;
 }
 
-// Resolve a BackendPlan for an explicit device selection (gpu_device > 0).
+// Resolve a BackendPlan for an explicit registry index.
 // `dev_index` is a global ggml registry index. The selected device becomes
 // the primary; `requested` constrains what kind it must be. Only GPU/IGPU
 // devices are selectable this way — strict/accel CPU requests reject a
@@ -294,13 +294,13 @@ transcribe_status init_backends(transcribe_backend_request requested,
         valid_backend_request(requested_raw) ? requested_raw : TRANSCRIBE_BACKEND_AUTO);
 
     // Explicit device selection. 0 is "auto / first of kind" and falls
-    // through to the per-request logic below; a negative index is always
-    // invalid; a positive index pins a specific GPU/IGPU device.
-    if (gpu_device < 0) {
-        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "%s: gpu_device must be >= 0 (got %d)", error_tag, gpu_device);
+    // through to the per-request logic below; -1 explicitly pins registry
+    // device zero; positive values pin that registry GPU/IGPU device.
+    if (gpu_device < -1) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "%s: gpu_device must be >= -1 (got %d)", error_tag, gpu_device);
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
-    if (gpu_device > 0) {
+    if (gpu_device != 0) {
         if (!valid_backend_request(requested_raw)) {
             log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "%s: invalid transcribe_backend_request value %d", error_tag,
                     requested_raw);
@@ -312,7 +312,8 @@ transcribe_status init_backends(transcribe_backend_request requested,
                     gpu_device);
             return TRANSCRIBE_ERR_INVALID_ARG;
         }
-        return init_backends_explicit_index(out.requested, gpu_device, error_tag, out);
+        // Kwispr extension: -1 explicitly selects registry device zero.
+        return init_backends_explicit_index(out.requested, gpu_device == -1 ? 0 : gpu_device, error_tag, out);
     }
 
     // Explicit switch over the enum so an unknown / garbage value

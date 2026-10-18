@@ -34,6 +34,7 @@ pub struct ModelOptions {
     pub backend: Backend,
     /// GPU device registry index. 0 means auto: the first device that
     /// initializes, probing discrete GPUs before integrated.
+    /// Kwispr extension: -1 explicitly selects registry index zero.
     pub gpu_device: i32,
 }
 

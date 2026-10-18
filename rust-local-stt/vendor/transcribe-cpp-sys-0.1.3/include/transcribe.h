@@ -883,6 +883,9 @@ TRANSCRIBE_API transcribe_status transcribe_model_get_device(const struct transc
  *             GPU before any integrated GPU, in ggml's registry order
  *             within each tier.
  *
+ *             Kwispr extension: -1 explicitly selects registry index 0.
+ *             Values below -1 are invalid.
+ *
  *             A value > 0 selects the GPU/IGPU device at that global ggml
  *             registry index — the same index space transcribe_get_backend_device()
  *             enumerates, so enumerate first to choose one. The selected
@@ -895,13 +898,10 @@ TRANSCRIBE_API transcribe_status transcribe_model_get_device(const struct transc
  *             device_id when you need stability.
  *
  *             gpu_device is rejected with TRANSCRIBE_ERR_INVALID_ARG when it
- *             is negative, out of range, names a non-GPU device, names a
+ *             is below -1, out of range, names a non-GPU device, names a
  *             device whose vendor doesn't match an explicit GPU request, or
  *             is non-zero alongside a CPU / CPU_ACCEL request (there is no
- *             GPU to select). Note there is no way to explicitly select the
- *             device at registry index 0 — 0 is the auto sentinel. An
- *             integrated GPU sitting at index 0 is therefore reachable only
- *             via the probe order, when no discrete GPU initializes.
+ *             GPU to select). Use -1 to explicitly pin registry index zero.
  */
 struct transcribe_model_load_params {
     uint64_t                   struct_size;
