@@ -48,7 +48,7 @@ Downloaded bytes must match both the catalog size and SHA256 before an atomic in
 
 ## Build and run
 
-Linux uses transcribe-cpp `0.1.3` with Handy's dynamic-backend posture: loadable CPU variants and Vulkan. `transcribe-rs` is retained only for optional Silero VAD.
+Linux uses transcribe-cpp `0.4.0` with Handy's dynamic-backend posture: loadable CPU variants and Vulkan. `transcribe-rs` is retained only for optional Silero VAD.
 
 For an end-user native Arch build, let the installer provision and later remove only the missing build dependencies:
 
@@ -198,3 +198,27 @@ CPU uses the strict CPU backend. `/health` exposes `compute_device` and
 GPU device classes come from the backend. Existing Vulkan device/driver filters
 still apply: a hidden device cannot be selected. Device indexes are discovered
 at each startup rather than persisted across driver changes.
+
+## Qwen output budget
+
+The 0.4 runtime sizes Qwen's output budget from audio duration, bounded by the
+available decoder context. This replaces 0.1.3's fixed 256-token output limit.
+It does not make audio length unlimited: the input and generated text still
+share the model context. A complete 125-second Russian dictation has been
+verified in a single CPU request, including its final words.
+
+## Qwen personal vocabulary
+
+Qwen3-ASR 0.6B and 1.7B accept Personal vocabulary in KDE Settings. The CLI and
+meeting pipeline send these spellings through a separate `vocabulary` multipart
+field (comma-separated or one term per line, at most 4096 characters combined
+with any `prompt`). The Rust runtime forwards terms through upstream's native
+Qwen vocabulary API. They bias recognition and do not perform text replacement.
+Each request supplies its own terms; later requests do not inherit them.
+Whisper's style example remains separate and is not sent to Qwen.
+
+For direct API clients, Qwen also accepts the optional `prompt` field as native
+context text. Other unsupported model families reject hints rather than silently
+ignoring them. `/health` reports the native runtime version and Qwen vocabulary
+support. The matched wrapper, provider and ggml modules are installed together;
+Qt/KDE, FFmpeg, and the existing GGUF models do not require an upgrade for this.

@@ -364,6 +364,9 @@ transcribe() {
         # interpreted by curl as file uploads or multipart attributes.
         curl_args+=(--form-string "prompt=$whisper_context")
       fi
+      if [[ -n "$KWISPR_VOCABULARY" && "${KWISPR_MODEL,,}" == qwen3-asr* ]] && is_local_stt; then
+        curl_args+=(--form-string "vocabulary=$KWISPR_VOCABULARY")
+      fi
       if [[ "$KWISPR_PRESERVE_AUDIO_TAIL" == "1" ]] && is_local_stt; then
         curl_args+=(--form-string preserve_audio_tail=1)
       fi

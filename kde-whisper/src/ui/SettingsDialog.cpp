@@ -902,7 +902,7 @@ void SettingsDialog::updateBackendVisibility()
     setBackendRowVisible(m_modelEdit, m_modelLabel, !local);
     setBackendRowVisible(m_localModelRow, m_localModelLabel, local);
     setBackendRowVisible(m_languageCombo, m_languageLabel, openAi || (local && localLanguageVisible));
-    const bool localWhisper = local && (localModel ? localModel->engineType == QLatin1String("whisper.cpp")
+    const bool localWhisper = local && (localModel ? (localModel->architecture == QLatin1String("whisper") || localModel->engineType == QLatin1String("whisper.cpp"))
                                                   : selectedModelId().startsWith(QStringLiteral("whisper"), Qt::CaseInsensitive));
     setBackendRowVisible(m_allowedLanguagesRow, m_allowedLanguagesLabel,
                          localWhisper || !KwisprSettings::validWhisperAllowedLanguages(selectedAllowedLanguages()));
@@ -918,18 +918,25 @@ void SettingsDialog::updateDictationControls()
     const bool local = m_backendCombo->currentText() == QLatin1String("Local STT");
     const bool openRouter = m_backendCombo->currentText() == QLatin1String("OpenRouter");
     const auto model = m_catalog.modelById(selectedModelId());
-    const bool hintsSupported = !local || (model ? model->engineType == QLatin1String("whisper.cpp")
-                                                : selectedModelId().startsWith(QStringLiteral("whisper"), Qt::CaseInsensitive));
+    const bool whisper = model
+        ? model->architecture == QLatin1String("whisper") || model->engineType == QLatin1String("whisper.cpp")
+        : selectedModelId().startsWith(QStringLiteral("whisper"), Qt::CaseInsensitive);
+    const bool qwen = model
+        ? model->architecture == QLatin1String("qwen3_asr")
+        : selectedModelId().startsWith(QStringLiteral("Qwen3-ASR"), Qt::CaseInsensitive);
+    const bool hintsSupported = !local || whisper || qwen;
     m_vocabularyEdit->setEnabled(hintsSupported);
-    m_whisperPromptEdit->setEnabled(hintsSupported && !openRouter);
-    m_punctuationPresetButton->setEnabled(hintsSupported && !openRouter);
+    m_whisperPromptEdit->setEnabled(!openRouter && (!local || whisper));
+    m_punctuationPresetButton->setEnabled(!openRouter && (!local || whisper));
     m_punctuationPresetButton->setText(usesBilingualPunctuationExample()
         ? QStringLiteral("Use RU + EN punctuation example")
         : baseLanguage(selectedLanguageCode()) == QLatin1String("en")
             ? QStringLiteral("Use English punctuation example")
             : QStringLiteral("Use Russian punctuation example"));
     m_dictationHintsLabel->setText(!hintsSupported
-        ? QStringLiteral("This local model does not support vocabulary or style hints. Your entries are kept for Whisper models.")
+        ? QStringLiteral("This local model does not support vocabulary or style hints. Your entries are kept for models that support vocabulary.")
+        : local && qwen
+            ? QStringLiteral("One vocabulary term per line. Qwen uses these spellings as recognition hints. The style example is kept for Whisper models.")
         : openRouter
             ? QStringLiteral("Enter one vocabulary term per line. Vocabulary is sent with the OpenRouter prompt above; the style example is kept for transcription models.")
             : QStringLiteral("One vocabulary term per line. Hints guide recognition; they do not rewrite text. Limit: 4096 characters together. Whisper uses about 223 context tokens shared with the style example, so keep hints short."));
