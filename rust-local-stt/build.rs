@@ -50,27 +50,36 @@ fn stage_transcribe_runtime_libs() {
         }
     }
 
-    // Keep one real file for each library: SONAME for linked libraries and the
-    // unversioned name for dlopen'd backend modules, mirroring Handy's staging.
+    // Preserve every SONAME alias. 0.4 uses libtranscribe.so.0.4;
+    // retaining only libtranscribe.so leaves a packaged binary unloadable.
+    // Store the most-versioned file once and recreate the other names as links.
     let mut best: BTreeMap<&str, (&str, &Path, usize)> = BTreeMap::new();
     for (name, source) in &libraries {
-        let (stem, rank) = match split_versioned_so(name) {
-            Some((stem, depth)) => (stem, if depth == 1 { 0 } else { depth + 1 }),
-            None => (name.as_str(), 0),
-        };
+        let (stem, depth) = split_versioned_so(name).expect("runtime library name");
         if best
             .get(stem)
-            .is_none_or(|(_, _, existing)| rank < *existing)
+            .is_none_or(|(_, _, existing)| depth > *existing)
         {
-            best.insert(stem, (name, source.as_path(), rank));
+            best.insert(stem, (name, source.as_path(), depth));
         }
     }
-
     let mut staged_names = Vec::new();
-    for (_, (name, source, _)) in best {
+    for (_, (name, source, _)) in &best {
         std::fs::copy(source, destination.join(name))
             .unwrap_or_else(|error| panic!("copy {}: {error}", source.display()));
-        staged_names.push(name.to_owned());
+        staged_names.push((*name).to_owned());
+    }
+    for name in libraries.keys() {
+        let (stem, _) = split_versioned_so(name).unwrap();
+        let (target, _, _) = best[stem];
+        if name != target {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, destination.join(name))
+                .unwrap_or_else(|error| panic!("link {name} to {target}: {error}"));
+            #[cfg(not(unix))]
+            std::fs::copy(destination.join(target), destination.join(name))
+                .unwrap_or_else(|error| panic!("copy alias {name}: {error}"));
+        }
     }
     assert!(
         staged_names
@@ -96,7 +105,7 @@ fn clean_staged_runtime_libs(destination: &Path) {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("");
-        if path.is_file() && is_staged_runtime_name(name) {
+        if (path.is_file() || path.is_symlink()) && is_staged_runtime_name(name) {
             std::fs::remove_file(&path)
                 .unwrap_or_else(|error| panic!("remove stale {}: {error}", path.display()));
         }

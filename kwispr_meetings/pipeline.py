@@ -300,6 +300,10 @@ def _request_transcription(pcm, config, *, language="", vocabulary=True):
         if len(context) > 4096 or "\0" in context:
             raise RuntimeError("Whisper context must be at most 4096 characters and contain no NUL.")
         fields["prompt"] = context
+    if fields["model"].lower().startswith("qwen3-asr") and context:
+        if len(context) > 4096 or "\0" in context:
+            raise RuntimeError("Vocabulary must be at most 4096 characters and contain no NUL.")
+        fields["vocabulary"] = context
     boundary = "kwispr-" + uuid.uuid4().hex
     chunks = []
     for name, value in fields.items():

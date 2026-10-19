@@ -281,6 +281,22 @@ class KwisprShellContractTest(unittest.TestCase):
                     self.assertIn("kwispr.sh retry", h.clipboard_text())
                     self.assertEqual((h.cache_dir / "last-failed.txt").read_text().strip(), str(wav))
 
+    def test_qwen_vocabulary_is_sent_separately_and_style_is_not_sent(self) -> None:
+        with KwisprScriptHarness() as h:
+            wav = h.make_wav()
+            vocabulary = 'Квиспр, PostgreSQL, @file;type=text/plain'
+            h.write_config(KWISPR_API_URL="http://127.0.0.1:19650/v1/audio/transcriptions",
+                           KWISPR_LOCAL_STT_CONFIGURED="1", KWISPR_MODEL="Qwen3-ASR-1.7B",
+                           KWISPR_VOCABULARY=vocabulary, KWISPR_WHISPER_PROMPT="Whisper style only",
+                           KWISPR_AUTOPASTE="0")
+            h.fake_curl_response(200, {"text": "Квиспр"})
+            result = h.run("retry", str(wav))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = h.curl_invocations()[0]
+            index = args.index("vocabulary=" + vocabulary)
+            self.assertEqual(args[index - 1], "--form-string")
+            self.assertFalse(any(arg.startswith("prompt=") for arg in args))
+
     def test_whisper_context_and_vocabulary_are_literal_form_strings(self) -> None:
         with KwisprScriptHarness() as h:
             wav = h.make_wav()

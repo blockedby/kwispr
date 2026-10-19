@@ -1,127 +1,48 @@
 # Pinned transcription dependency patches
 
-These sources are the crates.io distributions of `transcribe-cpp` and
-`transcribe-cpp-sys` **0.1.3**, from upstream
-<https://github.com/handy-computer/transcribe.cpp> commit
-`a94e021ef658dc7c788837341a13f6acea3baf3c` (recorded in each
-`.cargo_vcs_info.json`). Cargo's root `[patch.crates-io]` entries select these
-copies for every build; the host Cargo registry is not modified.
-The safe wrapper is also a workspace member so its FFI materialization tests
-run against the same patched native library and root lockfile.
+The vendored `transcribe-cpp` and `transcribe-cpp-sys` crates are the published
+**0.4.0** distributions, selected together by the root Cargo patches. The native
+provider includes its matching ggml sources. All upstream license files remain.
 
-Original downloaded archive SHA-256:
+Upstream release: https://github.com/handy-computer/transcribe.cpp/releases/tag/v0.4.0
 
-| Archive | SHA-256 |
-| --- | --- |
-| `transcribe-cpp-0.1.3.crate` | `4c3c4d6136eeccf56cfe8a6669e2d63770d1ef051c7cafd2cb9226218c66cded` |
-| `transcribe-cpp-sys-0.1.3.crate` | `278fd6a6da4d9d8d5f2716bd6761a76ea55c129fda6ba57856b80249a8570ed4` |
+Original archive SHA256 and source commit:
 
-All distributed source and license files are retained, including the MIT
-licenses at each crate root, `ggml/LICENSE`, `ggml/AUTHORS`, and the miniz
-license under `src/third_party/miniz/LICENSE`. Cargo registry bookkeeping files
-`.cargo-ok` and `.cargo-checksum.json` are omitted; these are patched path
-dependencies, not unchanged registry packages.
+- `transcribe-cpp`: `f6cad85eeb846a7064891c8b49b92a57a0f2d4dd089104cb199608b23043555e`; commit `f1dcd15858c4bbba87ca97862b4e448b2cf15b8f`.
+- `transcribe-cpp-sys`: `7f0976932ee2a0d9bcfb7a90947d0a73771cee383b163bd7189a8e0d67da1157`; commit `f1dcd15858c4bbba87ca97862b4e448b2cf15b8f`.
 
-## Why this patch exists
+## Upstream changes used directly
 
-Conditioning each Whisper window on generated text can propagate a decoding
-error into repeated phrases. Dropping that history while keeping the user's
-original punctuation example and vocabulary on every window avoids that
-feedback mechanism. Upstream 0.1.3 has the necessary prefix construction but
-rejects that option combination, and its safe Rust API omits the prompt mode.
+Qwen vocabulary uses upstream `RunOptions.vocabulary` and system-context token
+construction. No local Qwen decoder patch or Python inference is needed.
+Exact CPU/GPU device handles replace Kwispr's former `gpu_device=-1` workaround.
+The old 0.1.3 device-index patch is removed, not carried forward.
+The bindings, shared library, and backend modules must be built and installed
+together because the 0.2/0.4 API and ABI are incompatible with 0.1.
 
-The original static-prompt changes are:
+## Retained Whisper behavior
 
-1. `transcribe-cpp/src/family.rs` exposes the native prompt mode as the typed
-   `WhisperPromptCondition` enum and optional `WhisperRunOptions.prompt_condition`
-   field. `src/lib.rs` re-exports it. Unit tests check native materialization,
-   prompt lifetime, and unchanged fallback/default settings.
-2. `transcribe-cpp-sys/src/arch/whisper/model.cpp` removes only the serial
-   rejection of `ALL_SEGMENTS` with `condition_on_prev_tokens=false`. Its
-   existing prefix branch then supplies the original prompt to every window
-   without generated history. The existing batch-to-serial routing remains.
-3. The native header's comments describe the newly permitted combination;
-   no C ABI layout or numeric enum values change.
+`kwispr-whisper-0.4.patch` records every local difference from the published
+archives, including the matching native/Rust local ABI digest:
 
-The runtime selects this combination only when a nonempty prompt is supplied.
-Prompt-free requests, audio segmentation, the 223-token prompt capacity, and
-temperature/compression/log-probability/no-speech fallback defaults remain
-unchanged. This is a decoder-context fix, not transcript deduplication.
-`kwispr-static-prompt.patch` records the complete diff from the original four
-upstream source/header files for review.
+- Expose the native prompt-window policy in the safe Rust wrapper and permit
+  ALL_SEGMENTS with generated-history conditioning disabled. This retains the
+  user's original prompt on every Whisper window without feeding generated
+  text into later windows. Prompt-free defaults and fallback thresholds stay.
+- Retain the separate WHR2 family extension for allowed auto-detection
+  languages. The existing WHRN layout remains unchanged. Serial and batch
+  paths share the candidate selector; explicit language still takes precedence.
+- Preserve the 0.4 generic-context/prefix checks when validating the extended
+  Whisper options. The local ABI digest distinguishes this provider and wrapper
+  from the unpatched release, so mixed installations are rejected.
+- Let model-gated upstream tests find the sibling vendored sys crate when the
+  original upstream repository layout is absent. Missing fixtures skip cleanly.
 
-## Optional language-detection candidates
+## Verification
 
-`kwispr-allowed-languages.patch` applies after the static-prompt patch. It adds
-an optional `WhisperRunOptions.allowed_languages` list and a distinct native
-`WHR2` run extension. The original `WHRN` struct and initializer keep their
-80-byte ABI. The v2 struct embeds that base and adds an owned-for-the-call CSV
-pointer; its separate initializer and kind prevent old libraries from silently
-ignoring the new option. Requests without the list still use the original kind.
-
-Both serial and batch detection use `language-selection.h` to select the
-highest language-token logit among the validated candidates. A supplied source
-language wins over the candidates. Unknown languages, empty entries and lists
-over 1024 bytes are rejected. This changes language identification only: text
-token sampling, task selection, prompts, thresholds and audio windows retain
-their existing behavior. A first-window language hint remains in use for the
-whole native run, so restricting detection cannot guarantee perfect mixed
-Russian/English transcription within one window.
-
-The HTTP runtime exposes `allowed_languages=ru,en` as an optional multipart
-field for Whisper models and advertises `whisper_allowed_languages` in health
-capabilities. It canonicalizes case/region codes against the model catalog;
-the native layer independently validates against the loaded model. Omission
-keeps unrestricted detection; `language` remains an explicit override.
-
-The new FFI declarations were regenerated with the actual upstream generators
-from commit `a94e021ef658dc7c788837341a13f6acea3baf3c`, after copying the patched
-Whisper header into that checkout:
-
-```sh
-python3 bindings/python/_generate/generate.py
-cargo run --locked -p xtask -- bindgen
-```
-
-The upstream Python generator computes the normalized ABI digest
-`2839898fc84a0f5a`; Rust bindgen 0.72.1 emits the committed declarations and
-layout assertions. No generated layouts are edited by hand. The original
-unpatched checkout passed `cargo run --locked -p xtask -- bindgen --check`
-before regeneration.
-
-## Validation
-
-Run in the project's Podman builder from `rust-local-stt/`:
-
-```sh
-cargo test --release --locked --no-default-features -p kwispr-local-stt -p transcribe-cpp --lib --bins
-cargo build --release --locked
-c++ -std=c++17 -Wall -Wextra -Werror \
-  -Ivendor/transcribe-cpp-sys-0.1.3/include \
-  -Ivendor/transcribe-cpp-sys-0.1.3/src \
-  tests/whisper-language-selection.cpp -o /tmp/kwispr-whisper-language-test
-/tmp/kwispr-whisper-language-test
-```
-
-The native prefix assembly is internal and has no model-free public test hook.
-The API tests cannot prove recognition quality. Before installation, replay a
-recording longer than two 30-second windows against the rebuilt runtime and
-check repetition, punctuation, vocabulary and final words. Also check genuine
-spoken repetition and a later prompt-free request. Keep private recordings out
-of the repository. Replace this patch with a verified upstream implementation
-when equivalent independent prompt/history controls and language candidates
-are available. Language-list tests cover the actual shared candidate selector,
-legacy ABI guard bytes, v2 materialization and default behavior. Before enabling
-the option, also compare real RU, EN and mixed speech with and without it;
-unit tests establish mechanism correctness, not recognition quality.
-
-## Explicit registry device zero
-
-Kwispr's processor selector needs to pin an integrated GPU even when it occupies
-registry index zero alongside a discrete GPU. Upstream 0.1.3 reserves zero for
-automatic selection. The local extension in `transcribe-load-common.cpp` accepts
-`gpu_device=-1` to select registry index zero explicitly. Zero and positive values
-keep their existing meanings; values below -1 remain invalid. CPU requests still
-reject any explicit GPU index. C/Rust documentation and the negative-index smoke
-test are updated. No ABI layout or backend enum changes. The runtime resolves
-backend-reported device classes afresh at startup and only uses -1 when needed.
+Use `./rust-local-stt/build-in-podman.sh`, then in the same builder image run
+`cargo test --release --workspace`. Real-model checks must also cover Qwen
+vocabulary on/off/on, Russian and English, no dictionary dumping, and exact
+CPU/integrated/discrete GPU selection. Whisper checks must cover a clip longer
+than two 30-second windows with and without its static prompt and RU/EN candidate
+list. Existing GGUF model files can be retained; verify them against the catalog.

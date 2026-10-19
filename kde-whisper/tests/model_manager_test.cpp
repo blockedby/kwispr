@@ -56,6 +56,10 @@ private slots:
 
         const auto whisper = catalog.modelById(QStringLiteral("whisper-large-v3-turbo"));
         QVERIFY(whisper.has_value());
+        QCOMPARE(whisper->architecture, QStringLiteral("whisper"));
+        const auto qwen = catalog.modelById(QStringLiteral("Qwen3-ASR-1.7B"));
+        QVERIFY(qwen.has_value());
+        QCOMPARE(qwen->architecture, QStringLiteral("qwen3_asr"));
         QVERIFY(!whisper->artifactIsDirectory);
         QVERIFY(whisper->supportsLanguageSelection);
         QVERIFY(whisper->supportsLanguageDetection);

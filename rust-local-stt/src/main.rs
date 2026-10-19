@@ -101,6 +101,8 @@ struct Health {
 #[derive(Serialize)]
 struct RuntimeCapabilities {
     whisper_prompt: bool,
+    qwen_vocabulary: bool,
+    runtime_version: String,
     whisper_allowed_languages: bool,
     preserve_audio_tail: bool,
 }
@@ -230,6 +232,8 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         vad: state.vad.clone(),
         capabilities: RuntimeCapabilities {
             whisper_prompt: true,
+            qwen_vocabulary: true,
+            runtime_version: transcribe_cpp::version(),
             whisper_allowed_languages: true,
             preserve_audio_tail: true,
         },
@@ -247,6 +251,7 @@ async fn transcribe(
     let mut prompt = None;
     let mut preserve_audio_tail = false;
     let mut format = "json".to_string();
+    let mut vocabulary = Vec::new();
     let mut file = None;
     while let Some(field) = mp.next_field().await.map_err(ApiError::multipart_error)? {
         match field.name().unwrap_or("") {
@@ -255,6 +260,10 @@ async fn transcribe(
             "allowed_languages" => {
                 allowed_languages_csv =
                     Some(field.text().await.map_err(ApiError::multipart_error)?);
+            }
+            "vocabulary" => {
+                vocabulary =
+                    normalize_vocabulary(&field.text().await.map_err(ApiError::multipart_error)?)?;
             }
             "prompt" => {
                 prompt = normalize_prompt(&field.text().await.map_err(ApiError::multipart_error)?)?;
@@ -289,6 +298,17 @@ async fn transcribe(
     let language = effective_language(&info, lang.as_deref())?;
     let allowed_languages = effective_allowed_languages(&info, allowed_languages_csv.as_deref())?;
     validate_prompt_support(&info, prompt.as_deref())?;
+    if !vocabulary.is_empty() {
+        validate_prompt_support(&info, Some("vocabulary"))?;
+    }
+    if vocabulary.iter().map(|s| s.chars().count()).sum::<usize>()
+        + prompt.as_deref().map_or(0, |s| s.chars().count())
+        > MAX_PROMPT_CHARS
+    {
+        return Err(ApiError::bad_request(anyhow!(
+            "vocabulary and prompt must total at most {MAX_PROMPT_CHARS} characters"
+        )));
+    }
     let audio = decode_audio(&bytes).await.map_err(ApiError::bad_request)?;
     let preprocessed =
         preprocess_audio(audio, &state.vad, preserve_audio_tail).map_err(ApiError::bad_request)?;
@@ -304,6 +324,7 @@ async fn transcribe(
             language,
             prompt,
             allowed_languages,
+            vocabulary,
         )
     })
     .await
@@ -484,9 +505,9 @@ fn validate_prompt_support(
     info: &ModelInfo,
     prompt: Option<&str>,
 ) -> std::result::Result<(), ApiError> {
-    if prompt.is_some() && info.architecture != "whisper" {
+    if prompt.is_some() && info.architecture != "whisper" && info.architecture != "qwen3_asr" {
         return Err(ApiError::bad_request(anyhow!(
-            "prompt is only supported by Whisper models; model {} uses {}",
+            "prompt is only supported by Whisper and Qwen3-ASR models; model {} uses {}",
             info.slug,
             info.architecture
         )));
@@ -504,6 +525,50 @@ fn parse_preserve_audio_tail(value: &str) -> std::result::Result<bool, ApiError>
     }
 }
 
+fn normalize_vocabulary(value: &str) -> std::result::Result<Vec<String>, ApiError> {
+    normalize_prompt(value)?;
+    let mut terms = Vec::new();
+    for term in value
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+    {
+        if !terms.iter().any(|existing| existing == term) {
+            terms.push(term.to_string());
+        }
+    }
+    Ok(terms)
+}
+
+fn model_run_options(
+    info: &ModelInfo,
+    language: Option<String>,
+    prompt: Option<String>,
+    allowed_languages: Option<Vec<String>>,
+    vocabulary: Vec<String>,
+) -> RunOptions {
+    if info.architecture == "qwen3_asr" {
+        RunOptions {
+            language,
+            prompt,
+            vocabulary,
+            ..Default::default()
+        }
+    } else {
+        let context = if vocabulary.is_empty() {
+            prompt
+        } else {
+            let mut text = vocabulary.join(", ");
+            if let Some(prompt) = prompt {
+                text.push('\n');
+                text.push_str(&prompt);
+            }
+            Some(text)
+        };
+        run_options(language, context, allowed_languages)
+    }
+}
+
 fn transcribe_blocking(
     model_dir: &Path,
     info: &ModelInfo,
@@ -512,6 +577,7 @@ fn transcribe_blocking(
     language: Option<String>,
     prompt: Option<String>,
     allowed_languages: Option<Vec<String>>,
+    vocabulary: Vec<String>,
 ) -> std::result::Result<Transcription, ApiError> {
     let mut cache = SESSION_CACHE
         .lock()
@@ -523,7 +589,7 @@ fn transcribe_blocking(
         );
     }
     let session = cache.get_mut(&info.slug).expect("cached session");
-    let options = run_options(language, prompt, allowed_languages);
+    let options = model_run_options(info, language, prompt, allowed_languages, vocabulary);
     let result = session.run(&audio, &options).map_err(|error| {
         ApiError::runtime(anyhow!("transcribe-cpp transcription failed: {error}"))
     })?;
@@ -1410,6 +1476,23 @@ mod tests {
         // session cache or force family-specific defaults.
         assert_eq!(run_options(None, None, None).family, None);
         assert_eq!(normalize_prompt("  \n\t ").unwrap(), None);
+    }
+
+    #[test]
+    fn qwen_vocabulary_uses_upstream_generic_options_and_is_request_scoped() {
+        let mut info = test_model();
+        info.architecture = "qwen3_asr".into();
+        let words = normalize_vocabulary("PostgreSQL\nКвиспр, PostgreSQL").unwrap();
+        assert_eq!(words, vec!["PostgreSQL", "Квиспр"]);
+        validate_prompt_support(&info, Some("vocabulary")).unwrap();
+        let options = model_run_options(&info, None, None, None, words.clone());
+        assert_eq!(options.vocabulary, words);
+        assert!(options.family.is_none());
+        assert!(options.prompt.is_none());
+        let plain = model_run_options(&info, None, None, None, Vec::new());
+        assert!(plain.vocabulary.is_empty());
+        assert!(normalize_vocabulary("bad\0word").is_err());
+        assert!(normalize_vocabulary(&"я".repeat(MAX_PROMPT_CHARS + 1)).is_err());
     }
 
     #[test]
