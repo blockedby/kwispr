@@ -14,6 +14,7 @@ struct LocalModel
     QStringList languages;
     bool supportsLanguageSelection = false;
     bool supportsLanguageDetection = false;
+    QString architecture;
 };
 
 struct ModelCatalog

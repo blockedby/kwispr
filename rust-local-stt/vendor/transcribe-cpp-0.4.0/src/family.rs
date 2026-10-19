@@ -1,0 +1,540 @@
+//! Typed family-extension options.
+//!
+//! Each family exposes model-specific knobs via a kind-tagged extension struct
+//! (`include/transcribe/<family>.h`). These typed options mirror those structs:
+//! every field is an `Option`, and only the fields you set override the
+//! defaults the C `*_init()` stamps. A [`RunExtension`] attaches to
+//! [`RunOptions`](crate::RunOptions); a [`StreamExtension`] attaches to
+//! [`StreamOptions`](crate::StreamOptions); a [`DiarizeExtension`] attaches to
+//! [`DiarizeOptions`](crate::DiarizeOptions).
+//!
+//! Probe [`Model::accepts_ext`](crate::Model::accepts_ext) to learn whether a
+//! loaded model accepts a given kind on a slot; an unaccepted extension is
+//! rejected by `run`/`stream` with [`Error::InvalidArgument`](crate::Error).
+
+use std::ffi::CString;
+
+use transcribe_cpp_sys as sys;
+
+use crate::error::{Error, Result};
+
+/// Which windows receive the original Whisper prompt, independently of history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum WhisperPromptCondition {
+    /// Prime only the first window (the upstream default).
+    FirstSegment,
+    /// Prime every window, including when generated-history conditioning is off.
+    AllSegments,
+}
+
+impl WhisperPromptCondition {
+    fn to_raw(self) -> sys::transcribe_whisper_prompt_condition {
+        match self {
+            Self::FirstSegment => {
+                sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT
+            }
+            Self::AllSegments => {
+                sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS
+            }
+        }
+    }
+}
+
+/// Whisper run-extension knobs (run slot): initial prompt, temperature
+/// fallback, and decode thresholds. `None` keeps the family default.
+/// `initial_prompt` cannot be combined with `RunOptions::vocabulary` / `prompt`.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
+pub struct WhisperRunOptions {
+    pub initial_prompt: Option<String>,
+    pub allowed_languages: Option<Vec<String>>,
+    pub prompt_condition: Option<WhisperPromptCondition>,
+    pub condition_on_prev_tokens: Option<bool>,
+    pub temperature: Option<f32>,
+    pub temperature_inc: Option<f32>,
+    pub compression_ratio_thold: Option<f32>,
+    pub logprob_thold: Option<f32>,
+    pub no_speech_thold: Option<f32>,
+    pub max_prev_context_tokens: Option<i32>,
+    pub seed: Option<u32>,
+    pub max_initial_timestamp: Option<f32>,
+}
+
+/// Moonshine-streaming stream-extension knobs (stream slot).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
+pub struct MoonshineStreamingOptions {
+    pub min_decode_interval_ms: Option<i32>,
+}
+
+/// Parakeet cache-aware streaming knobs (stream slot).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
+pub struct ParakeetStreamOptions {
+    pub att_context_right: Option<i32>,
+}
+
+/// Parakeet chunked-attention buffered streaming knobs (stream slot).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
+pub struct ParakeetBufferedStreamOptions {
+    pub left_ms: Option<i32>,
+    pub chunk_ms: Option<i32>,
+    pub right_ms: Option<i32>,
+}
+
+/// Voxtral-realtime streaming knobs (stream slot).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
+pub struct VoxtralRealtimeStreamOptions {
+    pub num_delay_tokens: Option<i32>,
+    pub min_decode_interval_ms: Option<i32>,
+}
+
+/// Sortformer streaming operating point (latency / accuracy trade-off).
+/// The menu is discrete (jointly-tuned bundles), not a latency dial;
+/// `Default` keeps the GGUF-shipped checkpoint configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum SortformerPreset {
+    #[default]
+    Default,
+    /// ~30.4 s algorithmic lookahead; the offline-file operating point.
+    VeryHighLatency,
+    /// ~10.0 s lookahead.
+    HighLatency,
+    /// ~1.04 s lookahead; the real-time point (compute-heavy per audio
+    /// second — many small windows).
+    LowLatency,
+}
+
+impl SortformerPreset {
+    fn to_sys(self) -> sys::transcribe_sortformer_preset {
+        match self {
+            SortformerPreset::Default => {
+                sys::transcribe_sortformer_preset::TRANSCRIBE_SORTFORMER_PRESET_DEFAULT
+            }
+            SortformerPreset::VeryHighLatency => {
+                sys::transcribe_sortformer_preset::TRANSCRIBE_SORTFORMER_PRESET_VERY_HIGH_LATENCY
+            }
+            SortformerPreset::HighLatency => {
+                sys::transcribe_sortformer_preset::TRANSCRIBE_SORTFORMER_PRESET_HIGH_LATENCY
+            }
+            SortformerPreset::LowLatency => {
+                sys::transcribe_sortformer_preset::TRANSCRIBE_SORTFORMER_PRESET_LOW_LATENCY
+            }
+        }
+    }
+}
+
+/// Sortformer diarize-extension knobs (diarize-run slot). `None` keeps the
+/// family default (the GGUF-shipped cfg).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
+pub struct SortformerDiarizeOptions {
+    pub preset: Option<SortformerPreset>,
+}
+
+/// A family extension for the diarize-run slot
+/// ([`DiarizeSession::run`](crate::DiarizeSession::run)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum DiarizeExtension {
+    Sortformer(SortformerDiarizeOptions),
+}
+
+/// Owns a materialized diarize-slot C extension struct.
+pub(crate) enum DiarizeExtRaw {
+    Sortformer(Box<sys::transcribe_sortformer_diarize_ext>),
+}
+
+impl DiarizeExtRaw {
+    pub(crate) fn ext_ptr(&self) -> *const sys::transcribe_ext {
+        match self {
+            DiarizeExtRaw::Sortformer(e) => {
+                (&**e) as *const sys::transcribe_sortformer_diarize_ext
+                    as *const sys::transcribe_ext
+            }
+        }
+    }
+}
+
+impl DiarizeExtension {
+    pub(crate) fn materialize(&self) -> DiarizeExtRaw {
+        match self {
+            DiarizeExtension::Sortformer(o) => {
+                let mut e: sys::transcribe_sortformer_diarize_ext = unsafe { std::mem::zeroed() };
+                unsafe { sys::transcribe_sortformer_diarize_ext_init(&mut e) };
+                set(&mut e.preset, o.preset.map(SortformerPreset::to_sys));
+                DiarizeExtRaw::Sortformer(Box::new(e))
+            }
+        }
+    }
+}
+
+/// A family extension for the run slot (offline `run`/`run_batch`).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum RunExtension {
+    Whisper(WhisperRunOptions),
+}
+
+/// A family extension for the stream slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum StreamExtension {
+    ParakeetStream(ParakeetStreamOptions),
+    ParakeetBuffered(ParakeetBufferedStreamOptions),
+    MoonshineStreaming(MoonshineStreamingOptions),
+    VoxtralRealtime(VoxtralRealtimeStreamOptions),
+}
+
+/// Owns a materialized run-slot C extension struct (and any strings it points
+/// at) so its address — and the `transcribe_ext` pointer handed to the C API —
+/// stays valid for the duration of the native call. Boxed for a stable address
+/// across moves of the holder.
+pub(crate) enum RunExtRaw {
+    Whisper {
+        ext: Box<sys::transcribe_whisper_run_ext>,
+        _prompt: Option<CString>,
+    },
+    WhisperV2 {
+        ext: Box<sys::transcribe_whisper_run_ext_v2>,
+        _prompt: Option<CString>,
+        _allowed_languages: CString,
+    },
+}
+
+impl RunExtRaw {
+    pub(crate) fn ext_ptr(&self) -> *const sys::transcribe_ext {
+        match self {
+            // `ext` is field 0, so &ext == &the family struct.
+            RunExtRaw::Whisper { ext, .. } => {
+                (&**ext) as *const sys::transcribe_whisper_run_ext as *const sys::transcribe_ext
+            }
+            RunExtRaw::WhisperV2 { ext, .. } => {
+                (&**ext) as *const sys::transcribe_whisper_run_ext_v2 as *const sys::transcribe_ext
+            }
+        }
+    }
+}
+
+impl RunExtension {
+    pub(crate) fn materialize(&self) -> Result<RunExtRaw> {
+        match self {
+            RunExtension::Whisper(o) => {
+                let mut ext: sys::transcribe_whisper_run_ext = unsafe { std::mem::zeroed() };
+                unsafe { sys::transcribe_whisper_run_ext_init(&mut ext) };
+                // Propagate an interior NUL as Error::Nul (like language /
+                // target_language) instead of silently dropping the prompt.
+                let prompt = o.initial_prompt.as_deref().map(CString::new).transpose()?;
+                if let Some(c) = prompt.as_ref() {
+                    ext.initial_prompt = c.as_ptr();
+                }
+                set(
+                    &mut ext.prompt_condition,
+                    o.prompt_condition.map(WhisperPromptCondition::to_raw),
+                );
+                set(
+                    &mut ext.condition_on_prev_tokens,
+                    o.condition_on_prev_tokens,
+                );
+                set(&mut ext.temperature, o.temperature);
+                set(&mut ext.temperature_inc, o.temperature_inc);
+                set(&mut ext.compression_ratio_thold, o.compression_ratio_thold);
+                set(&mut ext.logprob_thold, o.logprob_thold);
+                set(&mut ext.no_speech_thold, o.no_speech_thold);
+                set(&mut ext.max_prev_context_tokens, o.max_prev_context_tokens);
+                set(&mut ext.seed, o.seed);
+                set(&mut ext.max_initial_timestamp, o.max_initial_timestamp);
+                if let Some(languages) = &o.allowed_languages {
+                    if languages.is_empty()
+                        || languages
+                            .iter()
+                            .any(|language| language.trim().is_empty() || language.contains(','))
+                    {
+                        return Err(Error::InvalidArgument(
+                            "allowed_languages must contain nonempty language codes".into(),
+                        ));
+                    }
+                    let csv = languages
+                        .iter()
+                        .map(|language| language.trim())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    if csv.len() > 1024 {
+                        return Err(Error::InvalidArgument(
+                            "allowed_languages must be at most 1024 bytes".into(),
+                        ));
+                    }
+                    let allowed_languages = CString::new(csv)?;
+                    let mut extended: sys::transcribe_whisper_run_ext_v2 =
+                        unsafe { std::mem::zeroed() };
+                    unsafe { sys::transcribe_whisper_run_ext_v2_init(&mut extended) };
+                    let header = extended.base.ext;
+                    extended.base = ext;
+                    extended.base.ext = header;
+                    extended.allowed_languages = allowed_languages.as_ptr();
+                    return Ok(RunExtRaw::WhisperV2 {
+                        ext: Box::new(extended),
+                        _prompt: prompt,
+                        _allowed_languages: allowed_languages,
+                    });
+                }
+                Ok(RunExtRaw::Whisper {
+                    ext: Box::new(ext),
+                    _prompt: prompt,
+                })
+            }
+        }
+    }
+}
+
+/// Owns a materialized stream-slot C extension struct (none carry strings).
+pub(crate) enum StreamExtRaw {
+    ParakeetStream(Box<sys::transcribe_parakeet_stream_ext>),
+    ParakeetBuffered(Box<sys::transcribe_parakeet_buffered_stream_ext>),
+    MoonshineStreaming(Box<sys::transcribe_moonshine_streaming_stream_ext>),
+    VoxtralRealtime(Box<sys::transcribe_voxtral_realtime_stream_ext>),
+}
+
+impl StreamExtRaw {
+    pub(crate) fn ext_ptr(&self) -> *const sys::transcribe_ext {
+        match self {
+            StreamExtRaw::ParakeetStream(e) => {
+                (&**e) as *const sys::transcribe_parakeet_stream_ext as *const sys::transcribe_ext
+            }
+            StreamExtRaw::ParakeetBuffered(e) => {
+                (&**e) as *const sys::transcribe_parakeet_buffered_stream_ext
+                    as *const sys::transcribe_ext
+            }
+            StreamExtRaw::MoonshineStreaming(e) => {
+                (&**e) as *const sys::transcribe_moonshine_streaming_stream_ext
+                    as *const sys::transcribe_ext
+            }
+            StreamExtRaw::VoxtralRealtime(e) => {
+                (&**e) as *const sys::transcribe_voxtral_realtime_stream_ext
+                    as *const sys::transcribe_ext
+            }
+        }
+    }
+}
+
+impl StreamExtension {
+    pub(crate) fn materialize(&self) -> StreamExtRaw {
+        match self {
+            StreamExtension::ParakeetStream(o) => {
+                let mut e: sys::transcribe_parakeet_stream_ext = unsafe { std::mem::zeroed() };
+                unsafe { sys::transcribe_parakeet_stream_ext_init(&mut e) };
+                set(&mut e.att_context_right, o.att_context_right);
+                StreamExtRaw::ParakeetStream(Box::new(e))
+            }
+            StreamExtension::ParakeetBuffered(o) => {
+                let mut e: sys::transcribe_parakeet_buffered_stream_ext =
+                    unsafe { std::mem::zeroed() };
+                unsafe { sys::transcribe_parakeet_buffered_stream_ext_init(&mut e) };
+                set(&mut e.left_ms, o.left_ms);
+                set(&mut e.chunk_ms, o.chunk_ms);
+                set(&mut e.right_ms, o.right_ms);
+                StreamExtRaw::ParakeetBuffered(Box::new(e))
+            }
+            StreamExtension::MoonshineStreaming(o) => {
+                let mut e: sys::transcribe_moonshine_streaming_stream_ext =
+                    unsafe { std::mem::zeroed() };
+                unsafe { sys::transcribe_moonshine_streaming_stream_ext_init(&mut e) };
+                set(&mut e.min_decode_interval_ms, o.min_decode_interval_ms);
+                StreamExtRaw::MoonshineStreaming(Box::new(e))
+            }
+            StreamExtension::VoxtralRealtime(o) => {
+                let mut e: sys::transcribe_voxtral_realtime_stream_ext =
+                    unsafe { std::mem::zeroed() };
+                unsafe { sys::transcribe_voxtral_realtime_stream_ext_init(&mut e) };
+                set(&mut e.num_delay_tokens, o.num_delay_tokens);
+                set(&mut e.min_decode_interval_ms, o.min_decode_interval_ms);
+                StreamExtRaw::VoxtralRealtime(Box::new(e))
+            }
+        }
+    }
+}
+
+/// Overwrite `slot` only when the caller provided a value.
+fn set<T>(slot: &mut T, value: Option<T>) {
+    if let Some(v) = value {
+        *slot = v;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    #[test]
+    fn static_prompt_materializes_without_generated_history() {
+        let raw = RunExtension::Whisper(WhisperRunOptions {
+            initial_prompt: Some("Kwispr. Привет, друг!".into()),
+            prompt_condition: Some(WhisperPromptCondition::AllSegments),
+            condition_on_prev_tokens: Some(false),
+            ..Default::default()
+        })
+        .materialize()
+        .unwrap();
+        let RunExtRaw::Whisper { ext, .. } = &raw else {
+            panic!("default ABI changed")
+        };
+        assert_eq!(
+            ext.prompt_condition,
+            sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS
+        );
+        assert!(!ext.condition_on_prev_tokens);
+        assert_eq!(
+            unsafe { CStr::from_ptr(ext.initial_prompt) }
+                .to_str()
+                .unwrap(),
+            "Kwispr. Привет, друг!"
+        );
+        // Keep the native repetition/silence fallback recipe intact.
+        assert_eq!(ext.temperature_inc, 0.2);
+        assert_eq!(ext.compression_ratio_thold, 2.4);
+        assert_eq!(ext.logprob_thold, -1.0);
+        assert_eq!(ext.no_speech_thold, 0.6);
+    }
+
+    #[test]
+    fn omitted_prompt_options_keep_native_defaults() {
+        let raw = RunExtension::Whisper(WhisperRunOptions::default())
+            .materialize()
+            .unwrap();
+        let RunExtRaw::Whisper { ext, .. } = &raw else {
+            panic!("default ABI changed")
+        };
+        assert_eq!(
+            ext.prompt_condition,
+            sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT
+        );
+        assert!(ext.initial_prompt.is_null());
+        assert!(!ext.condition_on_prev_tokens);
+    }
+
+    #[test]
+    fn allowed_languages_use_separate_abi_and_keep_owned_strings() {
+        let raw = RunExtension::Whisper(WhisperRunOptions {
+            initial_prompt: Some("Kwispr. Привет! Hello!".into()),
+            allowed_languages: Some(vec!["ru".into(), "en".into()]),
+            prompt_condition: Some(WhisperPromptCondition::AllSegments),
+            ..Default::default()
+        })
+        .materialize()
+        .unwrap();
+        let RunExtRaw::WhisperV2 { ext, .. } = &raw else {
+            panic!("missing v2 extension")
+        };
+        assert_eq!(ext.base.ext.kind, sys::TRANSCRIBE_EXT_KIND_WHISPER_RUN_V2);
+        assert_eq!(
+            ext.base.ext.size as usize,
+            std::mem::size_of::<sys::transcribe_whisper_run_ext_v2>()
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(ext.allowed_languages) }
+                .to_str()
+                .unwrap(),
+            "ru,en"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(ext.base.initial_prompt) }
+                .to_str()
+                .unwrap(),
+            "Kwispr. Привет! Hello!"
+        );
+        assert_eq!(
+            ext.base.prompt_condition,
+            sys::transcribe_whisper_prompt_condition::TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS
+        );
+        assert_eq!(ext.base.no_speech_thold, 0.6);
+        assert_eq!(
+            unsafe { (*raw.ext_ptr()).kind },
+            sys::TRANSCRIBE_EXT_KIND_WHISPER_RUN_V2
+        );
+        // A pre-v2 library/consumer must reject this kind instead of silently
+        // running unrestricted language detection.
+        assert_eq!(
+            unsafe {
+                sys::transcribe_ext_check(
+                    raw.ext_ptr(),
+                    sys::TRANSCRIBE_EXT_KIND_WHISPER_RUN,
+                    std::mem::size_of::<sys::transcribe_whisper_run_ext>() as u64,
+                )
+            },
+            sys::transcribe_status::TRANSCRIBE_ERR_INVALID_ARG
+        );
+    }
+
+    #[test]
+    fn legacy_initializer_keeps_original_size_and_does_not_overwrite_tail() {
+        #[repr(C)]
+        struct Guarded {
+            ext: sys::transcribe_whisper_run_ext,
+            guard: [u8; 16],
+        }
+        let mut guarded = Guarded {
+            ext: unsafe { std::mem::zeroed() },
+            guard: [0xa5; 16],
+        };
+        unsafe { sys::transcribe_whisper_run_ext_init(&mut guarded.ext) };
+        assert_eq!(std::mem::size_of::<sys::transcribe_whisper_run_ext>(), 80);
+        assert_eq!(guarded.ext.ext.size, 80);
+        assert_eq!(guarded.ext.ext.kind, sys::TRANSCRIBE_EXT_KIND_WHISPER_RUN);
+        assert_eq!(guarded.guard, [0xa5; 16]);
+    }
+
+    #[test]
+    fn allowed_languages_reject_empty_ambiguous_and_oversized_lists() {
+        for languages in [
+            vec![],
+            vec!["".into()],
+            vec!["ru,en".into()],
+            vec!["x".repeat(1025)],
+        ] {
+            let result = RunExtension::Whisper(WhisperRunOptions {
+                allowed_languages: Some(languages),
+                ..Default::default()
+            })
+            .materialize();
+            assert!(matches!(result, Err(Error::InvalidArgument(_))));
+        }
+        let result = RunExtension::Whisper(WhisperRunOptions {
+            allowed_languages: Some(vec!["ru\0en".into()]),
+            ..Default::default()
+        })
+        .materialize();
+        assert!(matches!(result, Err(Error::Nul(_))));
+    }
+}

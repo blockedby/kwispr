@@ -108,6 +108,7 @@ private slots:
     void punctuationExamplesFollowLanguageOnlyOnClick();
     void autoDetectionCandidatesFitScrollableWindows();
     void backendRowsAreContextSensitiveAndPreserveDrafts();
+    void qwenVocabularyIsEditableAndStyleRemainsWhisperOnly();
     void transcriptionDeviceSavesAndUsesKeyboard();
     void lanOptInUpdatesListenAddress();
     void invalidLoadedPortRequiresExplicitCorrection();
@@ -523,6 +524,36 @@ void SettingsDialogTest::backendRowsAreContextSensitiveAndPreserveDrafts()
 
     backend->setCurrentText(QStringLiteral("OpenAI"));
     QCOMPARE(dialog.findChild<QLineEdit *>("modelEdit")->text(), QStringLiteral("custom-openai-model"));
+}
+
+void SettingsDialogTest::qwenVocabularyIsEditableAndStyleRemainsWhisperOnly()
+{
+    auto catalog = sampleCatalog();
+    LocalModel qwen;
+    qwen.id = QStringLiteral("Qwen3-ASR-1.7B");
+    qwen.name = QStringLiteral("Qwen3-ASR 1.7B");
+    qwen.engineType = QStringLiteral("transcribe-cpp");
+    qwen.architecture = QStringLiteral("qwen3_asr");
+    qwen.languages = {QStringLiteral("en"), QStringLiteral("ru")};
+    qwen.supportsLanguageDetection = true;
+    catalog.models.append(qwen);
+    auto settings = localSettings();
+    settings.model = qwen.id;
+    EnvFile env;
+    SettingsDialog dialog(settings, catalog, {}, &env);
+    auto *vocabulary = dialog.findChild<QPlainTextEdit *>("vocabularyEdit");
+    QVERIFY(vocabulary->isEnabled());
+    QVERIFY(!dialog.findChild<QPlainTextEdit *>("whisperPromptEdit")->isEnabled());
+    vocabulary->setPlainText(QStringLiteral("PostgreSQL\nКвиспр"));
+    const QString snapshots = qEnvironmentVariable("KWISPR_TEST_SNAPSHOT_DIR");
+    if (!snapshots.isEmpty()) {
+        dialog.show();
+        QTest::qWait(20);
+        QVERIFY(QDir().mkpath(snapshots));
+        QVERIFY(dialog.grab().save(QDir(snapshots).filePath(QStringLiteral("qwen-vocabulary.png"))));
+    }
+    QVERIFY(dialog.save());
+    QCOMPARE(env.value(QStringLiteral("KWISPR_VOCABULARY")), QStringLiteral("PostgreSQL, Квиспр"));
 }
 
 void SettingsDialogTest::transcriptionDeviceSavesAndUsesKeyboard()

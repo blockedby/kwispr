@@ -115,6 +115,12 @@ class MeetingPipelineTest(unittest.TestCase):
                              {"text": "Готово.", "language": "ru"})
             self.assertIn(b'name="language"\r\n\r\nen', requests[1])
             self.assertNotIn(b'name="prompt"', requests[1])
+            config["KWISPR_MODEL"] = "Qwen3-ASR-1.7B"
+            pipeline._request_transcript(b"qwen-audio", config)
+            self.assertIn(b'name="vocabulary"', requests[2])
+            self.assertIn(b"Kwispr, @secret;type=text/plain", requests[2])
+            self.assertNotIn(b'name="prompt"', requests[2])
+            self.assertNotIn("Привет!".encode(), requests[2])
             config["KWISPR_API_URL"] = f"http://127.0.0.1:{server.server_port}/redirect"
             with self.assertRaisesRegex(RuntimeError, "redirected"):
                 pipeline._request_transcript(b"audio", config)

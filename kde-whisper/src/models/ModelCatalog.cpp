@@ -42,6 +42,7 @@ ModelCatalog ModelCatalog::load(const QString &path)
         model.id = isV2 ? object.value(QStringLiteral("slug")).toString() : object.value(QStringLiteral("id")).toString();
         model.name = object.value(QStringLiteral("name")).toString();
         model.engineType = isV2 ? QStringLiteral("transcribe-cpp") : object.value(QStringLiteral("engine_type")).toString();
+        model.architecture = object.value(QStringLiteral("architecture")).toString();
         model.artifactIsDirectory = !isV2 && artifact.value(QStringLiteral("is_directory")).toBool(false);
         for (const QJsonValue &language : object.value(QStringLiteral("languages")).toArray()) {
             model.languages.append(language.toString());
