@@ -243,7 +243,7 @@ def advance_queue_locked(root: Path) -> None:
         current = read_json(root / "current.json")
         if session.get("state") in CAPTURING and owner_alive(current) and pointer_matches(current, directory, job["token"]):
             return
-        session.update(state="processing", message="Separating speakers and transcribing locally…", updated_at=now())
+        session.update(state="processing", message="Separating speakers locally…", updated_at=now())
         atomic_json(directory / "session.json", session)
         try:
             launch_locked(root, directory, session, "process")
@@ -611,7 +611,7 @@ def worker(directory: Path, token: str, mode: str) -> int:
         if interrupted:
             raise SessionError("Meeting worker was stopped. Audio was kept; retry processing from the meeting folder.")
         pipeline = ready(config)
-        update_session(directory, token, state="processing", message="Separating speakers and transcribing locally…")
+        update_session(directory, token, state="processing", message="Separating speakers locally…")
 
         def progress(value):
             fields = value if isinstance(value, dict) else {"message": str(value)}
