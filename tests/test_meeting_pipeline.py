@@ -260,6 +260,22 @@ class MeetingPipelineTest(unittest.TestCase):
                 stack.enter_context(item)
             yield root, config
 
+    def test_imported_mixed_recording_diarizes_all_voices_without_inventing_self_track(self):
+        segments = [{"start": 0, "end": 5, "speaker": "speaker_01"},
+                    {"start": 6, "end": 10, "speaker": "speaker_02"}]
+        with self.processing_fixture(segments) as (root, config):
+            (root / "microphone.wav").unlink()
+            pipeline.atomic_json(root / "session.json", {"title": "OBS recording", "speakers": 2,
+                                 "source_kind": "media", "microphone_stream": None})
+            with patch.object(pipeline, "_request_transcription", return_value={"text": "Speech", "language": "ru"}):
+                result = pipeline.process_session(root, config)
+                pipeline.process_session(root, config)  # Resume needs no microphone or new model calls.
+            document = pipeline.read_json(root / "transcript.json", {})
+            self.assertNotIn("self", document["speakers"])
+            self.assertEqual(result["speaker_count"], 2)
+            self.assertEqual({row["track"] for row in document["utterances"]}, {"remote"})
+            self.assertEqual(set(document["track_languages"]), {"remote"})
+
     def test_known_remote_count_refinement_resumes_and_warns_without_inventing_speaker(self):
         segments = [{"start": 0, "end": 5, "speaker": "speaker_01"}]
         refined = [{"start": 0, "end": 5, "speakers": ["speaker_unknown"], "speaker_assignment": "uncertain"}]

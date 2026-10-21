@@ -14,6 +14,7 @@ import wave
 from pathlib import Path
 
 from .config import ConfigError, validate_local_backend
+from .media import convert_audio as _convert
 from .pipeline import _prepare_language_policy, _request_transcription, atomic_json, read_json
 
 SAMPLE_RATE = 16000
@@ -50,31 +51,6 @@ def _safe_name(source: Path) -> str:
     identity = hashlib.sha256(os.fsencode(str(source))).hexdigest()[:12]
     return stem + "-" + identity
 
-
-def _convert(source: Path, destination: Path) -> None:
-    """Decode the first audio track; ignore video without modifying the source."""
-    temporary = destination.with_name("audio-" + uuid.uuid4().hex + ".wav")
-    try:
-        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                   "-i", str(source), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
-                   "-c:a", "pcm_s16le", "-f", "wav", str(temporary)]
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=1800, check=False)
-        except FileNotFoundError as error:
-            raise RuntimeError("ffmpeg is required to import audio files.") from error
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("Audio conversion timed out; source and completed work were kept.") from error
-        if result.returncode:
-            if "matches no streams" in result.stderr.lower():
-                raise RuntimeError(f"Media file has no audio track to transcribe: {source.name}")
-            raise RuntimeError("ffmpeg could not decode this audio file: " + result.stderr.strip()[-500:])
-        with wave.open(str(temporary), "rb") as reader:
-            if (reader.getnchannels(), reader.getsampwidth(), reader.getframerate()) != (1, 2, SAMPLE_RATE):
-                raise RuntimeError("ffmpeg returned an unsupported WAV format.")
-        temporary.chmod(0o600)
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _quiet_boundary(reader: wave.Wave_read, start: int, limit: int) -> tuple[int, bool]:

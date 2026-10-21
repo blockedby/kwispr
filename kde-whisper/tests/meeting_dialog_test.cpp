@@ -83,6 +83,14 @@ elif args[0] == 'stop':
         state['state'] = 'processing'
     state_file.write_text(json.dumps(state))
     print(json.dumps(state))
+elif args[0] == 'import':
+    opts = dict(zip(args[2::2], args[3::2]))
+    session = root / 'imported meeting'
+    session.mkdir(exist_ok=True)
+    job = {'state':'queued', 'session_dir':str(session), 'speakers':int(opts['--speakers']), 'message':'Waiting in queue.'}
+    state = {**job, 'recording':None, 'transcription':None, 'queue':[job], 'queue_length':1}
+    state_file.write_text(json.dumps(state))
+    print(json.dumps(state))
 elif args[0] == 'process':
     state['state'] = 'complete'
     state['message'] = 'Transcript saved successfully.'
@@ -149,6 +157,8 @@ class MeetingDialogTest : public QObject
 {
     Q_OBJECT
 private slots:
+    void importsSavedRecordingWithoutAudioDevices_data();
+    void importsSavedRecordingWithoutAudioDevices();
     void recordsAsynchronouslyPreservesConfigAndStopsBeforeClosing();
     void startFailurePreservesChoicesAndReportsWorkerMessage();
     void failedTranscriptionCanRetry();
@@ -175,6 +185,70 @@ private slots:
     void narrowLayoutKeepsActionsReachable();
     void destructionDisconnectsPendingWorkerCallbacks();
 };
+
+void MeetingDialogTest::importsSavedRecordingWithoutAudioDevices_data()
+{
+    QTest::addColumn<bool>("separateMic");
+    QTest::newRow("mixed OBS track") << false;
+    QTest::newRow("separate OBS microphone") << true;
+}
+
+void MeetingDialogTest::importsSavedRecordingWithoutAudioDevices()
+{
+    QFETCH(bool, separateMic);
+    WorkerFixture fixture;
+    QVERIFY(fixture.create());
+    QVERIFY(writeFile(fixture.dir.filePath(QStringLiteral("sources-empty")), ""));
+    const QByteArray config = "KWISPR_LANGUAGE=ru\nKWISPR_BACKEND=openrouter-chat\n";
+    QVERIFY(writeFile(fixture.configPath(), config));
+    const QString video = fixture.dir.filePath(QStringLiteral("OBS 'recording'.mkv"));
+    QVERIFY(writeFile(video, "fixture video"));
+    MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
+    dialog.show();
+    auto *import = control<QPushButton>(dialog, "meetingImport");
+    QVERIFY(import);
+    QTRY_VERIFY(import->isEnabled());
+    QVERIFY(!control<QPushButton>(dialog, "meetingStart")->isEnabled());
+    bool opened = false;
+    bool invalidStayedOpen = false;
+    QTimer::singleShot(0, &dialog, [&] {
+        auto *form = dialog.findChild<QDialog *>(QStringLiteral("meetingImportDialog"));
+        if (!form) return;
+        opened = true;
+        auto *submit = form->findChild<QPushButton *>(QStringLiteral("importSubmit"));
+        submit->click();
+        invalidStayedOpen = form->isVisible() && !form->findChild<QLabel *>(QStringLiteral("importError"))->text().isEmpty();
+        form->findChild<QLineEdit *>(QStringLiteral("importSource"))->setText(video);
+        form->findChild<QSpinBox *>(QStringLiteral("importAudioTrack"))->setValue(2);
+        form->findChild<QSpinBox *>(QStringLiteral("importSpeakers"))->setValue(3);
+        auto *language = form->findChild<QComboBox *>(QStringLiteral("importLanguage"));
+        language->setCurrentIndex(language->findData(QStringLiteral("en")));
+        if (separateMic) form->findChild<QSpinBox *>(QStringLiteral("importMicrophoneTrack"))->setValue(1);
+        submit->click();
+    });
+    QTimer::singleShot(2500, &dialog, [&] {
+        if (auto *form = dialog.findChild<QDialog *>(QStringLiteral("meetingImportDialog"))) form->reject();
+    });
+    import->click();
+    QVERIFY(opened);
+    QVERIFY(invalidStayedOpen);
+    QTRY_COMPARE(fixture.calls(QStringLiteral("import")).size(), 1);
+    const auto args = fixture.calls(QStringLiteral("import")).first();
+    QCOMPARE(args.at(1).toString(), video);
+    const auto option = [&args](const QString &name) {
+        for (int i = 2; i + 1 < args.size(); i += 2) if (args.at(i).toString() == name) return args.at(i + 1).toString();
+        return QString();
+    };
+    QCOMPARE(option(QStringLiteral("--audio-stream")), QStringLiteral("1"));
+    QCOMPARE(option(QStringLiteral("--microphone-stream")), separateMic ? QStringLiteral("0") : QString());
+    QCOMPARE(option(QStringLiteral("--speakers")), QStringLiteral("3"));
+    QCOMPARE(option(QStringLiteral("--language")), QStringLiteral("en"));
+    QFile saved(fixture.configPath());
+    QVERIFY(saved.open(QIODevice::ReadOnly));
+    QCOMPARE(saved.readAll(), config);
+    QVERIFY(fixture.calls(QStringLiteral("start")).isEmpty());
+    dialog.hide();
+}
 
 void MeetingDialogTest::destructionDisconnectsPendingWorkerCallbacks()
 {

@@ -18,7 +18,8 @@ import time
 from typing import Any
 import uuid
 
-from .config import ConfigError, load_config, output_dir, speaker_count, validate_local_backend
+from .config import ConfigError, load_config, output_dir, speaker_count, validate_local_backend, meeting_language
+from .media import prepare_recording, session_tracks
 
 CAPTURING = {"starting", "recording", "stopping"}
 ACTIVE = CAPTURING | {"processing", "queued"}
@@ -419,6 +420,49 @@ def stop() -> dict[str, Any]:
         return status_locked(root, session)
 
 
+def import_recording(source: Path, config: dict[str, str], destination: str | None = None,
+                     speakers: int | None = None, title: str = "", audio_stream: int = 0,
+                     microphone_stream: int | None = None, language: str | None = None) -> dict[str, Any]:
+    source = source.expanduser().resolve(strict=True)
+    if not source.is_file():
+        raise SessionError("Choose a regular audio or video recording.")
+    for stream in (audio_stream, microphone_stream):
+        if stream is not None and (type(stream) is not int or not 0 <= stream < 64):
+            raise SessionError("Audio track index must be between 0 and 63.")
+    if microphone_stream == audio_stream:
+        raise SessionError("Choose different tracks for the microphone and call audio.")
+    count = speaker_count(0 if speakers is None else speakers)
+    config = dict(config)
+    if language is not None:
+        config.update(KWISPR_MEETING_MIC_LANGUAGE=language, KWISPR_MEETING_REMOTE_LANGUAGE=language)
+        meeting_language(config, "remote")
+    ready(config)
+    if not shutil.which("ffmpeg"):
+        raise SessionError("ffmpeg is required to import recordings.")
+    base = Path(destination).expanduser().resolve() if destination else output_dir(config)
+    with control_lock() as root:
+        advance_queue_locked(root)
+        _, previous = current_locked(root)
+        legacy, _ = processing_locked(root)
+        if legacy and not read_json(root / "processing.json"):
+            raise SessionError("Wait for transcription from the older version to finish before importing.")
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        identifier = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_" + uuid.uuid4().hex[:8]
+        directory = private_dir(base / identifier)
+        session = {"version": 1, "session_id": identifier, "session_dir": str(directory),
+                   "token": uuid.uuid4().hex, "state": "queued", "title": title.strip() or source.stem,
+                   "started_at": now(), "updated_at": now(), "source_kind": "media",
+                   "source_path": str(source), "audio_stream": audio_stream,
+                   "microphone_stream": microphone_stream, "speakers": count,
+                   "transcription_options": transcription_options(config),
+                   "microphone_offset_seconds": 0.0, "remote_offset_seconds": 0.0}
+        atomic_json(directory / "session.json", session)
+        enqueue_locked(root, directory, session)
+        if previous.get("state") not in CAPTURING:
+            atomic_json(root / "current.json", {"session_dir": str(directory), "token": session["token"]})
+        return status_locked(root, read_json(directory / "session.json"))
+
+
 def retry(directory: Path, config: dict[str, str], speakers: int | None = None) -> dict[str, Any]:
     count = speaker_count(speakers) if speakers is not None else None
     ready(config)
@@ -436,9 +480,12 @@ def retry(directory: Path, config: dict[str, str], speakers: int | None = None) 
             raise SessionError("Wait for the transcription started by the older version to finish before queuing a retry.")
         if (processing.get("session_dir") == str(directory) and owner_alive(processing)) or any(job["session_dir"] == str(directory) for job in queue_locked(root)):
             raise SessionError("This meeting is already queued or transcribing.")
-        for track in ("microphone.wav", "remote.wav"):
-            if not (directory / track).is_file() or (directory / track).stat().st_size <= 44:
-                raise SessionError(f"The meeting does not have a usable {track}; recorded files were kept.")
+        for track in session_tracks(session):
+            path = directory / (track + ".wav")
+            if not path.is_file() or path.stat().st_size <= 44:
+                if session.get("source_kind") == "media" and Path(session.get("source_path", "")).is_file():
+                    continue  # Failed extraction can resume from the original recording.
+                raise SessionError(f"The meeting does not have a usable {path.name}; recorded files were kept.")
         if count is not None:
             session["speakers"] = count
         session.update(token=uuid.uuid4().hex, session_dir=str(directory), state="queued",
@@ -569,6 +616,9 @@ def worker(directory: Path, token: str, mode: str) -> int:
             fields = {key: item for key, item in fields.items() if key in {"message", "progress"}}
             update_session(directory, token, **fields)
 
+        session = read_json(directory / "session.json")
+        if session.get("source_kind") == "media":
+            prepare_recording(directory, session, progress)
         result = pipeline.process_session(directory, config, progress_callback=progress)
         if interrupted:
             raise SessionError("Processing was interrupted. Audio was kept; retry from the meeting folder.")
@@ -609,6 +659,15 @@ def main(argv: list[str] | None = None) -> int:
     capture.add_argument("--output-dir")
     capture.add_argument("--speakers", type=int)
     capture.add_argument("--title", default="")
+    imported = sub.add_parser("import", help="Transcribe a saved audio/video recording with speaker labels")
+    imported.add_argument("source", type=Path)
+    imported.add_argument("--output-dir")
+    imported.add_argument("--speakers", type=int, help="All speakers for a mixed track; other speakers with --microphone-stream")
+    imported.add_argument("--title", default="")
+    imported.add_argument("--language", help="Speech language code, or Auto for language detection")
+    imported.add_argument("--audio-stream", type=int, default=0, help="Zero-based audio track index (default: 0)")
+    imported.add_argument("--microphone-stream", type=int, help="Optional separate microphone track index")
+    imported.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     process = sub.add_parser("process")
     process.add_argument("session_dir", type=Path)
     process.add_argument("--speakers", type=int)
@@ -629,6 +688,9 @@ def main(argv: list[str] | None = None) -> int:
             result = stop()
         elif args.command == "start":
             result = start(load_config(), args.mic, args.monitor, args.output_dir, args.speakers, args.title)
+        elif args.command == "import":
+            result = import_recording(args.source, load_config(), args.output_dir, args.speakers,
+                                      args.title, args.audio_stream, args.microphone_stream, args.language)
         else:
             result = retry(args.session_dir, load_config(), args.speakers)
         print(json.dumps(result, ensure_ascii=False))
