@@ -18,7 +18,7 @@ import time
 from typing import Any
 import uuid
 
-from .config import ConfigError, load_config, output_dir, speaker_count, validate_local_backend, meeting_language
+from .config import ConfigError, load_config, output_dir, speaker_count, validate_local_backend, meeting_language, validate_meeting_backend
 from .media import prepare_recording, session_tracks
 
 CAPTURING = {"starting", "recording", "stopping"}
@@ -26,7 +26,8 @@ ACTIVE = CAPTURING | {"processing", "queued"}
 STOP_TIMEOUT_SECONDS = 8
 START_TIMEOUT_SECONDS = 20
 TRANSCRIPTION_OPTIONS = ("KWISPR_MODEL", "KWISPR_MEETING_MIC_LANGUAGE", "KWISPR_MEETING_REMOTE_LANGUAGE",
-                         "KWISPR_WHISPER_ALLOWED_LANGUAGES", "KWISPR_VOCABULARY")
+                         "KWISPR_WHISPER_ALLOWED_LANGUAGES", "KWISPR_VOCABULARY",
+                         "KWISPR_MEETING_PROVIDER", "KWISPR_MEETING_CLOUD_MODEL", "KWISPR_MEETING_CLOUD_BUDGET_USD")
 
 
 class SessionError(RuntimeError):
@@ -145,7 +146,9 @@ def public_status(session: dict[str, Any]) -> dict[str, Any]:
 def transcription_options(config: dict[str, str]) -> dict[str, str]:
     # Queue each meeting with its own language/context choices. Credentials and
     # server connection settings remain in the private live config, not audio folders.
-    return {key: config.get(key, "whisper-large-v3-turbo" if key == "KWISPR_MODEL" else "")
+    defaults = {"KWISPR_MODEL": "whisper-large-v3-turbo", "KWISPR_MEETING_PROVIDER": "local",
+                "KWISPR_MEETING_CLOUD_MODEL": "google/gemini-3.8-flash", "KWISPR_MEETING_CLOUD_BUDGET_USD": "1.5"}
+    return {key: config.get(key, defaults.get(key, ""))
             for key in TRANSCRIPTION_OPTIONS}
 
 
@@ -311,7 +314,7 @@ def sources() -> dict[str, Any]:
 
 
 def ready(config: dict[str, str]) -> Any:
-    validate_local_backend(config)
+    validate_meeting_backend(config)
     try:
         pipeline = importlib.import_module("kwispr_meetings.pipeline")
     except ImportError as error:
@@ -624,7 +627,10 @@ def worker(directory: Path, token: str, mode: str) -> int:
             raise SessionError("Processing was interrupted. Audio was kept; retry from the meeting folder.")
         if not isinstance(result, dict) or not result.get("transcript_path"):
             raise SessionError("Processing returned no transcript. Audio was kept for retry.")
-        update_session(directory, token, state="complete", message="Transcript saved.", completed_at=now(), **result)
+        message = "Transcript saved."
+        if "cloud_cost_usd" in result:
+            message += f" OpenRouter: ${result['cloud_cost_usd']:.3f}."
+        update_session(directory, token, state="complete", message=message, completed_at=now(), **result)
         return 0
     except Exception as error:
         try:

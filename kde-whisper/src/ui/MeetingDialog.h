@@ -6,6 +6,8 @@
 #include <functional>
 
 class QComboBox;
+class QDoubleSpinBox;
+class QFormLayout;
 class QLabel;
 class QLineEdit;
 class QProcess;
@@ -51,6 +53,7 @@ private:
     void setupModels();
     void openSavedFolder();
     bool saveChoices(bool languagesOnly = false);
+    bool saveProcessingChoices();
     bool captureActive() const;
     void updatePolling();
     void updateDeviceDetails();
@@ -107,6 +110,12 @@ private:
     QLabel *m_errorLabel;
     QLabel *m_activeSourcesLabel;
     QProgressBar *m_progress;
+    QComboBox *m_providerCombo;
+    QFormLayout *m_meetingForm;
+    QLabel *m_cloudNote;
+    QLineEdit *m_cloudModelEdit;
+    QLineEdit *m_cloudKeyEdit;
+    QDoubleSpinBox *m_cloudBudget;
     QLineEdit *m_titleEdit;
     QComboBox *m_micCombo;
     QComboBox *m_monitorCombo;
