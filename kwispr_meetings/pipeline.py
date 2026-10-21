@@ -18,6 +18,7 @@ from pathlib import Path
 from .config import allowed_whisper_languages, meeting_language, runtime_dir
 
 from .media import session_tracks
+from .config import meeting_provider, validate_meeting_backend
 
 PIPELINE_VERSION = 6
 SHORT_TURN_SECONDS = 4.0
@@ -363,6 +364,8 @@ def _fingerprint(session_dir, config, session):
     if config.get("KWISPR_WHISPER_ALLOWED_LANGUAGES", "").strip():
         inputs["allowed_languages"] = {"configured": config["KWISPR_WHISPER_ALLOWED_LANGUAGES"],
                                        "policy": config.get("_meeting_language_policy", {})}
+    if meeting_provider(config) == "openrouter":
+        inputs["cloud"] = {"provider":"openrouter", "model":config.get("KWISPR_MEETING_CLOUD_MODEL","google/gemini-3.8-flash")}
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
@@ -422,12 +425,13 @@ def write_outputs(session_dir, session, rows, names=None, languages=None, langua
 
 
 def process_session(session_dir, config, progress_callback=None):
-    from .config import validate_local_backend
-    validate_local_backend(config)
+    validate_meeting_backend(config)
+    cloud = meeting_provider(config) == "openrouter"
     require_ready(config)
     # Recheck on every processing/retry run: upgrading an old server must
     # invalidate turns that were decoded without the requested restriction.
-    config = _prepare_language_policy(config)
+    config = (dict(config, _meeting_language_policy={"backend":"openrouter", "effective_allowed_languages":""})
+              if cloud else _prepare_language_policy(config))
     session_dir = Path(session_dir)
     session = read_json(session_dir / "session.json", {})
     speakers = int(session.get("speakers", config.get("KWISPR_MEETING_SPEAKERS", 0)))
@@ -462,6 +466,16 @@ def process_session(session_dir, config, progress_callback=None):
                 atomic_json(diarization_path, diarization)
             planned = assign_transcription_speakers(planned, diarization["refined_remote"])
         intervals = split_intervals(planned, audio)
+        if cloud:
+            from .openrouter import transcribe_track
+            offset = float(session.get(track + "_offset_seconds", 0))
+            if not math.isfinite(offset): raise RuntimeError("Invalid audio track timing offset.")
+            rows,language_info = transcribe_track(session_dir,audio,intervals,config,track,offset,
+                                                   session.get("token",""),progress_callback)
+            all_rows.extend(rows)
+            track_languages[track] = language_info
+            del audio
+            continue
         explicit_language = meeting_language(config, track)
         fallback_language = ""
         detected_languages = []
@@ -527,8 +541,13 @@ def process_session(session_dir, config, progress_callback=None):
                              "speakers": interval["speakers"], "track": track, **result, **source_metadata})
         del audio
     _notify(progress_callback, "Saving transcript files…")
-    return write_outputs(session_dir, session, all_rows, read_json(session_dir / "speaker-names.json", {}),
-                         track_languages, config["_meeting_language_policy"], diarization.get("refinement_report"))
+    result = write_outputs(session_dir, session, all_rows, read_json(session_dir / "speaker-names.json", {}),
+                           track_languages, config["_meeting_language_policy"], diarization.get("refinement_report"))
+    if cloud:
+        from .openrouter import spent
+        result.update(processing_provider="openrouter", processing_model=config.get("KWISPR_MEETING_CLOUD_MODEL","google/gemini-3.8-flash"),
+                      cloud_cost_usd=spent(session_dir / "openrouter"))
+    return result
 
 
 def _refine_remote_speakers(audio, intervals, speakers, config, callback):

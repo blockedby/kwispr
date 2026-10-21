@@ -11,6 +11,7 @@
 #include <QDBusMessage>
 #include <QDBusPendingCallWatcher>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -217,8 +218,30 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     bodyLayout->addWidget(m_activeSourcesLabel);
 
     auto *form = new QFormLayout;
+    m_meetingForm = form;
     form->setRowWrapPolicy(QFormLayout::WrapAllRows);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    m_providerCombo = new QComboBox(body);
+    m_providerCombo->setObjectName(QStringLiteral("meetingProvider"));
+    m_providerCombo->addItem(tr("Local recognition"), QStringLiteral("local"));
+    m_providerCombo->addItem(tr("OpenRouter / Gemini"), QStringLiteral("openrouter"));
+    form->addRow(tr("&Processing"), m_providerCombo);
+    m_cloudModelEdit = new QLineEdit(body);
+    m_cloudModelEdit->setObjectName(QStringLiteral("meetingCloudModel"));
+    form->addRow(tr("Cloud &model"), m_cloudModelEdit);
+    m_cloudKeyEdit = new QLineEdit(body);
+    m_cloudKeyEdit->setObjectName(QStringLiteral("meetingCloudKey"));
+    m_cloudKeyEdit->setEchoMode(QLineEdit::Password);
+    m_cloudKeyEdit->setPlaceholderText(tr("Use saved OpenRouter key"));
+    form->addRow(tr("OpenRouter API &key"), m_cloudKeyEdit);
+    m_cloudBudget = new QDoubleSpinBox(body);
+    m_cloudBudget->setObjectName(QStringLiteral("meetingCloudBudget"));
+    m_cloudBudget->setRange(0.01, 1000);
+    m_cloudBudget->setDecimals(2);
+    m_cloudBudget->setPrefix(QStringLiteral("$"));
+    form->addRow(tr("Cloud &budget per meeting (USD)"), m_cloudBudget);
+    m_cloudNote = wrapLabel(tr("Audio is sent to OpenRouter. Speaker separation runs locally. The budget stops new requests; an in-flight request can exceed it."), body);
+    form->addRow(m_cloudNote);
     m_titleEdit = new QLineEdit(body);
     m_titleEdit->setObjectName(QStringLiteral("meetingTitle"));
     m_titleEdit->setMaxLength(160);
@@ -317,6 +340,19 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
         documents = QDir::homePath() + QStringLiteral("/Documents");
     }
     m_outputEdit->setText(env.value(QStringLiteral("KWISPR_MEETING_OUTPUT_DIR"), documents + QStringLiteral("/Kwispr/Meetings")));
+    m_providerCombo->setCurrentIndex(qMax(0, m_providerCombo->findData(env.value(QStringLiteral("KWISPR_MEETING_PROVIDER"), QStringLiteral("local")))));
+    m_cloudModelEdit->setText(env.value(QStringLiteral("KWISPR_MEETING_CLOUD_MODEL"), QStringLiteral("google/gemini-3.8-flash")));
+    m_cloudKeyEdit->setText(env.value(QStringLiteral("KWISPR_MEETING_OPENROUTER_KEY")));
+    m_cloudBudget->setValue(env.value(QStringLiteral("KWISPR_MEETING_CLOUD_BUDGET_USD"), QStringLiteral("1.5")).toDouble());
+    for (QWidget *field : QList<QWidget *>{m_cloudModelEdit, m_cloudKeyEdit, m_cloudBudget, m_cloudNote}) {
+        m_meetingForm->setRowVisible(field, m_providerCombo->currentData() == QStringLiteral("openrouter"));
+    }
+    connect(m_providerCombo, &QComboBox::currentIndexChanged, this, [this] {
+        for (QWidget *field : QList<QWidget *>{m_cloudModelEdit, m_cloudKeyEdit, m_cloudBudget, m_cloudNote}) {
+            m_meetingForm->setRowVisible(field, m_providerCombo->currentData() == QStringLiteral("openrouter"));
+        }
+        updateUi();
+    });
     m_savedMic = env.value(QStringLiteral("KWISPR_MEETING_MIC_SOURCE"));
     m_savedMonitor = env.value(QStringLiteral("KWISPR_MEETING_MONITOR_SOURCE"));
     m_speakersSpin->setValue(env.value(QStringLiteral("KWISPR_MEETING_SPEAKERS"), QStringLiteral("0")).toInt());
@@ -779,6 +815,9 @@ void MeetingDialog::importMeeting()
     auto *layout = new QVBoxLayout(&dialog);
     auto *form = new QFormLayout;
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    auto *processing = new QLabel(m_providerCombo->currentText(), &dialog);
+    processing->setObjectName(QStringLiteral("importProvider"));
+    form->addRow(tr("Processing"), processing);
     auto *source = new QLineEdit(&dialog);
     source->setObjectName(QStringLiteral("importSource"));
     auto *browse = new QPushButton(tr("Browse…"), &dialog);
@@ -870,7 +909,7 @@ void MeetingDialog::importMeeting()
     if (micTrack->value() > 0) {
         arguments << QStringLiteral("--microphone-stream") << QString::number(micTrack->value() - 1);
     }
-    runCommand(arguments, QStringLiteral("queued"));
+    if (saveProcessingChoices()) runCommand(arguments, QStringLiteral("queued"));
 }
 
 void MeetingDialog::setupModels()
@@ -908,8 +947,53 @@ void MeetingDialog::openSavedFolder()
     });
 }
 
+bool MeetingDialog::saveProcessingChoices()
+{
+    EnvFile env;
+    if (QFileInfo::exists(m_configPath) && !env.load(m_configPath)) {
+        m_error = tr("Could not read meeting settings: %1").arg(env.errorString());
+        updateUi();
+        return false;
+    }
+    const QString provider = m_providerCombo->currentData().toString();
+    if (provider == QStringLiteral("openrouter")) {
+        static const QRegularExpression modelPattern(QStringLiteral("^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+/-]*$"));
+        if (!modelPattern.match(m_cloudModelEdit->text().trimmed()).hasMatch()) {
+            m_error = tr("Enter an OpenRouter audio model ID, such as google/gemini-3.8-flash.");
+            m_cloudModelEdit->setFocus();
+            updateUi();
+            return false;
+        }
+        const QString keyFile = env.value(QStringLiteral("KWISPR_MEETING_OPENROUTER_KEY_FILE"),
+            QDir::homePath() + QStringLiteral("/.config/kwispr/openrouter-benchmark.key"));
+        if (m_cloudKeyEdit->text().trimmed().isEmpty() && !QFileInfo::exists(keyFile)) {
+            m_error = tr("Enter an OpenRouter API key for meeting processing.");
+            m_cloudKeyEdit->setFocus();
+            updateUi();
+            return false;
+        }
+    }
+    bool changed = false;
+    const auto set = [&env, &changed](const QString &key, const QString &value, const QString &fallback) {
+        if (env.value(key, fallback) != value) { env.setValue(key, value); changed = true; }
+    };
+    set(QStringLiteral("KWISPR_MEETING_PROVIDER"), provider, QStringLiteral("local"));
+    if (provider == QStringLiteral("openrouter")) {
+        set(QStringLiteral("KWISPR_MEETING_CLOUD_MODEL"), m_cloudModelEdit->text().trimmed(), QStringLiteral("google/gemini-3.8-flash"));
+        set(QStringLiteral("KWISPR_MEETING_CLOUD_BUDGET_USD"), QString::number(m_cloudBudget->value(), 'f', 2), QStringLiteral("1.50"));
+        set(QStringLiteral("KWISPR_MEETING_OPENROUTER_KEY"), m_cloudKeyEdit->text().trimmed(), QString());
+    }
+    if (changed && (!QDir().mkpath(QFileInfo(m_configPath).absolutePath()) || !env.save(m_configPath))) {
+        m_error = tr("Could not save meeting settings: %1").arg(env.errorString());
+        updateUi();
+        return false;
+    }
+    return true;
+}
+
 bool MeetingDialog::saveChoices(bool languagesOnly)
 {
+    if (!saveProcessingChoices()) return false;
     const QString micLanguage = languageCode(m_micLanguageCombo);
     const QString remoteLanguage = languageCode(m_remoteLanguageCombo);
     static const QRegularExpression languagePattern(QStringLiteral("^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$"));
@@ -997,7 +1081,7 @@ void MeetingDialog::updateUi()
     // transcribed. Legacy workers keep their previous single-session behavior.
     const bool editable = !capturing && (m_hasQueueContract || m_state != QStringLiteral("processing"))
         && !m_commandBusy && !m_setupBusy;
-    for (QWidget *field : QList<QWidget *>{m_titleEdit, m_micCombo, m_monitorCombo, m_micLanguageCombo, m_remoteLanguageCombo, m_outputEdit, m_speakersSpin, m_browseButton}) {
+    for (QWidget *field : QList<QWidget *>{m_providerCombo, m_cloudModelEdit, m_cloudKeyEdit, m_cloudBudget, m_titleEdit, m_micCombo, m_monitorCombo, m_micLanguageCombo, m_remoteLanguageCombo, m_outputEdit, m_speakersSpin, m_browseButton}) {
         field->setEnabled(editable);
     }
     m_importButton->setEnabled(editable && m_statusKnown);

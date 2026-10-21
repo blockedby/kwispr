@@ -133,3 +133,44 @@ def speaker_count(value: str | int) -> int:
     if not 0 <= count <= 16:
         raise ConfigError("Speaker count must be 0 (automatic) or 1–16 remote speakers.")
     return count
+
+
+def meeting_provider(config):
+    value = config.get("KWISPR_MEETING_PROVIDER", "local")
+    if value not in {"local", "openrouter"}:
+        raise ConfigError("Choose Local or OpenRouter for meeting processing.")
+    return value
+
+
+def openrouter_key(config):
+    key = config.get("KWISPR_MEETING_OPENROUTER_KEY", "").strip()
+    if not key:
+        path = Path(config.get("KWISPR_MEETING_OPENROUTER_KEY_FILE") or
+                    Path.home()/".config/kwispr/openrouter-benchmark.key").expanduser()
+        if path.is_file():
+            for raw in path.read_text().splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"): continue
+                if line == "MODELS:": break
+                key = line.split("=", 1)[1].strip() if line.startswith("OPENROUTER_API_KEY=") else line
+                break
+    if not key or "\n" in key or "\r" in key:
+        raise ConfigError("Enter an OpenRouter API key in Meetings before processing.")
+    return key
+
+
+def validate_meeting_backend(config):
+    if meeting_provider(config) == "local":
+        validate_local_backend(config)
+        return
+    model = config.get("KWISPR_MEETING_CLOUD_MODEL", "google/gemini-3.8-flash")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+/-]*", model):
+        raise ConfigError("Enter an exact OpenRouter audio model ID.")
+    import math
+    try:
+        budget = float(config.get("KWISPR_MEETING_CLOUD_BUDGET_USD", "1.5"))
+    except ValueError as error:
+        raise ConfigError("Cloud budget must be a positive USD amount.") from error
+    if not math.isfinite(budget) or budget <= 0:
+        raise ConfigError("Cloud budget must be a positive USD amount.")
+    openrouter_key(config)

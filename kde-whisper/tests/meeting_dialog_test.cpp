@@ -189,13 +189,17 @@ private slots:
 void MeetingDialogTest::importsSavedRecordingWithoutAudioDevices_data()
 {
     QTest::addColumn<bool>("separateMic");
-    QTest::newRow("mixed OBS track") << false;
-    QTest::newRow("separate OBS microphone") << true;
+    QTest::addColumn<bool>("cloudProcessing");
+    QTest::newRow("mixed OBS track") << false << false;
+    QTest::newRow("separate OBS microphone") << true << false;
+    QTest::newRow("mixed OBS through OpenRouter") << false << true;
+    QTest::newRow("separate OBS through OpenRouter") << true << true;
 }
 
 void MeetingDialogTest::importsSavedRecordingWithoutAudioDevices()
 {
     QFETCH(bool, separateMic);
+    QFETCH(bool, cloudProcessing);
     WorkerFixture fixture;
     QVERIFY(fixture.create());
     QVERIFY(writeFile(fixture.dir.filePath(QStringLiteral("sources-empty")), ""));
@@ -205,9 +209,22 @@ void MeetingDialogTest::importsSavedRecordingWithoutAudioDevices()
     QVERIFY(writeFile(video, "fixture video"));
     MeetingDialog dialog(fixture.dir.path(), fixture.configPath());
     dialog.show();
+    if (cloudProcessing) {
+        auto *provider = control<QComboBox>(dialog, "meetingProvider");
+        provider->setCurrentIndex(provider->findData(QStringLiteral("openrouter")));
+        auto *key = control<QLineEdit>(dialog, "meetingCloudKey");
+        QCOMPARE(key->echoMode(), QLineEdit::Password);
+        key->setText(QStringLiteral("fixture-cloud-key"));
+    }
     auto *import = control<QPushButton>(dialog, "meetingImport");
     QVERIFY(import);
     QTRY_VERIFY(import->isEnabled());
+    if (cloudProcessing) {
+        auto *key = control<QLineEdit>(dialog, "meetingCloudKey");
+        auto *title = control<QLineEdit>(dialog, "meetingTitle");
+        QVERIFY(key->height() >= key->minimumSizeHint().height());
+        QVERIFY(key->mapTo(&dialog, QPoint(0, key->height())).y() < title->mapTo(&dialog, QPoint(0, 0)).y());
+    }
     QVERIFY(!control<QPushButton>(dialog, "meetingStart")->isEnabled());
     bool opened = false;
     bool invalidStayedOpen = false;
@@ -245,7 +262,17 @@ void MeetingDialogTest::importsSavedRecordingWithoutAudioDevices()
     QCOMPARE(option(QStringLiteral("--language")), QStringLiteral("en"));
     QFile saved(fixture.configPath());
     QVERIFY(saved.open(QIODevice::ReadOnly));
-    QCOMPARE(saved.readAll(), config);
+    const auto savedBytes = saved.readAll();
+    if (cloudProcessing) {
+        EnvFile env;
+        QVERIFY(env.load(fixture.configPath()));
+        QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_PROVIDER")), QStringLiteral("openrouter"));
+        QCOMPARE(env.value(QStringLiteral("KWISPR_MEETING_OPENROUTER_KEY")), QStringLiteral("fixture-cloud-key"));
+        QCOMPARE(env.value(QStringLiteral("KWISPR_BACKEND")), QStringLiteral("openrouter-chat"));
+        QVERIFY(!QJsonDocument(args).toJson().contains("fixture-cloud-key"));
+    } else {
+        QCOMPARE(savedBytes, config);
+    }
     QVERIFY(fixture.calls(QStringLiteral("start")).isEmpty());
     dialog.hide();
 }
