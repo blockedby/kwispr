@@ -11,6 +11,7 @@
 #include <QDBusMessage>
 #include <QDBusPendingCallWatcher>
 #include <QDir>
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -282,6 +283,11 @@ MeetingDialog::MeetingDialog(QString runtimeRoot, QString configPath, QWidget *p
     bodyLayout->addStretch();
     scroll->setWidget(body);
     meetingLayout->addWidget(scroll, 1);
+
+    m_importButton = new QPushButton(tr("Import recording…"), meetingPage);
+    m_importButton->setObjectName(QStringLiteral("meetingImport"));
+    meetingLayout->addWidget(m_importButton);
+    connect(m_importButton, &QPushButton::clicked, this, &MeetingDialog::importMeeting);
 
     auto *recordActions = new QHBoxLayout;
     m_startButton = new QPushButton(tr("Start recording"), meetingPage);
@@ -763,6 +769,110 @@ void MeetingDialog::startMeeting()
                 QStringLiteral("--title"), m_titleEdit->text().trimmed()}, QStringLiteral("starting"));
 }
 
+void MeetingDialog::importMeeting()
+{
+    if (!m_importButton->isEnabled()) return;
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("meetingImportDialog"));
+    dialog.setWindowTitle(tr("Import meeting recording"));
+    dialog.resize(560, 440);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    auto *source = new QLineEdit(&dialog);
+    source->setObjectName(QStringLiteral("importSource"));
+    auto *browse = new QPushButton(tr("Browse…"), &dialog);
+    auto *sourceRow = new QHBoxLayout;
+    sourceRow->addWidget(source, 1);
+    sourceRow->addWidget(browse);
+    auto *sourceLabel = new QLabel(tr("&Recording"), &dialog);
+    sourceLabel->setBuddy(source);
+    form->addRow(sourceLabel, sourceRow);
+    auto *title = new QLineEdit(&dialog);
+    title->setObjectName(QStringLiteral("importTitle"));
+    title->setMaxLength(160);
+    title->setPlaceholderText(tr("Use recording filename"));
+    form->addRow(tr("Meeting &title"), title);
+    auto *audioTrack = new QSpinBox(&dialog);
+    audioTrack->setObjectName(QStringLiteral("importAudioTrack"));
+    audioTrack->setRange(1, 64);
+    form->addRow(tr("&Audio track"), audioTrack);
+    auto *micTrack = new QSpinBox(&dialog);
+    micTrack->setObjectName(QStringLiteral("importMicrophoneTrack"));
+    micTrack->setRange(0, 64);
+    micTrack->setSpecialValueText(tr("Mixed into audio track"));
+    form->addRow(tr("Separate &microphone track"), micTrack);
+    form->addRow(wrapLabel(tr("Track numbers start at 1. Choose the OBS track containing all voices, or select separate call and microphone tracks."), &dialog));
+    auto *speakers = new QSpinBox(&dialog);
+    speakers->setObjectName(QStringLiteral("importSpeakers"));
+    speakers->setRange(0, 16);
+    speakers->setSpecialValueText(tr("Auto"));
+    auto *speakersLabel = new QLabel(tr("&Speakers (including you)"), &dialog);
+    speakersLabel->setBuddy(speakers);
+    form->addRow(speakersLabel, speakers);
+    connect(micTrack, &QSpinBox::valueChanged, &dialog, [speakersLabel, this](int track) {
+        speakersLabel->setText(track ? tr("Other &speakers") : tr("&Speakers (including you)"));
+    });
+    auto *language = languageCombo(&dialog, QStringLiteral("importLanguage"));
+    selectLanguage(language, languageCode(m_remoteLanguageCombo));
+    form->addRow(tr("Speech &language"), language);
+    auto *output = new QLineEdit(m_outputEdit->text().trimmed(), &dialog);
+    output->setObjectName(QStringLiteral("importOutput"));
+    auto *chooseOutput = new QPushButton(tr("Choose folder…"), &dialog);
+    auto *outputRow = new QHBoxLayout;
+    outputRow->addWidget(output, 1);
+    outputRow->addWidget(chooseOutput);
+    auto *outputLabel = new QLabel(tr("Save &folder"), &dialog);
+    outputLabel->setBuddy(output);
+    form->addRow(outputLabel, outputRow);
+    layout->addLayout(form);
+    auto *error = wrapLabel(QString(), &dialog);
+    error->setObjectName(QStringLiteral("importError"));
+    layout->addWidget(error);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+    auto *submit = buttons->addButton(tr("Import && transcribe"), QDialogButtonBox::AcceptRole);
+    submit->setObjectName(QStringLiteral("importSubmit"));
+    layout->addWidget(buttons);
+    connect(browse, &QPushButton::clicked, &dialog, [source, &dialog, this] {
+        const QString path = QFileDialog::getOpenFileName(&dialog, tr("Choose meeting recording"), QString(),
+            tr("Audio and video files (*.mkv *.mp4 *.mov *.webm *.avi *.flv *.ts *.m4v *.m2ts *.wav *.mp3 *.ogg *.oga *.opus *.m4a *.aac *.flac);;All files (*)"));
+        if (!path.isEmpty()) source->setText(path);
+    });
+    connect(chooseOutput, &QPushButton::clicked, &dialog, [output, &dialog, this] {
+        const QString path = QFileDialog::getExistingDirectory(&dialog, tr("Save meeting transcript"), output->text());
+        if (!path.isEmpty()) output->setText(path);
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        if (!QFileInfo(source->text().trimmed()).isFile()) {
+            error->setText(tr("Choose an existing audio or video recording."));
+        } else if (micTrack->value() == audioTrack->value()) {
+            error->setText(tr("Choose different tracks for the microphone and call audio."));
+        } else if (output->text().trimmed().isEmpty()) {
+            error->setText(tr("Choose a folder for the transcript."));
+        } else {
+            static const QRegularExpression pattern(QStringLiteral("^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$"));
+            const QString code = languageCode(language);
+            if (!code.isEmpty() && !pattern.match(code).hasMatch()) {
+                error->setText(tr("Choose Auto or enter a language code, such as ru or en."));
+                return;
+            }
+            dialog.accept();
+        }
+    });
+    if (dialog.exec() != QDialog::Accepted) return;
+    QStringList arguments{QStringLiteral("import"), QFileInfo(source->text().trimmed()).absoluteFilePath(),
+        QStringLiteral("--output-dir"), output->text().trimmed(),
+        QStringLiteral("--speakers"), QString::number(speakers->value()),
+        QStringLiteral("--title"), title->text().trimmed(),
+        QStringLiteral("--audio-stream"), QString::number(audioTrack->value() - 1),
+        QStringLiteral("--language"), languageCode(language)};
+    if (micTrack->value() > 0) {
+        arguments << QStringLiteral("--microphone-stream") << QString::number(micTrack->value() - 1);
+    }
+    runCommand(arguments, QStringLiteral("queued"));
+}
+
 void MeetingDialog::setupModels()
 {
     const bool processing = m_hasQueueContract ? m_transcriptionActive : m_state == QStringLiteral("processing");
@@ -890,6 +1000,7 @@ void MeetingDialog::updateUi()
     for (QWidget *field : QList<QWidget *>{m_titleEdit, m_micCombo, m_monitorCombo, m_micLanguageCombo, m_remoteLanguageCombo, m_outputEdit, m_speakersSpin, m_browseButton}) {
         field->setEnabled(editable);
     }
+    m_importButton->setEnabled(editable && m_statusKnown);
     m_refreshButton->setEnabled(editable && m_sourcesProcess->state() == QProcess::NotRunning);
     m_setupButton->setEnabled(editable && !processing && QFileInfo::exists(m_runtimeRoot + QStringLiteral("/kwispr-meetings-setup.py")));
     m_startButton->setEnabled(editable && m_statusKnown && m_sourcesLoaded && m_micCombo->currentIndex() >= 0 && m_monitorCombo->currentIndex() >= 0 && !m_outputEdit->text().trimmed().isEmpty());

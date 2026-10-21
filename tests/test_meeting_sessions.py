@@ -201,6 +201,22 @@ class DetachedMeetingTests(unittest.TestCase):
             self.assertEqual((directory/name).stat().st_mode & 0o777,0o600,name)
         self.assertNotIn('token',final)
 
+    def test_detached_import_extracts_and_transcribes_without_capture_devices(self):
+        source = self.root/'OBS video.mkv'
+        source.write_bytes(b'original video')
+        # Import must not need the PulseAudio source enumeration used by recording.
+        (self.bin/'pactl').unlink()
+        self.run_cli('import', str(source), '--speakers', '3', '--audio-stream', '1', '--language', 'en')
+        final = self.wait_state({'complete'})
+        directory = Path(final['session_dir'])
+        self.assertEqual(final['source_kind'], 'media')
+        self.assertEqual(final['speakers'], 3)
+        self.assertTrue((directory/'remote.wav').is_file())
+        self.assertFalse((directory/'microphone.wav').exists())
+        self.assertTrue(Path(final['transcript_path']).is_file())
+        self.assertEqual(source.read_bytes(), b'original video')
+        self.assertEqual(json.loads((directory/'options.json').read_text())['KWISPR_MEETING_REMOTE_LANGUAGE'], 'en')
+
     def test_concurrent_start_only_one_wins(self):
         commands = [subprocess.Popen(self.entry+['start'],env=self.env,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE) for _ in range(2)]
         results = [(process.communicate(timeout=25),process.returncode) for process in commands]

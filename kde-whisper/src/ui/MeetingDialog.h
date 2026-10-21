@@ -47,6 +47,7 @@ private:
     void applyStatus(const QJsonObject &status);
     void runCommand(const QStringList &arguments, const QString &pendingState);
     void startMeeting();
+    void importMeeting();
     void setupModels();
     void openSavedFolder();
     bool saveChoices(bool languagesOnly = false);
@@ -119,6 +120,7 @@ private:
     QPushButton *m_refreshButton;
     QPushButton *m_setupButton;
     QPushButton *m_startButton;
+    QPushButton *m_importButton;
     QPushButton *m_stopButton;
     QPushButton *m_retryButton;
     QPushButton *m_openFolderButton;

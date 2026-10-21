@@ -17,6 +17,8 @@ import wave
 from pathlib import Path
 from .config import allowed_whisper_languages, meeting_language, runtime_dir
 
+from .media import session_tracks
+
 PIPELINE_VERSION = 6
 SHORT_TURN_SECONDS = 4.0
 MODEL_FILES = {
@@ -353,7 +355,7 @@ def _wav_slice(audio, start, end):
 
 def _fingerprint(session_dir, config, session):
     tracks = []
-    for name in ["microphone.wav", "remote.wav"]:
+    for name in sorted(track + ".wav" for track in session_tracks(session)):
         stat = (session_dir / name).stat()
         tracks.append([name, stat.st_size, stat.st_mtime_ns])
     inputs = {"version": PIPELINE_VERSION, "tracks": tracks, "speakers": session.get("speakers", 0),
@@ -376,7 +378,7 @@ def _markdown_literal(text):
 def write_outputs(session_dir, session, rows, names=None, languages=None, language_policy=None, diarization_report=None):
     session_dir = Path(session_dir)
     names = names or {}
-    labels = {"self": "Я"}
+    labels = {} if session.get("source_kind") == "media" and "microphone" not in session_tracks(session) else {"self": "Я"}
     for row in rows:
         for speaker in row["speakers"]:
             if speaker != "self":
@@ -441,7 +443,7 @@ def process_session(session_dir, config, progress_callback=None):
     if diarization.get("signature") != signature:
         diarization = {"signature": signature, "tracks": {}}
     all_rows, track_languages = [], {}
-    for track in ["remote", "microphone"]:
+    for track in session_tracks(session):
         _notify(progress_callback, f"Reading {track} recording…")
         audio = _load_track(session_dir / (track + ".wav"))
         duration = len(audio) / 16000
