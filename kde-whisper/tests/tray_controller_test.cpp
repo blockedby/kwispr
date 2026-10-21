@@ -12,6 +12,7 @@ public:
     int toggleCalls = 0;
     int settingsCalls = 0;
     int meetingCalls = 0;
+    int audioFileCalls = 0;
     int startCalls = 0;
     int stopCalls = 0;
     int retryCalls = 0;
@@ -21,6 +22,7 @@ public:
     void toggleRecording() override { ++toggleCalls; }
     void openSettings() override { ++settingsCalls; }
     void openMeetings() override { ++meetingCalls; }
+    void openAudioFiles() override { ++audioFileCalls; }
     void startLocalStt() override { ++startCalls; state = LocalSttState::Healthy; }
     void stopLocalStt() override { ++stopCalls; state = LocalSttState::Stopped; }
     void retryLastFailed() override { ++retryCalls; }
@@ -57,7 +59,17 @@ void TrayControllerTest::menuContainsRequiredActions()
     QMenu *menu = controller.menu();
 
     QVERIFY(actionByText(menu, QStringLiteral("Toggle Recording")));
-    QVERIFY(actionByText(menu, QStringLiteral("Transcribe…")));
+    auto *meetings = actionByText(menu, QStringLiteral("Meetings…"));
+    auto *files = actionByText(menu, QStringLiteral("Audio && video files…"));
+    QVERIFY(meetings);
+    QVERIFY(files);
+    const auto entries = menu->actions();
+    const int meetingIndex = entries.indexOf(meetings);
+    QVERIFY(meetingIndex > 0);
+    QVERIFY(meetingIndex + 2 < entries.size());
+    QVERIFY(entries.at(meetingIndex - 1)->isSeparator());
+    QCOMPARE(entries.at(meetingIndex + 1), files);
+    QVERIFY(entries.at(meetingIndex + 2)->isSeparator());
     QVERIFY(actionByText(menu, QStringLiteral("Settings")));
     QVERIFY(actionByText(menu, QStringLiteral("Start Local STT")));
     QVERIFY(actionByText(menu, QStringLiteral("Stop Local STT")));
@@ -81,7 +93,8 @@ void TrayControllerTest::actionsCallInjectedServices()
     QMenu *menu = controller.menu();
 
     actionByText(menu, QStringLiteral("Toggle Recording"))->trigger();
-    actionByText(menu, QStringLiteral("Transcribe…"))->trigger();
+    actionByText(menu, QStringLiteral("Meetings…"))->trigger();
+    actionByText(menu, QStringLiteral("Audio && video files…"))->trigger();
     actionByText(menu, QStringLiteral("Settings"))->trigger();
     actionByText(menu, QStringLiteral("Start Local STT"))->trigger();
     actionByText(menu, QStringLiteral("Stop Local STT"))->trigger();
@@ -91,6 +104,7 @@ void TrayControllerTest::actionsCallInjectedServices()
 
     QCOMPARE(actions.toggleCalls, 1);
     QCOMPARE(actions.meetingCalls, 1);
+    QCOMPARE(actions.audioFileCalls, 1);
     QCOMPARE(actions.settingsCalls, 2);
     QCOMPARE(actions.startCalls, 1);
     QCOMPARE(actions.stopCalls, 1);
@@ -142,12 +156,12 @@ void TrayControllerTest::recordingMeetingHasVisibleTrayLabel()
     FakeTrayActions actions;
     TrayController controller(&actions, cacheDir.path());
     controller.setMeetingState(QStringLiteral("recording"));
-    auto *meetingAction = actionByText(controller.menu(), QStringLiteral("Transcribe — Recording…"));
+    auto *meetingAction = actionByText(controller.menu(), QStringLiteral("Meetings — Recording…"));
     QVERIFY(meetingAction);
     meetingAction->trigger();
     QCOMPARE(actions.meetingCalls, 1);
     controller.setMeetingState(QStringLiteral("complete"));
-    QVERIFY(actionByText(controller.menu(), QStringLiteral("Transcribe…")));
+    QVERIFY(actionByText(controller.menu(), QStringLiteral("Meetings…")));
 }
 
 QTEST_MAIN(TrayControllerTest)

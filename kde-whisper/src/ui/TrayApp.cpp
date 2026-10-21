@@ -79,6 +79,18 @@ TrayApp::~TrayApp()
 
 void TrayApp::openMeetings()
 {
+    showTranscriptionDialog();
+    m_meetingDialog->showMeetings();
+}
+
+void TrayApp::openAudioFiles()
+{
+    showTranscriptionDialog();
+    m_meetingDialog->showAudioFiles();
+}
+
+void TrayApp::showTranscriptionDialog()
+{
     if (!m_meetingDialog) {
         m_meetingDialog = new MeetingDialog(m_repoRoot, configFilePath());
         connect(m_meetingDialog, &MeetingDialog::meetingStateChanged, this, [this](const QString &state) {
@@ -242,8 +254,7 @@ void TrayApp::quitApplication()
         return;
     }
     if (m_meetingDialog && m_meetingDialog->audioFilesPending()) {
-        m_meetingDialog->showAudioFiles();
-        openMeetings();
+        openAudioFiles();
         QMessageBox::information(m_meetingDialog, QStringLiteral("Media transcription"),
                                  QStringLiteral("Audio or video files are still being transcribed. Wait for the queue to finish before quitting Kwispr."));
         return;

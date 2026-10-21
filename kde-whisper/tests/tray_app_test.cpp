@@ -8,6 +8,7 @@
 #include <QPointer>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QTabWidget>
 #include <QtTest/QtTest>
 #include <memory>
 
@@ -154,13 +155,29 @@ void TrayAppTest::repeatedOpenMeetingsReusesNonmodalDialog()
     QCOMPARE(dialogs.size(), 1);
     auto *dialog = dialogs.first();
     QVERIFY(!dialog->isModal());
+    auto *tabs = dialog->findChild<QTabWidget *>(QStringLiteral("kwisprTabs"));
+    QVERIFY(tabs);
+    QCOMPARE(tabs->currentIndex(), 0);
+    tray->openAudioFiles();
+    QCOMPARE(tabs->currentIndex(), 1);
     dialog->showMinimized();
     tray->openMeetings();
     QVERIFY(dialog->isVisible());
     QVERIFY(!dialog->isMinimized());
+    QCOMPARE(tabs->currentIndex(), 0);
+    dialog->hide();
+    tray->openAudioFiles();
+    QVERIFY(dialog->isVisible());
+    QCOMPARE(tabs->currentIndex(), 1);
     dialog->hide();
     tray->openMeetings();
     QVERIFY(dialog->isVisible());
+    QCOMPARE(tabs->currentIndex(), 0);
+    int dialogCount = 0;
+    for (QWidget *widget : QApplication::topLevelWidgets()) {
+        if (qobject_cast<MeetingDialog *>(widget)) ++dialogCount;
+    }
+    QCOMPARE(dialogCount, 1);
     dialog->hide();
     QCoreApplication::processEvents();
 }
