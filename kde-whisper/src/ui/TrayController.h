@@ -16,6 +16,7 @@ public:
     virtual void toggleRecording() = 0;
     virtual void openSettings() = 0;
     virtual void openMeetings() = 0;
+    virtual void openAudioFiles() = 0;
     virtual void startLocalStt() = 0;
     virtual void stopLocalStt() = 0;
     virtual void retryLastFailed() = 0;

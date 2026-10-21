@@ -11,12 +11,9 @@ TrayController::TrayController(ITrayActions *actions, QString cacheDir, QObject 
     , m_menu(new QMenu())
 {
     addAction(QStringLiteral("Toggle Recording"), &ITrayActions::toggleRecording);
-    m_meetingsAction = m_menu->addAction(tr("Transcribe…"));
-    connect(m_meetingsAction, &QAction::triggered, this, [this] {
-        if (m_actions) {
-            m_actions->openMeetings();
-        }
-    });
+    m_menu->addSeparator();
+    m_meetingsAction = addAction(tr("Meetings…"), &ITrayActions::openMeetings);
+    addAction(tr("Audio && video files…"), &ITrayActions::openAudioFiles);
     m_menu->addSeparator();
     addAction(QStringLiteral("Settings"), &ITrayActions::openSettings);
     m_menu->addSeparator();
@@ -42,7 +39,7 @@ QMenu *TrayController::menu() const
 void TrayController::setMeetingState(const QString &state)
 {
     const bool recording = state == QStringLiteral("recording") || state == QStringLiteral("starting") || state == QStringLiteral("stopping");
-    m_meetingsAction->setText(recording ? tr("Transcribe — Recording…") : tr("Transcribe…"));
+    m_meetingsAction->setText(recording ? tr("Meetings — Recording…") : tr("Meetings…"));
     m_meetingsAction->setIcon(recording ? QIcon::fromTheme(QStringLiteral("media-record")) : QIcon());
 }
 

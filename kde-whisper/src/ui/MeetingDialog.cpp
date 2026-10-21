@@ -854,6 +854,11 @@ bool MeetingDialog::audioFilesPending() const
     return m_audioFiles->hasPendingWork();
 }
 
+void MeetingDialog::showMeetings()
+{
+    m_tabs->setCurrentIndex(0);
+}
+
 void MeetingDialog::showAudioFiles()
 {
     m_tabs->setCurrentWidget(m_audioFiles);

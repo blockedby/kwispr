@@ -28,6 +28,7 @@ public:
     ~MeetingDialog() override;
     bool recordingActive() const;
     bool audioFilesPending() const;
+    void showMeetings();
     void showAudioFiles();
 
 signals:

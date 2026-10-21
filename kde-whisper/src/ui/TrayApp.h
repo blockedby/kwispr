@@ -29,6 +29,7 @@ public:
     void toggleRecording() override;
     void openSettings() override;
     void openMeetings() override;
+    void openAudioFiles() override;
     void startLocalStt() override;
     void stopLocalStt() override;
     void retryLastFailed() override;
@@ -36,6 +37,8 @@ public:
     LocalSttState localSttState() const override;
 
 private:
+    void showTranscriptionDialog();
+
     QString m_repoRoot;
     QString m_cacheDir;
     std::unique_ptr<ProcessRunner> m_recordingRunner;
