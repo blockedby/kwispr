@@ -32,7 +32,7 @@ protected:
 
 private:
     void updateProcessingHint();
-    struct Job { QString source; int row; QString provider; int audioStream; QString model; QString budget; };
+    struct Job { QString source; int row; QString provider; int audioStream; QString model; QString budget; bool speakerLabels; int speakers; int microphoneStream; };
     void startNext();
     void readOutput();
     void consumeLine(const QByteArray &line);
@@ -52,6 +52,10 @@ private:
     QJsonObject m_result;
     QString m_error;
     QComboBox *m_provider;
+    QComboBox *m_resultMode;
+    QSpinBox *m_microphoneTrack;
+    QSpinBox *m_speakers;
+    QLabel *m_speakersLabel;
     QSpinBox *m_audioTrack;
     QLabel *m_processingHint;
     QProcess *m_process;
