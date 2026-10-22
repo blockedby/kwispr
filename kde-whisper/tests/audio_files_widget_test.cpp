@@ -56,6 +56,8 @@ if source.name.startswith('bad'):
 folder = output / source.stem
 folder.mkdir(parents=True, exist_ok=True)
 text = 'Transcript for ' + source.name
+if source.name == 'speakers.mkv':
+    text = '[00:01] Я: Привет\n[00:03] Собеседник 1: Здравствуйте' if '--speaker-labels' in args else 'No speakers'
 transcript = folder / 'transcript.txt'
 transcript.write_text(text)
 result = {'event':'result','state':'complete','source_path':str(source),
@@ -108,6 +110,7 @@ private slots:
     void chooserOffersObsVideoFiles();
     void streamsPartialProgressAndProcessesQueue();
     void queuedFilesKeepSelectedProviderAndTrack();
+    void speakerModeIsDefaultAndKeepsSeparateTracks();
     void hiddenMeetingWindowKeepsFileJobAndTabsIndependent();
 private:
     QTemporaryDir m_testPaths;
@@ -290,6 +293,48 @@ void AudioFilesWidgetTest::queuedFilesKeepSelectedProviderAndTrack()
     QVERIFY(writeFile(config, "KWISPR_MEETING_PROVIDER=local\n"));
     widget.show();
     QVERIFY(widget.findChild<QLabel *>(QStringLiteral("audioFilesProcessingHint"))->text().contains(QStringLiteral("local")));
+}
+
+void AudioFilesWidgetTest::speakerModeIsDefaultAndKeepsSeparateTracks()
+{
+    Fixture fixture;
+    QVERIFY(fixture.create());
+    AudioFilesWidget widget(fixture.dir.path(), fixture.dir.filePath(QStringLiteral("config.env")),
+        [](const QString &, AudioFilesWidget::FolderOpenCompletion done) { done(true, {}); });
+    widget.resize(700, 800);
+    widget.show();
+    auto *mode = widget.findChild<QComboBox *>(QStringLiteral("audioFilesResultMode"));
+    auto *audio = widget.findChild<QSpinBox *>(QStringLiteral("audioFilesTrack"));
+    auto *mic = widget.findChild<QSpinBox *>(QStringLiteral("audioFilesMicrophoneTrack"));
+    auto *speakers = widget.findChild<QSpinBox *>(QStringLiteral("audioFilesSpeakers"));
+    QCOMPARE(mode->currentData().toString(), QStringLiteral("speakers"));
+    QVERIFY(mic->isVisible());
+    audio->setValue(3);
+    mic->setValue(3);
+    widget.enqueueFiles({fixture.source(QStringLiteral("speakers.mkv"))});
+    QVERIFY(!widget.hasPendingWork());
+    QVERIFY(widget.findChild<QLabel *>(QStringLiteral("audioFilesError"))->isVisible());
+    mic->setValue(2);
+    speakers->setValue(2);
+    widget.enqueueFiles({fixture.source(QStringLiteral("speakers.mkv"))});
+    QTRY_VERIFY(!widget.hasPendingWork());
+    const auto text = widget.findChild<QPlainTextEdit *>(QStringLiteral("audioFilesTranscript"))->toPlainText();
+    QVERIFY(text.contains(QStringLiteral("Собеседник 1")));
+    QVERIFY(text.contains(QStringLiteral("00:03")));
+    QFile calls(fixture.dir.filePath(QStringLiteral("calls.jsonl")));
+    QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto jsonArgs = QJsonDocument::fromJson(calls.readAll().trimmed()).array();
+    QStringList args;
+    for (const auto &value : jsonArgs) args << value.toString();
+    QVERIFY(args.contains(QStringLiteral("--speaker-labels")));
+    QCOMPARE(args.at(args.indexOf(QStringLiteral("--speakers")) + 1), QStringLiteral("2"));
+    QCOMPARE(args.at(args.indexOf(QStringLiteral("--audio-stream")) + 1), QStringLiteral("2"));
+    QCOMPARE(args.at(args.indexOf(QStringLiteral("--microphone-stream")) + 1), QStringLiteral("1"));
+    mode->setFocus();
+    QTest::keyClick(mode, Qt::Key_Down);
+    QCOMPARE(mode->currentData().toString(), QStringLiteral("text"));
+    QVERIFY(!mic->isVisible());
+    QVERIFY(!speakers->isVisible());
 }
 
 void AudioFilesWidgetTest::hiddenMeetingWindowKeepsFileJobAndTabsIndependent()

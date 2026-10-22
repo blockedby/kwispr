@@ -231,6 +231,98 @@ class AudioFilesTest(unittest.TestCase):
                 self.assertEqual(result["text"], "Local Qwen")
                 self.assertEqual(request.call_args.args[1]["KWISPR_MODEL"], "Qwen3-ASR-1.7B")
 
+    def test_speaker_files_use_meeting_queue_export_and_completed_cache(self):
+        from kwispr_meetings import sessions
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._source(root)
+            directory = root / "meeting"
+            directory.mkdir()
+            transcript = directory / "transcript.md"
+            transcript.write_text("**[00:01–00:03] Я**\nПривет\n**[00:03–00:05] Собеседник 1**\nЗдравствуйте\n")
+            transcript_json = directory / "transcript.json"
+            transcript_json.write_text(json.dumps({"speakers":{"self":"Я","speaker_01":"Собеседник 1"}}))
+            session = {"state":"complete", "transcript_path":str(transcript),
+                       "transcript_json":str(transcript_json), "cloud_cost_usd":.03}
+            (directory / "session.json").write_text(json.dumps(session))
+            config = root / "config.env"
+            config.write_text("KWISPR_MEETING_PROVIDER=openrouter\nKWISPR_MEETING_OPENROUTER_KEY=fixture-secret\n")
+            with patch.dict(os.environ, {"KWISPR_CONFIG_FILE":str(config)}, clear=True), \
+                 patch.object(sessions, "import_recording", return_value={"session_dir":str(directory)}) as enqueue, \
+                 patch.object(sessions, "status", return_value={}), \
+                 patch.object(audio_files, "_request_transcription") as local:
+                first = transcribe(source, root / "results", speaker_labels=True, speakers=2, audio_stream=2, microphone_stream=1)
+                second = transcribe(source, root / "results", speaker_labels=True, speakers=2, audio_stream=2, microphone_stream=1, cloud_budget=3)
+            enqueue.assert_called_once()
+            self.assertEqual(enqueue.call_args.args[3:], (2, source.stem, 2, 1))
+            local.assert_not_called()
+            self.assertEqual(first, second)
+            self.assertTrue(first["speaker_labels"])
+            self.assertIn("Собеседник 1", first["text"])
+            self.assertIn("00:03", first["text"])
+            self.assertEqual(first["transcript_path"], str(transcript))
+            self.assertAlmostEqual(first["cloud_cost_usd"], .03)
+            pointer = next((root / "results").glob("*/meeting-job.json"))
+            self.assertNotIn("fixture-secret", pointer.read_text())
+
+    def test_speaker_file_failure_is_not_published_and_explicit_retry_reuses_job(self):
+        from kwispr_meetings import sessions
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._source(root)
+            directory = root / "meeting"
+            directory.mkdir()
+            session_path = directory / "session.json"
+            session_path.write_text(json.dumps({"state":"failed", "message":"API failed; saved audio kept"}))
+            config = root / "config.env"
+            config.write_text("KWISPR_MEETING_PROVIDER=openrouter\nKWISPR_MEETING_OPENROUTER_KEY=fixture-secret\n")
+            with patch.dict(os.environ, {"KWISPR_CONFIG_FILE":str(config)}, clear=True), \
+                 patch.object(sessions, "import_recording", return_value={"session_dir":str(directory)}) as enqueue, \
+                 patch.object(sessions, "status", return_value={}), \
+                 patch.object(sessions, "retry") as retry:
+                with self.assertRaisesRegex(RuntimeError, "API failed"):
+                    transcribe(source, root / "results", speaker_labels=True)
+                retry.assert_not_called()
+                transcript = directory / "transcript.md"; transcript.write_text("[00:01] Собеседник 1: Текст")
+                transcript_json = directory / "transcript.json"; transcript_json.write_text("{}")
+                def recover(*args):
+                    session_path.write_text(json.dumps({"state":"complete","transcript_path":str(transcript),"transcript_json":str(transcript_json)}))
+                retry.side_effect = recover
+                result = transcribe(source, root / "results", speaker_labels=True)
+                self.assertTrue(result["speaker_labels"])
+                retry.assert_called_once()
+                enqueue.assert_called_once()
+                with self.assertRaisesRegex(ConfigError, "different tracks"):
+                    transcribe(source, root / "results", speaker_labels=True, audio_stream=1, microphone_stream=1)
+
+    def test_speaker_import_recovers_manifest_saved_before_pointer_or_queue(self):
+        from kwispr_meetings import sessions
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._source(root)
+            config = root / "config.env"
+            config.write_text("KWISPR_MEETING_PROVIDER=openrouter\nKWISPR_MEETING_OPENROUTER_KEY=fixture-secret\n")
+            def enqueue(*args):
+                directory = Path(args[2]) / "saved-job"
+                directory.mkdir()
+                (directory / "session.json").write_text(json.dumps({"state":"queued", "source_path":str(source),
+                    "audio_stream":0,"microphone_stream":None,"speakers":0}))
+                raise RuntimeError("File worker stopped before pointer publication")
+            def recover(directory, *args):
+                text = directory / "transcript.md"; text.write_text("[00:01] Собеседник 1: Текст")
+                doc = directory / "transcript.json"; doc.write_text("{}")
+                (directory / "session.json").write_text(json.dumps({"state":"complete", "transcript_path":str(text), "transcript_json":str(doc)}))
+            with patch.dict(os.environ, {"KWISPR_CONFIG_FILE":str(config)}, clear=True), \
+                 patch.object(sessions, "import_recording", side_effect=enqueue) as imported, \
+                 patch.object(sessions, "status", return_value={"queue":[],"transcription":None}), \
+                 patch.object(sessions, "retry", side_effect=recover) as retry:
+                with self.assertRaisesRegex(RuntimeError, "before pointer"):
+                    transcribe(source, root / "results", speaker_labels=True)
+                result = transcribe(source, root / "results", speaker_labels=True)
+                self.assertIn("Собеседник 1", result["text"])
+                imported.assert_called_once()
+                retry.assert_called_once()
+
     def test_chunks_preserve_all_samples_and_words(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

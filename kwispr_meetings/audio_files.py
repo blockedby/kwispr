@@ -116,7 +116,8 @@ def _join_text(parts: list[str]) -> str:
 
 
 def transcribe(source_file: str | Path, output_root: str | Path, progress=None, *,
-               provider="meetings", audio_stream=0, cloud_model=None, cloud_budget=None) -> dict:
+               provider="meetings", audio_stream=0, cloud_model=None, cloud_budget=None,
+               speaker_labels=False, speakers=0, microphone_stream=None) -> dict:
     from .config import load_config
     source = Path(source_file).expanduser().resolve(strict=True)
     if not source.is_file():
@@ -128,7 +129,7 @@ def transcribe(source_file: str | Path, output_root: str | Path, progress=None, 
     config = load_config(meeting_overrides=False)
     # An explicitly configured Meetings backend is shared by default. With no
     # meeting provider setting, retain the original file-recognition defaults.
-    if provider != "meetings" or "KWISPR_MEETING_PROVIDER" in config:
+    if speaker_labels or provider != "meetings" or "KWISPR_MEETING_PROVIDER" in config:
         config = load_config()
     if provider != "meetings":
         config["KWISPR_MEETING_PROVIDER"] = provider
@@ -137,6 +138,8 @@ def transcribe(source_file: str | Path, output_root: str | Path, progress=None, 
     if cloud_budget is not None:
         config["KWISPR_MEETING_CLOUD_BUDGET_USD"] = str(cloud_budget)
     validate_meeting_backend(config)
+    if speaker_labels:
+        return _transcribe_speakers(source, output_root, config, audio_stream, microphone_stream, speakers, progress)
     cloud = meeting_provider(config) == "openrouter"
     model = config.get("KWISPR_MEETING_CLOUD_MODEL", "google/gemini-3.8-flash") if cloud else config.get("KWISPR_MODEL", "whisper-large-v3-turbo")
     if cloud:
@@ -212,3 +215,86 @@ def _transcribe_locked(source, source_hash, output_dir, signature, config, progr
     return {"event": "result", "state": "complete", "source_path": str(source), "text": text,
             "transcript_path": str(transcript_path), "transcript_json": str(transcript_json),
             "output_dir": str(output_dir), "processing_provider": meeting_provider(config), "cloud_cost_usd": cost}
+
+
+def _transcribe_speakers(source, output_root, config, audio_stream, microphone_stream, speakers, progress):
+    """Use the normal durable Meetings queue, retaining its speaker/time exports."""
+    from . import sessions
+    from .config import speaker_count
+    count = speaker_count(speakers)
+    if microphone_stream is not None and (type(microphone_stream) is not int or not 0 <= microphone_stream < 64):
+        raise ConfigError("Microphone track must be between 1 and 64.")
+    if microphone_stream == audio_stream:
+        raise ConfigError("Choose different tracks for the microphone and call audio.")
+    options = sessions.transcription_options(config)
+    # The spending limit can change on retry without invalidating paid results.
+    identity_options = {key: value for key, value in options.items() if key != "KWISPR_MEETING_CLOUD_BUDGET_USD"}
+    identity = {"version": 1, "source_sha256": _source_digest(source), "audio_stream": audio_stream,
+                "microphone_stream": microphone_stream, "speakers": count, "options": identity_options}
+    signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    root = Path(output_root).expanduser().resolve() / (_safe_name(source) + "-speakers-" + signature[:12])
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_fd = os.open(root / ".processing.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        pointer_path = root / "meeting-job.json"
+        pointer = read_json(pointer_path, {})
+        directory = None
+        if pointer.get("signature") == signature:
+            directory = Path(pointer["session_dir"])
+        else:
+            # Recover an import published just before the file worker stopped,
+            # even if its pointer was not yet saved. Never enqueue it twice.
+            existing = sorted(root.glob("*/session.json"))
+            if len(existing) > 1:
+                raise RuntimeError("Multiple saved speaker jobs found. Inspect the recording folder before retrying.")
+            if existing:
+                saved = read_json(existing[0], {})
+                if (saved.get("source_path") != str(source) or saved.get("audio_stream") != audio_stream
+                        or saved.get("microphone_stream") != microphone_stream or saved.get("speakers") != count):
+                    raise RuntimeError("Saved speaker job does not match this recording.")
+                directory = existing[0].parent
+            else:
+                result = sessions.import_recording(source, config, str(root), count, source.stem,
+                                                    audio_stream, microphone_stream)
+                directory = Path(result["session_dir"])
+            atomic_json(pointer_path, {"signature": signature, "session_dir": str(directory), **identity})
+        session = read_json(directory / "session.json", {})
+        if not session:
+            raise RuntimeError("Saved speaker job is missing. Keep its recording folder for recovery.")
+        if session.get("state") == "failed" and pointer.get("signature") == signature:
+            sessions.retry(directory, config, count)
+        previous = ""
+        while True:
+            # This also reconciles a stopped worker and advances queued jobs.
+            snapshot = sessions.status()
+            session = read_json(directory / "session.json", {})
+            state = session.get("state")
+            if state == "queued":
+                active = (snapshot.get("queue") or []) + [snapshot.get("transcription")]
+                if not any(isinstance(job, dict) and job.get("session_dir") == str(directory) for job in active):
+                    # An interrupted import may have saved its manifest before
+                    # publishing the queue entry. Resume that same session.
+                    sessions.retry(directory, config, count)
+                    continue
+            if state == "complete":
+                transcript = Path(session["transcript_path"])
+                if not transcript.is_file() or not Path(session["transcript_json"]).is_file():
+                    raise RuntimeError("Speaker job completed without saved transcript files.")
+                return {"event": "result", "state": "complete", "source_path": str(source),
+                        "text": transcript.read_text(encoding="utf-8"),
+                        "transcript_path": str(transcript), "transcript_json": session["transcript_json"],
+                        "output_dir": str(directory), "processing_provider": meeting_provider(config),
+                        "cloud_cost_usd": session.get("cloud_cost_usd"), "speaker_labels": True}
+            if state == "failed":
+                raise RuntimeError(session.get("message") or "Speaker transcription failed; recording and completed work were kept.")
+            if state not in {"queued", "processing"}:
+                raise RuntimeError("Speaker job has an invalid state; saved recording was kept.")
+            message = session.get("message") or "Waiting for speaker transcription…"
+            if progress and message != previous:
+                progress(message, 0, 0)
+                previous = message
+            time.sleep(.5)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)

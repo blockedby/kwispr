@@ -51,6 +51,31 @@ AudioFilesWidget::AudioFilesWidget(QString runtimeRoot, QString configPath, Fold
     m_audioTrack->setObjectName(QStringLiteral("audioFilesTrack"));
     m_audioTrack->setRange(1, 64);
     form->addRow(tr("&Audio track"), m_audioTrack);
+    m_resultMode = new QComboBox(this);
+    m_resultMode->setObjectName(QStringLiteral("audioFilesResultMode"));
+    m_resultMode->addItem(tr("Speakers and timestamps"), QStringLiteral("speakers"));
+    m_resultMode->addItem(tr("Plain text"), QStringLiteral("text"));
+    form->insertRow(0, tr("&Result"), m_resultMode);
+    m_microphoneTrack = new QSpinBox(this);
+    m_microphoneTrack->setObjectName(QStringLiteral("audioFilesMicrophoneTrack"));
+    m_microphoneTrack->setRange(0, 64);
+    m_microphoneTrack->setSpecialValueText(tr("Mixed into audio track"));
+    form->addRow(tr("Separate &microphone track"), m_microphoneTrack);
+    m_speakers = new QSpinBox(this);
+    m_speakers->setObjectName(QStringLiteral("audioFilesSpeakers"));
+    m_speakers->setRange(0, 16);
+    m_speakers->setSpecialValueText(tr("Auto"));
+    m_speakersLabel = new QLabel(tr("&Speakers (including you)"), this);
+    m_speakersLabel->setBuddy(m_speakers);
+    form->addRow(m_speakersLabel, m_speakers);
+    const auto updateMode = [this, form] {
+        const bool labels = m_resultMode->currentData() == QStringLiteral("speakers");
+        form->setRowVisible(m_microphoneTrack, labels);
+        form->setRowVisible(m_speakers, labels);
+        m_speakersLabel->setText(m_microphoneTrack->value() ? tr("Other &speakers") : tr("&Speakers (including you)"));
+    };
+    connect(m_resultMode, &QComboBox::currentIndexChanged, this, updateMode);
+    connect(m_microphoneTrack, &QSpinBox::valueChanged, this, updateMode);
     layout->addLayout(form);
     m_processingHint = new QLabel(this);
     m_processingHint->setObjectName(QStringLiteral("audioFilesProcessingHint"));
@@ -62,6 +87,10 @@ AudioFilesWidget::AudioFilesWidget(QString runtimeRoot, QString configPath, Fold
     m_provider->setCurrentIndex(qMax(0, m_provider->findData(settings.value(QStringLiteral("KWISPR_FILES_PROVIDER"), QStringLiteral("meetings")))));
     m_audioTrack->setValue(settings.value(QStringLiteral("KWISPR_FILES_AUDIO_TRACK"), QStringLiteral("1")).toInt());
     connect(m_provider, &QComboBox::currentIndexChanged, this, &AudioFilesWidget::updateProcessingHint);
+    m_resultMode->setCurrentIndex(qMax(0, m_resultMode->findData(settings.value(QStringLiteral("KWISPR_FILES_RESULT_MODE"), QStringLiteral("speakers")))));
+    m_microphoneTrack->setValue(settings.value(QStringLiteral("KWISPR_FILES_MICROPHONE_TRACK"), QStringLiteral("0")).toInt());
+    m_speakers->setValue(settings.value(QStringLiteral("KWISPR_FILES_SPEAKERS"), QStringLiteral("0")).toInt());
+    updateMode();
     updateProcessingHint();
     auto *saveHint = new QLabel(tr("Transcripts are saved under %1.").arg(m_outputRoot), this);
     saveHint->setObjectName(QStringLiteral("audioFilesSaveHint"));
@@ -164,7 +193,7 @@ void AudioFilesWidget::updateProcessingHint()
             .arg(settings.value(QStringLiteral("KWISPR_MEETING_CLOUD_MODEL"), QStringLiteral("google/gemini-3.8-flash")),
                  settings.value(QStringLiteral("KWISPR_MEETING_CLOUD_BUDGET_USD"), QStringLiteral("1.5"))));
     } else {
-        m_processingHint->setText(tr("Uses local speech recognition. For transcripts with speakers, import the recording in Meetings."));
+        m_processingHint->setText(tr("Uses local speech recognition."));
     }
 }
 
@@ -173,6 +202,13 @@ bool AudioFilesWidget::hasPendingWork() const { return m_running || !m_queue.isE
 void AudioFilesWidget::enqueueFiles(const QStringList &paths)
 {
     if (paths.isEmpty()) return;
+    const bool labels = m_resultMode->currentData() == QStringLiteral("speakers");
+    if (labels && m_microphoneTrack->value() == m_audioTrack->value()) {
+        m_errorLabel->setText(tr("Choose different tracks for the microphone and call audio."));
+        m_errorLabel->show();
+        m_microphoneTrack->setFocus();
+        return;
+    }
     EnvFile settings;
     if (QFileInfo::exists(m_configPath) && !settings.load(m_configPath)) {
         m_errorLabel->setText(tr("Could not read processing settings: %1").arg(settings.errorString()));
@@ -184,6 +220,9 @@ void AudioFilesWidget::enqueueFiles(const QStringList &paths)
         ? settings.value(QStringLiteral("KWISPR_MEETING_PROVIDER"), QStringLiteral("meetings")) : choice;
     const QString model = settings.value(QStringLiteral("KWISPR_MEETING_CLOUD_MODEL"), QStringLiteral("google/gemini-3.8-flash"));
     const QString budget = settings.value(QStringLiteral("KWISPR_MEETING_CLOUD_BUDGET_USD"), QStringLiteral("1.5"));
+    settings.setValue(QStringLiteral("KWISPR_FILES_RESULT_MODE"), m_resultMode->currentData().toString());
+    settings.setValue(QStringLiteral("KWISPR_FILES_MICROPHONE_TRACK"), QString::number(m_microphoneTrack->value()));
+    settings.setValue(QStringLiteral("KWISPR_FILES_SPEAKERS"), QString::number(m_speakers->value()));
     settings.setValue(QStringLiteral("KWISPR_FILES_PROVIDER"), choice);
     settings.setValue(QStringLiteral("KWISPR_FILES_AUDIO_TRACK"), QString::number(m_audioTrack->value()));
     if (!QDir().mkpath(QFileInfo(m_configPath).absolutePath()) || !settings.save(m_configPath)) {
@@ -192,6 +231,8 @@ void AudioFilesWidget::enqueueFiles(const QStringList &paths)
         return;
     }
     updateProcessingHint();
+    m_errorLabel->clear();
+    m_errorLabel->hide();
     int added = 0;
     for (const QString &path : paths) {
         const QFileInfo source(path);
@@ -202,7 +243,7 @@ void AudioFilesWidget::enqueueFiles(const QStringList &paths)
         }
         auto *item = new QListWidgetItem(tr("Queued · %1").arg(source.fileName()), m_jobs);
         item->setToolTip(source.canonicalFilePath());
-        m_queue.enqueue({source.canonicalFilePath(), m_jobs->row(item), provider, m_audioTrack->value() - 1, model, budget});
+        m_queue.enqueue({source.canonicalFilePath(), m_jobs->row(item), provider, m_audioTrack->value() - 1, model, budget, labels, m_speakers->value(), m_microphoneTrack->value() - 1});
         ++added;
     }
     if (added && !m_running) startNext();
@@ -232,6 +273,10 @@ void AudioFilesWidget::startNext()
         QStringLiteral("--audio-stream"), QString::number(m_current.audioStream)};
     if (m_current.provider == QStringLiteral("openrouter")) {
         args << QStringLiteral("--cloud-model") << m_current.model << QStringLiteral("--cloud-budget") << m_current.budget;
+    }
+    if (m_current.speakerLabels) {
+        args << QStringLiteral("--speaker-labels") << QStringLiteral("--speakers") << QString::number(m_current.speakers);
+        if (m_current.microphoneStream >= 0) args << QStringLiteral("--microphone-stream") << QString::number(m_current.microphoneStream);
     }
     m_process->start(QStringLiteral("python3"), args);
     updateActions();
