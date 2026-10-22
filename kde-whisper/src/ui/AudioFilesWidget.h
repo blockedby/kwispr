@@ -6,6 +6,9 @@
 #include <QJsonObject>
 #include <functional>
 
+class QComboBox;
+class QSpinBox;
+class QShowEvent;
 class QLabel;
 class QListWidget;
 class QPlainTextEdit;
@@ -24,8 +27,12 @@ public:
     bool hasPendingWork() const;
     void enqueueFiles(const QStringList &paths);
 
+protected:
+    void showEvent(QShowEvent *event) override;
+
 private:
-    struct Job { QString source; int row; };
+    void updateProcessingHint();
+    struct Job { QString source; int row; QString provider; int audioStream; QString model; QString budget; };
     void startNext();
     void readOutput();
     void consumeLine(const QByteArray &line);
@@ -44,6 +51,9 @@ private:
     QByteArray m_stdoutBuffer;
     QJsonObject m_result;
     QString m_error;
+    QComboBox *m_provider;
+    QSpinBox *m_audioTrack;
+    QLabel *m_processingHint;
     QProcess *m_process;
     QListWidget *m_jobs;
     QPlainTextEdit *m_transcript;

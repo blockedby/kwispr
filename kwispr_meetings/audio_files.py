@@ -1,4 +1,4 @@
-"""Resumable transcription of audio and video files using local Whisper."""
+"""Resumable transcription of audio and video files using local STT or OpenRouter."""
 from __future__ import annotations
 
 import hashlib
@@ -13,7 +13,7 @@ import uuid
 import wave
 from pathlib import Path
 
-from .config import ConfigError, validate_local_backend
+from .config import ConfigError, meeting_provider, validate_meeting_backend
 from .media import convert_audio as _convert
 from .pipeline import _prepare_language_policy, _request_transcription, atomic_json, read_json
 
@@ -115,27 +115,44 @@ def _join_text(parts: list[str]) -> str:
     return " ".join(part.strip() for part in parts if part.strip())
 
 
-def transcribe(source_file: str | Path, output_root: str | Path, progress=None) -> dict:
+def transcribe(source_file: str | Path, output_root: str | Path, progress=None, *,
+               provider="meetings", audio_stream=0, cloud_model=None, cloud_budget=None) -> dict:
     from .config import load_config
     source = Path(source_file).expanduser().resolve(strict=True)
     if not source.is_file():
         raise RuntimeError("Source must be a regular audio file.")
+    if provider not in {"meetings", "local", "openrouter"}:
+        raise ConfigError("Choose Meetings settings, Local STT or OpenRouter for file processing.")
+    if type(audio_stream) is not int or not 0 <= audio_stream < 64:
+        raise ConfigError("Audio track must be between 1 and 64.")
     config = load_config(meeting_overrides=False)
-    validate_local_backend(config)
-    model = config.get("KWISPR_MODEL", "whisper-large-v3-turbo")
-    if not model.startswith("whisper"):
-        raise ConfigError("Audio files require a local Whisper model in KWISPR_MODEL.")
-    # Every imported file uses multilingual RU/EN detection. The local server
-    # reports whether it can enforce the candidate list; refuse a silent loss
-    # of that constraint rather than sending unrestricted audio.
-    config["KWISPR_WHISPER_ALLOWED_LANGUAGES"] = "ru,en"
-    config = _prepare_language_policy(config)
-    if config["_meeting_language_policy"]["effective_allowed_languages"] != "ru,en":
-        raise RuntimeError("Local STT does not advertise RU/EN language restriction. Update or start the local Whisper server.")
+    # An explicitly configured Meetings backend is shared by default. With no
+    # meeting provider setting, retain the original file-recognition defaults.
+    if provider != "meetings" or "KWISPR_MEETING_PROVIDER" in config:
+        config = load_config()
+    if provider != "meetings":
+        config["KWISPR_MEETING_PROVIDER"] = provider
+    if cloud_model is not None:
+        config["KWISPR_MEETING_CLOUD_MODEL"] = cloud_model
+    if cloud_budget is not None:
+        config["KWISPR_MEETING_CLOUD_BUDGET_USD"] = str(cloud_budget)
+    validate_meeting_backend(config)
+    cloud = meeting_provider(config) == "openrouter"
+    model = config.get("KWISPR_MEETING_CLOUD_MODEL", "google/gemini-3.8-flash") if cloud else config.get("KWISPR_MODEL", "whisper-large-v3-turbo")
+    if cloud:
+        config["_meeting_language_policy"] = {"backend": "openrouter", "model": model}
+    else:
+        if model.startswith("whisper"):
+            config["KWISPR_WHISPER_ALLOWED_LANGUAGES"] = "ru,en"
+        config = _prepare_language_policy(config)
+        if model.startswith("whisper") and config["_meeting_language_policy"]["effective_allowed_languages"] != "ru,en":
+            raise RuntimeError("Local STT does not advertise RU/EN language restriction. Update or start the local Whisper server.")
+    config["_audio_stream"] = audio_stream
     source_hash = _source_digest(source)
     signature = hashlib.sha256(json.dumps({"version": CHUNK_VERSION, "source": source_hash,
-        "model": model, "url": config.get("KWISPR_API_URL"), "vocabulary": config.get("KWISPR_VOCABULARY", ""),
-        "languages": "ru,en", "chunk_seconds": MAX_SECONDS, "search_seconds": SEARCH_SECONDS}, sort_keys=True).encode()).hexdigest()
+        "model": model, "provider": meeting_provider(config), "audio_stream": audio_stream,
+        "url": None if cloud else config.get("KWISPR_API_URL"), "vocabulary": config.get("KWISPR_VOCABULARY", ""),
+        "languages": "auto" if cloud else config["_meeting_language_policy"], "chunk_seconds": MAX_SECONDS, "search_seconds": SEARCH_SECONDS}, sort_keys=True).encode()).hexdigest()
     # Changed source or settings start a separate result directory, so an old
     # completed transcript cannot appear to belong to a failed new attempt.
     output_dir = Path(output_root).expanduser().resolve() / (_safe_name(source) + "-" + signature[:12])
@@ -157,31 +174,41 @@ def _transcribe_locked(source, source_hash, output_dir, signature, config, progr
         checkpoint = {"signature": signature, "source_sha256": source_hash, "chunks": {}}
         if progress:
             progress("Decoding audio", 0, 0)
-        _convert(source, wav_path)
+        _convert(source, wav_path, audio_stream=config["_audio_stream"])
         atomic_json(checkpoint_path, checkpoint)
     elif not wav_path.is_file():
-        _convert(source, wav_path)
-    chunks = _plan_chunks(wav_path)
-    with wave.open(str(wav_path), "rb") as reader:
-        for index, chunk in enumerate(chunks):
-            key = f"{chunk['start_frame']}:{chunk['end_frame']}"
-            if key not in checkpoint["chunks"]:
-                answer = _request_transcription(_wav_chunk(reader, chunk["start_frame"], chunk["end_frame"]), config)
-                checkpoint["chunks"][key] = answer
-                atomic_json(checkpoint_path, checkpoint)
-                time.sleep(.05)
-            if progress:
-                progress(f"Transcribing audio: {index + 1}/{len(chunks)}", index + 1, len(chunks))
-    rows = [{"start": round(chunk["start_frame"] / SAMPLE_RATE, 3),
-             "end": round(chunk["end_frame"] / SAMPLE_RATE, 3),
-             **checkpoint["chunks"][f"{chunk['start_frame']}:{chunk['end_frame']}"]} for chunk in chunks]
+        _convert(source, wav_path, audio_stream=config["_audio_stream"])
+    cloud = meeting_provider(config) == "openrouter"
+    cost = None
+    if cloud:
+        from .openrouter import transcribe_file, spent
+        rows = transcribe_file(output_dir, wav_path, config, uuid.uuid4().hex,
+                               (lambda message: progress(message, 0, 0)) if progress else None)
+        cost = spent(output_dir / "openrouter")
+    else:
+        chunks = _plan_chunks(wav_path)
+        with wave.open(str(wav_path), "rb") as reader:
+            for index, chunk in enumerate(chunks):
+                key = f"{chunk['start_frame']}:{chunk['end_frame']}"
+                if key not in checkpoint["chunks"]:
+                    answer = _request_transcription(_wav_chunk(reader, chunk["start_frame"], chunk["end_frame"]), config)
+                    checkpoint["chunks"][key] = answer
+                    atomic_json(checkpoint_path, checkpoint)
+                    time.sleep(.05)
+                if progress:
+                    progress(f"Transcribing audio: {index + 1}/{len(chunks)}", index + 1, len(chunks))
+        rows = [{"start": round(chunk["start_frame"] / SAMPLE_RATE, 3),
+                 "end": round(chunk["end_frame"] / SAMPLE_RATE, 3),
+                 **checkpoint["chunks"][f"{chunk['start_frame']}:{chunk['end_frame']}"]} for chunk in chunks]
     text = _join_text([row["text"] for row in rows])
     transcript_path = output_dir / "transcript.txt"
     transcript_json = output_dir / "transcript.json"
     document = {"schema_version": 1, "source_path": str(source), "source_sha256": source_hash,
-                "text": text, "chunks": rows, "language_policy": config["_meeting_language_policy"]}
+                "text": text, "chunks": rows, "language_policy": config["_meeting_language_policy"],
+                "processing_provider": meeting_provider(config), "audio_stream": config["_audio_stream"],
+                "cloud_cost_usd": cost}
     atomic_json(transcript_json, document)
     _atomic_text(transcript_path, text + "\n")
     return {"event": "result", "state": "complete", "source_path": str(source), "text": text,
             "transcript_path": str(transcript_path), "transcript_json": str(transcript_json),
-            "output_dir": str(output_dir)}
+            "output_dir": str(output_dir), "processing_provider": meeting_provider(config), "cloud_cost_usd": cost}

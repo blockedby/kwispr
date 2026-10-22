@@ -1,4 +1,4 @@
-"""Imported audio contract: local-only requests, decoding, and durable retries."""
+"""Imported audio contract: selected backend/track, decoding, and durable retries."""
 from __future__ import annotations
 
 import json
@@ -133,6 +133,103 @@ class AudioFilesTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("local STT", result.stderr)
                 self.assertFalse((root / "out").exists())
+
+    def test_cloud_files_inherit_meetings_without_local_stt_and_resume_without_rebilling(self):
+        from kwispr_meetings import openrouter as cloud
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._source(root)
+            before = source.read_bytes()
+            config = root / "config.env"
+            config.write_text("KWISPR_BACKEND=openrouter-chat\nKWISPR_MODEL=google/dictation\n"
+                              "KWISPR_MEETING_PROVIDER=openrouter\nKWISPR_MEETING_OPENROUTER_KEY=fixture-secret\n"
+                              "KWISPR_MEETING_CLOUD_MODEL=google/gemini-test\n")
+            def reply(raw, turns, values):
+                self.assertEqual(values["KWISPR_MEETING_CLOUD_MODEL"], "google/gemini-test")
+                self.assertEqual(turns[0]["speakers"], [])
+                self.assertLessEqual(turns[0]["end"], 45)
+                return {"text":json.dumps({"turns":[{"id":"file","text":"Текст записи"}]}),
+                        "finish_reason":"stop","usage":{"cost":.01}}
+            with patch.dict(os.environ, {"KWISPR_CONFIG_FILE":str(config)}, clear=True), \
+                 patch.object(cloud, "_request", side_effect=reply) as request, \
+                 patch.object(audio_files, "_prepare_language_policy") as health, \
+                 patch.object(audio_files, "_request_transcription") as local:
+                first = transcribe(source, root / "results")
+                second = transcribe(source, root / "results")
+                self.assertEqual(request.call_count, 2)
+                self.assertEqual(first, second)
+                self.assertEqual(first["processing_provider"], "openrouter")
+                self.assertAlmostEqual(first["cloud_cost_usd"], .02)
+                health.assert_not_called()
+                local.assert_not_called()
+            document = json.loads(Path(first["transcript_json"]).read_text())
+            self.assertEqual(document["chunks"][0]["start"], 0)
+            self.assertEqual(document["chunks"][0]["end"], document["chunks"][1]["start"])
+            self.assertAlmostEqual(document["chunks"][-1]["end"], 65, places=2)
+            self.assertNotIn("fixture-secret", Path(first["transcript_json"]).read_text())
+            self.assertEqual(source.read_bytes(), before)
+
+    def test_selected_audio_track_is_decoded_and_has_separate_results(self):
+        from kwispr_meetings import openrouter as cloud
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "two tracks.mkv"
+            subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono:d=1",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000:duration=1",
+                "-map", "0:a", "-map", "1:a", "-c:a", "pcm_s16le", str(source)], check=True)
+            config = root / "config.env"
+            config.write_text("KWISPR_MEETING_OPENROUTER_KEY=fixture-secret\n")
+            def reply(raw, turns, values):
+                import io
+                with wave.open(io.BytesIO(raw), "rb") as reader:
+                    pcm = reader.readframes(reader.getnframes())
+                text = "sound" if any(pcm) else "silence"
+                return {"text":json.dumps({"turns":[{"id":"file","text":text}]}),
+                        "finish_reason":"stop","usage":{"cost":.001}}
+            with patch.dict(os.environ, {"KWISPR_CONFIG_FILE":str(config)}, clear=True), \
+                 patch.object(cloud, "_request", side_effect=reply):
+                first = transcribe(source, root / "results", provider="openrouter", audio_stream=0)
+                second = transcribe(source, root / "results", provider="openrouter", audio_stream=1)
+                self.assertEqual((first["text"], second["text"]), ("silence", "sound"))
+                self.assertNotEqual(first["output_dir"], second["output_dir"])
+                with self.assertRaisesRegex(RuntimeError, "no audio track"):
+                    transcribe(source, root / "results", provider="openrouter", audio_stream=2)
+                with self.assertRaises(ConfigError):
+                    transcribe(source, root / "results", provider="openrouter", audio_stream=-1)
+
+    def test_cloud_file_budget_and_unknown_request_preserve_retry_state(self):
+        from kwispr_meetings import openrouter as cloud
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._source(root)
+            config = root / "config.env"
+            config.write_text("KWISPR_MEETING_PROVIDER=openrouter\nKWISPR_MEETING_OPENROUTER_KEY=fixture-secret\n")
+            with patch.dict(os.environ, {"KWISPR_CONFIG_FILE":str(config)}, clear=True), \
+                 patch.object(cloud, "_request", side_effect=TimeoutError("network")) as request:
+                with self.assertRaisesRegex(RuntimeError, "budget"):
+                    transcribe(source, root / "results", cloud_budget=.001)
+                request.assert_not_called()
+                with self.assertRaisesRegex(RuntimeError, "unknown"):
+                    transcribe(source, root / "results")
+                count = request.call_count
+                with self.assertRaisesRegex(RuntimeError, "unknown"):
+                    transcribe(source, root / "results")
+                self.assertEqual(request.call_count, count)
+
+    def test_local_files_accept_non_whisper_stt_models(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._source(root)
+            config = root / "config.env"
+            config.write_text("KWISPR_MEETING_PROVIDER=local\nKWISPR_MEETING_BACKEND=openai-transcriptions\n"
+                              "KWISPR_MEETING_API_URL=http://localhost:19550/v1/audio/transcriptions\n"
+                              "KWISPR_MEETING_MODEL=Qwen3-ASR-1.7B\n")
+            with patch.dict(os.environ, {"KWISPR_CONFIG_FILE":str(config)}, clear=True), \
+                 patch.object(audio_files, "_request_transcription", return_value={"text":"Local Qwen"}) as request:
+                result = transcribe(source, root / "results")
+                self.assertEqual(result["text"], "Local Qwen")
+                self.assertEqual(request.call_args.args[1]["KWISPR_MODEL"], "Qwen3-ASR-1.7B")
 
     def test_chunks_preserve_all_samples_and_words(self):
         with tempfile.TemporaryDirectory() as temporary:

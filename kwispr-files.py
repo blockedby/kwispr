@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Transcribe one imported audio or video file through local Whisper."""
+"""Transcribe one imported audio or video file through local STT or OpenRouter."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,11 @@ def main(argv=None) -> int:
     transcribe = commands.add_parser("transcribe", help="Transcribe one local audio or video file")
     transcribe.add_argument("source_file")
     transcribe.add_argument("--output-dir", default="~/Documents/Kwispr/Transcriptions")
+    transcribe.add_argument("--provider", choices=("meetings", "local", "openrouter"), default="meetings",
+                            help="Use Meetings processing settings by default")
+    transcribe.add_argument("--audio-stream", type=int, default=0, help="Zero-based audio track index")
+    transcribe.add_argument("--cloud-model")
+    transcribe.add_argument("--cloud-budget", type=float)
     args = parser.parse_args(argv)
 
     def progress(message, completed, total):
@@ -21,7 +26,8 @@ def main(argv=None) -> int:
 
     try:
         from kwispr_meetings.audio_files import transcribe as run
-        result = run(args.source_file, args.output_dir, progress)
+        result = run(args.source_file, args.output_dir, progress, provider=args.provider,
+                     audio_stream=args.audio_stream, cloud_model=args.cloud_model, cloud_budget=args.cloud_budget)
     except (OSError, ValueError, RuntimeError) as error:
         message = str(error) or type(error).__name__
         print(message, file=sys.stderr)

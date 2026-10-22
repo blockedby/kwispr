@@ -1,7 +1,12 @@
 #include "ui/AudioFilesWidget.h"
+#include "config/EnvFile.h"
 
 #include <QApplication>
 #include <QClipboard>
+#include <QComboBox>
+#include <QFormLayout>
+#include <QShowEvent>
+#include <QSpinBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -35,9 +40,29 @@ AudioFilesWidget::AudioFilesWidget(QString runtimeRoot, QString configPath, Fold
       m_folderOpener(std::move(folderOpener)), m_process(new QProcess(this))
 {
     auto *layout = new QVBoxLayout(this);
-    auto *intro = new QLabel(tr("Transcribe Telegram voice messages, audio files, and videos such as OBS recordings with local Whisper. For video, the first audio track is used. Files are processed one at a time and saved automatically."), this);
-    intro->setWordWrap(true);
-    layout->addWidget(intro);
+    auto *form = new QFormLayout;
+    m_provider = new QComboBox(this);
+    m_provider->setObjectName(QStringLiteral("audioFilesProvider"));
+    m_provider->addItem(tr("Same as Meetings"), QStringLiteral("meetings"));
+    m_provider->addItem(tr("Local STT"), QStringLiteral("local"));
+    m_provider->addItem(tr("OpenRouter / Gemini"), QStringLiteral("openrouter"));
+    form->addRow(tr("&Processing"), m_provider);
+    m_audioTrack = new QSpinBox(this);
+    m_audioTrack->setObjectName(QStringLiteral("audioFilesTrack"));
+    m_audioTrack->setRange(1, 64);
+    form->addRow(tr("&Audio track"), m_audioTrack);
+    layout->addLayout(form);
+    m_processingHint = new QLabel(this);
+    m_processingHint->setObjectName(QStringLiteral("audioFilesProcessingHint"));
+    m_processingHint->setTextFormat(Qt::PlainText);
+    m_processingHint->setWordWrap(true);
+    layout->addWidget(m_processingHint);
+    EnvFile settings;
+    settings.load(m_configPath);
+    m_provider->setCurrentIndex(qMax(0, m_provider->findData(settings.value(QStringLiteral("KWISPR_FILES_PROVIDER"), QStringLiteral("meetings")))));
+    m_audioTrack->setValue(settings.value(QStringLiteral("KWISPR_FILES_AUDIO_TRACK"), QStringLiteral("1")).toInt());
+    connect(m_provider, &QComboBox::currentIndexChanged, this, &AudioFilesWidget::updateProcessingHint);
+    updateProcessingHint();
     auto *saveHint = new QLabel(tr("Transcripts are saved under %1.").arg(m_outputRoot), this);
     saveHint->setObjectName(QStringLiteral("audioFilesSaveHint"));
     saveHint->setTextFormat(Qt::PlainText);
@@ -122,11 +147,51 @@ AudioFilesWidget::~AudioFilesWidget()
     }
 }
 
+void AudioFilesWidget::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    updateProcessingHint();
+}
+
+void AudioFilesWidget::updateProcessingHint()
+{
+    EnvFile settings;
+    settings.load(m_configPath);
+    QString provider = m_provider->currentData().toString();
+    if (provider == QStringLiteral("meetings")) provider = settings.value(QStringLiteral("KWISPR_MEETING_PROVIDER"), QStringLiteral("local"));
+    if (provider == QStringLiteral("openrouter")) {
+        m_processingHint->setText(tr("Audio is sent to OpenRouter using %1. Budget per file: $%2. Model and key are configured in Meetings.")
+            .arg(settings.value(QStringLiteral("KWISPR_MEETING_CLOUD_MODEL"), QStringLiteral("google/gemini-3.8-flash")),
+                 settings.value(QStringLiteral("KWISPR_MEETING_CLOUD_BUDGET_USD"), QStringLiteral("1.5"))));
+    } else {
+        m_processingHint->setText(tr("Uses local speech recognition. For transcripts with speakers, import the recording in Meetings."));
+    }
+}
+
 bool AudioFilesWidget::hasPendingWork() const { return m_running || !m_queue.isEmpty(); }
 
 void AudioFilesWidget::enqueueFiles(const QStringList &paths)
 {
     if (paths.isEmpty()) return;
+    EnvFile settings;
+    if (QFileInfo::exists(m_configPath) && !settings.load(m_configPath)) {
+        m_errorLabel->setText(tr("Could not read processing settings: %1").arg(settings.errorString()));
+        m_errorLabel->show();
+        return;
+    }
+    const QString choice = m_provider->currentData().toString();
+    const QString provider = choice == QStringLiteral("meetings")
+        ? settings.value(QStringLiteral("KWISPR_MEETING_PROVIDER"), QStringLiteral("meetings")) : choice;
+    const QString model = settings.value(QStringLiteral("KWISPR_MEETING_CLOUD_MODEL"), QStringLiteral("google/gemini-3.8-flash"));
+    const QString budget = settings.value(QStringLiteral("KWISPR_MEETING_CLOUD_BUDGET_USD"), QStringLiteral("1.5"));
+    settings.setValue(QStringLiteral("KWISPR_FILES_PROVIDER"), choice);
+    settings.setValue(QStringLiteral("KWISPR_FILES_AUDIO_TRACK"), QString::number(m_audioTrack->value()));
+    if (!QDir().mkpath(QFileInfo(m_configPath).absolutePath()) || !settings.save(m_configPath)) {
+        m_errorLabel->setText(tr("Could not save processing settings: %1").arg(settings.errorString()));
+        m_errorLabel->show();
+        return;
+    }
+    updateProcessingHint();
     int added = 0;
     for (const QString &path : paths) {
         const QFileInfo source(path);
@@ -137,7 +202,7 @@ void AudioFilesWidget::enqueueFiles(const QStringList &paths)
         }
         auto *item = new QListWidgetItem(tr("Queued · %1").arg(source.fileName()), m_jobs);
         item->setToolTip(source.canonicalFilePath());
-        m_queue.enqueue({source.canonicalFilePath(), m_jobs->row(item)});
+        m_queue.enqueue({source.canonicalFilePath(), m_jobs->row(item), provider, m_audioTrack->value() - 1, model, budget});
         ++added;
     }
     if (added && !m_running) startNext();
@@ -161,8 +226,14 @@ void AudioFilesWidget::startNext()
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     env.insert(QStringLiteral("KWISPR_CONFIG_FILE"), m_configPath);
     m_process->setProcessEnvironment(env);
-    m_process->start(QStringLiteral("python3"), {m_runtimeRoot + QStringLiteral("/kwispr-files.py"),
-        QStringLiteral("transcribe"), m_current.source, QStringLiteral("--output-dir"), m_outputRoot});
+    QStringList args{m_runtimeRoot + QStringLiteral("/kwispr-files.py"),
+        QStringLiteral("transcribe"), m_current.source, QStringLiteral("--output-dir"), m_outputRoot,
+        QStringLiteral("--provider"), m_current.provider,
+        QStringLiteral("--audio-stream"), QString::number(m_current.audioStream)};
+    if (m_current.provider == QStringLiteral("openrouter")) {
+        args << QStringLiteral("--cloud-model") << m_current.model << QStringLiteral("--cloud-budget") << m_current.budget;
+    }
+    m_process->start(QStringLiteral("python3"), args);
     updateActions();
 }
 
@@ -214,7 +285,11 @@ void AudioFilesWidget::finishJob(int exitCode, bool normalExit)
     if (success) {
         item->setText(tr("Complete · %1").arg(QFileInfo(m_current.source).fileName()));
         item->setData(resultRole, m_result);
-        m_status->setText(tr("Transcript saved for %1.").arg(QFileInfo(m_current.source).fileName()));
+        QString message = tr("Transcript saved for %1.").arg(QFileInfo(m_current.source).fileName());
+        if (m_result.value(QStringLiteral("cloud_cost_usd")).isDouble()) {
+            message += tr(" OpenRouter cost: $%1.").arg(m_result.value(QStringLiteral("cloud_cost_usd")).toDouble(), 0, 'f', 3);
+        }
+        m_status->setText(message);
     } else {
         item->setText(tr("Failed · %1").arg(QFileInfo(m_current.source).fileName()));
         const QString reason = !m_error.isEmpty() ? m_error : !stderrText.isEmpty() ? stderrText
