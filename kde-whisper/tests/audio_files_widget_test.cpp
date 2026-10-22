@@ -3,6 +3,8 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QComboBox>
+#include <QSpinBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -105,6 +107,7 @@ private slots:
     void cleanupTestCase();
     void chooserOffersObsVideoFiles();
     void streamsPartialProgressAndProcessesQueue();
+    void queuedFilesKeepSelectedProviderAndTrack();
     void hiddenMeetingWindowKeepsFileJobAndTabsIndependent();
 private:
     QTemporaryDir m_testPaths;
@@ -142,11 +145,8 @@ void AudioFilesWidgetTest::chooserOffersObsVideoFiles()
     const QString source = fixture.source(QStringLiteral("selected OBS recording.mkv"));
     AudioFilesWidget widget(fixture.dir.path(), fixture.dir.filePath(QStringLiteral("config.env")),
                             [](const QString &, AudioFilesWidget::FolderOpenCompletion complete) { complete(true, {}); });
-    bool explainsFirstTrack = false;
-    for (const auto *label : widget.findChildren<QLabel *>()) {
-        explainsFirstTrack |= label->text().contains(QStringLiteral("first audio track"));
-    }
-    QVERIFY(explainsFirstTrack);
+    QCOMPARE(widget.findChild<QComboBox *>(QStringLiteral("audioFilesProvider"))->currentData().toString(), QStringLiteral("meetings"));
+    QCOMPARE(widget.findChild<QSpinBox *>(QStringLiteral("audioFilesTrack"))->value(), 1);
     QVERIFY(!widget.findChild<QLineEdit *>(QStringLiteral("audioFilesOutput")));
     QVERIFY(!widget.findChild<QPushButton *>(QStringLiteral("audioFilesBrowse")));
     QCOMPARE(widget.findChild<QLabel *>(QStringLiteral("audioFilesSaveHint"))->text(),
@@ -242,6 +242,54 @@ void AudioFilesWidgetTest::streamsPartialProgressAndProcessesQueue()
         QCOMPARE(args.at(3).toString(), output);
     }
     QCOMPARE(QJsonDocument::fromJson(lines.first()).array().at(1).toString(), realFirst);
+}
+
+void AudioFilesWidgetTest::queuedFilesKeepSelectedProviderAndTrack()
+{
+    Fixture fixture;
+    QVERIFY(fixture.create());
+    const QString config = fixture.dir.filePath(QStringLiteral("config.env"));
+    QVERIFY(writeFile(config, "KWISPR_MEETING_PROVIDER=openrouter\nKWISPR_MEETING_CLOUD_MODEL=google/test-model\nKWISPR_MEETING_CLOUD_BUDGET_USD=2.5\n"));
+    AudioFilesWidget widget(fixture.dir.path(), config,
+        [](const QString &, AudioFilesWidget::FolderOpenCompletion complete) { complete(true, {}); });
+    widget.resize(650, 700);
+    widget.show();
+    auto *provider = widget.findChild<QComboBox *>(QStringLiteral("audioFilesProvider"));
+    auto *track = widget.findChild<QSpinBox *>(QStringLiteral("audioFilesTrack"));
+    QVERIFY(widget.findChild<QLabel *>(QStringLiteral("audioFilesProcessingHint"))->text().contains(QStringLiteral("google/test-model")));
+    track->setFocus();
+    track->selectAll();
+    QTest::keyClicks(track, "3");
+    widget.enqueueFiles({fixture.source(QStringLiteral("slow first.mkv")), fixture.source(QStringLiteral("second.mkv"))});
+    provider->setFocus();
+    QTest::keyClick(provider, Qt::Key_Down);
+    QCOMPARE(provider->currentData().toString(), QStringLiteral("local"));
+    track->setValue(2);
+    widget.enqueueFiles({fixture.source(QStringLiteral("third.mkv"))});
+    QTRY_VERIFY_WITH_TIMEOUT(!widget.hasPendingWork(), 10000);
+    QFile calls(fixture.dir.filePath(QStringLiteral("calls.jsonl")));
+    QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto lines = calls.readAll().trimmed().split('\n');
+    QCOMPARE(lines.size(), 3);
+    for (int i = 0; i < 3; ++i) {
+        const auto args = QJsonDocument::fromJson(lines.at(i)).array();
+        QCOMPARE(args.at(5).toString(), i < 2 ? QStringLiteral("openrouter") : QStringLiteral("local"));
+        QCOMPARE(args.at(7).toString(), i < 2 ? QStringLiteral("2") : QStringLiteral("1"));
+        if (i < 2) {
+            QCOMPARE(args.at(9).toString(), QStringLiteral("google/test-model"));
+            QCOMPARE(args.at(11).toString(), QStringLiteral("2.5"));
+        }
+    }
+    AudioFilesWidget reopened(fixture.dir.path(), config,
+        [](const QString &, AudioFilesWidget::FolderOpenCompletion complete) { complete(true, {}); });
+    QCOMPARE(reopened.findChild<QComboBox *>(QStringLiteral("audioFilesProvider"))->currentData().toString(), QStringLiteral("local"));
+    QCOMPARE(reopened.findChild<QSpinBox *>(QStringLiteral("audioFilesTrack"))->value(), 2);
+    // Reusing Meetings reads its current saved configuration when the tab opens.
+    provider->setCurrentIndex(0);
+    widget.hide();
+    QVERIFY(writeFile(config, "KWISPR_MEETING_PROVIDER=local\n"));
+    widget.show();
+    QVERIFY(widget.findChild<QLabel *>(QStringLiteral("audioFilesProcessingHint"))->text().contains(QStringLiteral("local")));
 }
 
 void AudioFilesWidgetTest::hiddenMeetingWindowKeepsFileJobAndTabsIndependent()

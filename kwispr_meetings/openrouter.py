@@ -120,10 +120,6 @@ def spent(directory):
 
 def transcribe_track(session_dir,audio,intervals,config,track,offset,token,progress=None):
     from .pipeline import _wav_slice, read_json
-    root = Path(session_dir)/"openrouter"
-    root.mkdir(mode=0o700,exist_ok=True)
-    if any(root.glob("*.attempt")):
-        raise RuntimeError("An OpenRouter request has an unknown outcome. Inspect its saved attempt marker before retrying; no new audio was sent.")
     model = config.get("KWISPR_MEETING_CLOUD_MODEL","google/gemini-3.8-flash")
     language = meeting_language(config,track)
     config = dict(config, _cloud_language=language or "auto")
@@ -145,6 +141,42 @@ def transcribe_track(session_dir,audio,intervals,config,track,offset,token,progr
             "vocabulary":config.get('KWISPR_VOCABULARY','')[:4096],"track":track,"turns":turns,"language":language,
             "audio_sha256":hashlib.sha256(raw).hexdigest()},sort_keys=True).encode()).hexdigest()
         jobs.append({"identity":identity,"turns":turns,"targets":targets,"raw":raw})
+    return _transcribe_jobs(session_dir, jobs, config, token, language, model, progress)
+
+
+def transcribe_file(directory, wav_path, config, token, progress=None):
+    """Plain file transcription shares the paid-request cache and cost ledger."""
+    import io
+    import wave
+    model = config.get("KWISPR_MEETING_CLOUD_MODEL", "google/gemini-3.8-flash")
+    config = dict(config, _cloud_language="auto")
+    jobs = []
+    with wave.open(str(wav_path), "rb") as reader:
+        total = reader.getnframes()
+        for first in range(0, total, 45 * 16000):
+            end = min(total, first + 45 * 16000)
+            reader.setpos(first)
+            buffer = io.BytesIO()
+            with wave.open(buffer, "wb") as writer:
+                writer.setparams(reader.getparams())
+                writer.writeframes(reader.readframes(end - first))
+            raw = buffer.getvalue()
+            turns = [{"id": "file", "start": 0, "end": round((end-first)/16000, 3), "speakers": []}]
+            identity = hashlib.sha256(json.dumps({"version": VERSION, "model": model, "prompt": PROMPT,
+                "vocabulary": config.get("KWISPR_VOCABULARY", "")[:4096], "track": "file", "turns": turns,
+                "language": "", "start_frame": first, "audio_sha256": hashlib.sha256(raw).hexdigest()}, sort_keys=True).encode()).hexdigest()
+            jobs.append({"identity": identity, "raw": raw, "turns": turns,
+                         "targets": [{"start": round(first/16000, 3), "end": round(end/16000, 3)}]})
+    rows, _ = _transcribe_jobs(directory, jobs, config, token, "", model, progress)
+    return rows
+
+
+def _transcribe_jobs(session_dir, jobs, config, token, language, model, progress):
+    from .pipeline import read_json
+    root = Path(session_dir)/"openrouter"
+    root.mkdir(mode=0o700,exist_ok=True)
+    if any(root.glob("*.attempt")):
+        raise RuntimeError("An OpenRouter request has an unknown outcome. Inspect its saved attempt marker before retrying; no new audio was sent.")
     budget = float(config.get('KWISPR_MEETING_CLOUD_BUDGET_USD','1.5'))
     rows = []
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -158,7 +190,7 @@ def transcribe_track(session_dir,audio,intervals,config,track,offset,token,progr
                 except RuntimeError:
                     missing += 1
             if missing and spent(root)+RESERVE*missing>budget:
-                raise RuntimeError("Meeting cloud budget reached. Completed windows were kept; increase the budget to continue.")
+                raise RuntimeError("Cloud budget reached. Completed windows were kept; increase the budget to continue.")
             futures = [pool.submit(_window,root,job,config,token) for job in batch]
             failure = None
             for job,future in zip(batch,futures):
